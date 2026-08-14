@@ -125,6 +125,41 @@ class _AppDrawer extends ConsumerWidget {
         permission: RbacPermissions.gradeRead,
       ),
       _DrawerItem(
+        icon: Icons.menu_book_outlined,
+        label: 'Matières',
+        route: '/subjects',
+        permission: RbacPermissions.gradeRead,
+      ),
+      _DrawerItem(
+        icon: Icons.payments_outlined,
+        label: 'Paiements',
+        route: '/finance',
+        permission: RbacPermissions.paymentRead,
+      ),
+      _DrawerItem(
+        icon: Icons.account_balance_wallet_outlined,
+        label: 'Soldes élèves',
+        route: '/finance/balances',
+        permission: RbacPermissions.paymentRead,
+      ),
+      _DrawerItem(
+        icon: Icons.manage_accounts_outlined,
+        label: 'Utilisateurs',
+        route: '/users',
+        permission: RbacPermissions.userRead,
+      ),
+      _DrawerItem(
+        icon: Icons.upload_file_outlined,
+        label: 'Importer des élèves',
+        route: '/students/import',
+        permission: RbacPermissions.studentCreate,
+      ),
+      _DrawerItem(
+        icon: Icons.domain_outlined,
+        label: 'Établissements',
+        route: '/establishments',
+      ),
+      _DrawerItem(
         icon: Icons.link_outlined,
         label: 'Connexions',
         route: '/connections',

@@ -14,6 +14,7 @@ import '../../shared/models/student_dto.dart';
 import '../../shared/widgets/widgets.dart';
 import '../classrooms/classroom_controller.dart';
 import 'student_controller.dart';
+import 'student_export_dialog.dart';
 
 class StudentsListPage extends ConsumerStatefulWidget {
   const StudentsListPage({super.key});
@@ -60,6 +61,22 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
       appBar: AppBar(
         title: const Text('Élèves'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.download),
+            tooltip: 'Exporter',
+            onPressed: () {
+              showModalBottomSheet<void>(
+                context: context,
+                isScrollControlled: true,
+                useSafeArea: true,
+                shape: const RoundedRectangleBorder(
+                  borderRadius:
+                      BorderRadius.vertical(top: Radius.circular(20)),
+                ),
+                builder: (_) => const StudentExportDialog(),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: 'Rafraîchir',

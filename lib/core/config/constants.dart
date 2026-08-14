@@ -163,6 +163,68 @@ enum AssessmentType {
   const AssessmentType(this.code, this.label);
 }
 
+/// Type de paiement (frais de scolarité, inscription, etc.).
+enum PaymentType {
+  scolarite('SCOLARITE', 'Scolarité'),
+  inscription('INSCRIPTION', 'Inscription'),
+  cantine('CANTEEN', 'Cantine'),
+  transport('TRANSPORT', 'Transport'),
+  activite('ACTIVITE', 'Activités'),
+  autre('AUTRE', 'Autre');
+
+  final String code;
+  final String label;
+  const PaymentType(this.code, this.label);
+
+  static PaymentType? fromCode(String? code) {
+    if (code == null) return null;
+    for (final p in values) {
+      if (p.code == code) return p;
+    }
+    return null;
+  }
+}
+
+/// Méthode de paiement.
+enum PaymentMethod {
+  espece('CASH', 'Espèces'),
+  mobileMoney('MOBILE_MONEY', 'Mobile Money'),
+  cheque('CHEQUE', 'Chèque'),
+  virement('TRANSFER', 'Virement'),
+  carte('CARD', 'Carte');
+
+  final String code;
+  final String label;
+  const PaymentMethod(this.code, this.label);
+
+  static PaymentMethod? fromCode(String? code) {
+    if (code == null) return null;
+    for (final m in values) {
+      if (m.code == code) return m;
+    }
+    return null;
+  }
+}
+
+/// Statut d'un paiement.
+enum PaymentStatus {
+  valide('VALIDATED', 'Validé'),
+  enAttente('PENDING', 'En attente'),
+  annule('CANCELLED', 'Annulé');
+
+  final String code;
+  final String label;
+  const PaymentStatus(this.code, this.label);
+
+  static PaymentStatus? fromCode(String? code) {
+    if (code == null) return null;
+    for (final s in values) {
+      if (s.code == code) return s;
+    }
+    return null;
+  }
+}
+
 /// Groupe sanguin (référentiel médical).
 enum BloodType { aPlus, aMoins, bPlus, bMoins, abPlus, abMoins, oPlus, oMoins, inconnu }
 

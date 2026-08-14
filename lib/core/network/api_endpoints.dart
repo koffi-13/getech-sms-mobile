@@ -39,9 +39,6 @@ class ApiEndpoints {
   static const String establishmentsCurrent = '/establishments/current';
   static const String settingsEstablishment = '/settings/establishment';
 
-  // --- Utilisateurs ---
-  static const String users = '/users';
-
   // --- Élèves ---
   static const String students = '/students';
   static const String studentsExport = '/students/export';
@@ -52,8 +49,14 @@ class ApiEndpoints {
   static const String classrooms = '/classrooms';
   static String classroom(int id) => '/classrooms/$id';
 
+  // --- Utilisateurs ---
+  static const String users = '/users';
+  static String user(int id) => '/users/$id';
+
   // --- Matières ---
   static const String subjects = '/subjects';
+  static String classSubject(int id) => '/class-subjects/$id';
+  static const String classSubjects = '/class-subjects';
 
   // --- Notes ---
   static const String grades = '/grades';
@@ -67,6 +70,7 @@ class ApiEndpoints {
   // --- Finances ---
   static const String financePayments = '/finance/payments';
   static const String financeBalances = '/finance/balances';
+  static String payment(int id) => '/finance/payments/$id';
 
   // --- Tableau de bord ---
   static const String dashboardStats = '/dashboard/stats';

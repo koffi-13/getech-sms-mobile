@@ -7,3 +7,4 @@ export 'classroom_dto.dart';
 export 'grade_dto.dart';
 export 'attendance_dto.dart';
 export 'sync_dto.dart';
+export 'finance_dto.dart';
