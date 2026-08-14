@@ -92,8 +92,8 @@ class _Header extends StatelessWidget {
 
     final subtitleParts = <String>[];
     if (classroom.levelName != null) subtitleParts.add(classroom.levelName!);
-    if (classroom.streamName != null) subtitleParts.add(classroom.streamName!);
-    if (classroom.code != null) subtitleParts.add('#${classroom.code}');
+    if (classroom.cycleName != null) subtitleParts.add(classroom.cycleName!);
+    if (classroom.seriesName != null) subtitleParts.add(classroom.seriesName!);
 
     return Card(
       margin: const EdgeInsets.all(12),
@@ -408,7 +408,7 @@ class _SubjectRow extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
         ),
         child: Text(
-          'Coef. ${subject.coefficient.toStringAsFixed(1)}',
+          'Coef. ${subject.coefficient}',
           style: theme.textTheme.labelSmall?.copyWith(
               color: theme.colorScheme.onTertiaryContainer,
               fontWeight: FontWeight.w600),

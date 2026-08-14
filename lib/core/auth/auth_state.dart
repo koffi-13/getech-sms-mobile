@@ -7,7 +7,7 @@ library;
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../shared/models/auth_dto.dart';
+import '../../shared/models/auth_dto.dart' show LoginRequest, LoginResponse, MeResponse, ChangePasswordRequest, UserDto, EstablishmentDto, RoleBrief;
 import '../../features/connections/connection_state.dart';
 import '../network/api_endpoints.dart';
 import '../network/api_exceptions.dart';
@@ -112,7 +112,7 @@ class AuthNotifier extends Notifier<AuthState> {
         token: login.accessToken,
         user: login.user,
         permissions: login.permissions,
-        roles: login.roles,
+        roles: login.roles.map((r) => r.code).toList(),
         establishmentId: login.establishment?.id,
         isLoading: false,
       );
@@ -132,16 +132,13 @@ class AuthNotifier extends Notifier<AuthState> {
     if (_serverUrl == null || state.token == null) return;
     try {
       final resp = await _dio.get(buildUrl(_serverUrl!, ApiEndpoints.authMe));
-      final data = resp.data as Map<String, dynamic>;
-      final user = UserDto.fromJson(data['user'] as Map<String, dynamic>? ?? data);
-      final perms = List<String>.from(data['permissions'] as List? ?? const []);
-      final roles = List<String>.from(data['roles'] as List? ?? const []);
-      final estId = (data['establishment_id'] as num?)?.toInt();
+      final me = MeResponse.fromJson(
+          Map<String, dynamic>.from(resp.data as Map));
       state = state.copyWith(
-        user: user,
-        permissions: perms,
-        roles: roles,
-        establishmentId: estId,
+        user: me.user,
+        permissions: me.permissions,
+        roles: me.roles.map((r) => r.code).toList(),
+        establishmentId: me.establishment?.id,
         clearError: true,
       );
     } catch (_) {
@@ -152,17 +149,17 @@ class AuthNotifier extends Notifier<AuthState> {
 
   /// Change le mot de passe : `POST /auth/change-password`.
   Future<bool> changePassword({
-    required String oldPassword,
+    required String currentPassword,
     required String newPassword,
   }) async {
     if (_serverUrl == null) return false;
     try {
       await _dio.post(
         buildUrl(_serverUrl!, ApiEndpoints.authChangePassword),
-        data: {
-          'old_password': oldPassword,
-          'new_password': newPassword,
-        },
+        data: ChangePasswordRequest(
+          currentPassword: currentPassword,
+          newPassword: newPassword,
+        ).toJson(),
       );
       return true;
     } on DioException catch (e) {

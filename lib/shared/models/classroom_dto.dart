@@ -1,135 +1,220 @@
-/// DTOs Classes, Matières, Périodes, Années scolaires.
+/// DTOs Classes, Matières, Périodes, Années scolaires — alignés sur les
+/// schémas Pydantic du desktop (schemas.py).
 library;
 
 import '../../core/config/constants.dart';
 import '../../core/utils/formatters.dart';
 
+/// Classe (ClassroomResponse côté serveur).
+///
+/// Champs serveur : {id, name, establishment_id, max_students, is_active,
+/// head_teacher_id, head_teacher_name, level_name, cycle_name,
+/// current_students_count, series_name}.
 class ClassroomDto {
   final int id;
   final String name;
-  final String? code;
-  final int? levelId;
+  final int? establishmentId;
+  final int? maxStudents;
+  final bool isActive;
+  final int? headTeacherId;
+  final String? headTeacherName;
   final String? levelName;
-  final int? streamId;
-  final String? streamName;
-  final int? seriesId;
-  final int? teacherId;
-  final String? teacherName;
-  final int capacity;
-  final int studentCount;
-  final int? schoolYearId;
-  final String? schoolYearName;
+  final String? cycleName;
+  final int? currentStudentsCount;
+  final String? seriesName;
 
   const ClassroomDto({
     required this.id,
     required this.name,
-    this.code,
-    this.levelId,
+    this.establishmentId,
+    this.maxStudents,
+    this.isActive = true,
+    this.headTeacherId,
+    this.headTeacherName,
     this.levelName,
-    this.streamId,
-    this.streamName,
-    this.seriesId,
-    this.teacherId,
-    this.teacherName,
-    this.capacity = 0,
-    this.studentCount = 0,
-    this.schoolYearId,
-    this.schoolYearName,
+    this.cycleName,
+    this.currentStudentsCount,
+    this.seriesName,
   });
+
+  /// Alias de commodité : capacité = max_students.
+  int get capacity => maxStudents ?? 0;
+
+  /// Alias de commodité : effectif = current_students_count.
+  int get studentCount => currentStudentsCount ?? 0;
 
   /// Taux d'occupation = effectif / capacité.
   double get occupancyRate =>
       capacity == 0 ? 0 : (studentCount / capacity).clamp(0, 1);
 
+  /// Titulaire de classe.
+  String get teacherName => headTeacherName ?? '';
+
   factory ClassroomDto.fromJson(Map<String, dynamic> j) => ClassroomDto(
         id: (j['id'] as num).toInt(),
         name: j['name'] as String? ?? '',
-        code: j['code'] as String?,
-        levelId: (j['level_id'] as num?)?.toInt(),
+        establishmentId: (j['establishment_id'] as num?)?.toInt(),
+        maxStudents: (j['max_students'] as num?)?.toInt(),
+        isActive: (j['is_active'] as bool?) ?? true,
+        headTeacherId: (j['head_teacher_id'] as num?)?.toInt(),
+        headTeacherName: j['head_teacher_name'] as String?,
         levelName: j['level_name'] as String?,
-        streamId: (j['stream_id'] as num?)?.toInt(),
-        streamName: j['stream_name'] as String?,
-        seriesId: (j['series_id'] as num?)?.toInt(),
-        teacherId: (j['teacher_id'] as num?)?.toInt(),
-        teacherName: j['teacher_name'] as String?,
-        capacity: (j['capacity'] as num?)?.toInt() ?? 0,
-        studentCount: (j['student_count'] as num?)?.toInt() ?? 0,
-        schoolYearId: (j['school_year_id'] as num?)?.toInt(),
-        schoolYearName: j['school_year_name'] as String?,
+        cycleName: j['cycle_name'] as String?,
+        currentStudentsCount: (j['current_students_count'] as num?)?.toInt(),
+        seriesName: j['series_name'] as String?,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'establishment_id': establishmentId,
+        'max_students': maxStudents,
+        'is_active': isActive,
+        'head_teacher_id': headTeacherId,
+        'head_teacher_name': headTeacherName,
+        'level_name': levelName,
+        'cycle_name': cycleName,
+        'current_students_count': currentStudentsCount,
+        'series_name': seriesName,
+      };
+}
+
+/// Réponse paginée de liste de classes (ClassroomListResponse).
+class ClassroomListResponse {
+  final List<ClassroomDto> items;
+  final int total;
+
+  const ClassroomListResponse({this.items = const [], this.total = 0});
+
+  factory ClassroomListResponse.fromJson(Map<String, dynamic> j) =>
+      ClassroomListResponse(
+        items: (j['items'] as List?)
+                ?.map((e) => ClassroomDto.fromJson(e as Map<String, dynamic>))
+                .toList() ??
+            const [],
+        total: (j['total'] as num?)?.toInt() ?? 0,
+      );
+}
+
+/// Matière (SubjectResponse côté serveur).
+///
+/// Champs serveur : {id, name, code, is_facultative, is_active, domain_id,
+/// domain_name, description}.
+class SubjectDto {
+  final int id;
+  final String name;
+  final String code;
+  final bool isFacultative;
+  final bool isActive;
+  final int? domainId;
+  final String? domainName;
+  final String? description;
+
+  const SubjectDto({
+    required this.id,
+    required this.name,
+    this.code = '',
+    this.isFacultative = false,
+    this.isActive = true,
+    this.domainId,
+    this.domainName,
+    this.description,
+  });
+
+  factory SubjectDto.fromJson(Map<String, dynamic> j) => SubjectDto(
+        id: (j['id'] as num).toInt(),
+        name: j['name'] as String? ?? '',
+        code: j['code'] as String? ?? '',
+        isFacultative: (j['is_facultative'] as bool?) ?? false,
+        isActive: (j['is_active'] as bool?) ?? true,
+        domainId: (j['domain_id'] as num?)?.toInt(),
+        domainName: j['domain_name'] as String?,
+        description: j['description'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
         'code': code,
-        'level_id': levelId,
-        'level_name': levelName,
-        'stream_id': streamId,
-        'stream_name': streamName,
-        'series_id': seriesId,
-        'teacher_id': teacherId,
-        'teacher_name': teacherName,
-        'capacity': capacity,
-        'student_count': studentCount,
-        'school_year_id': schoolYearId,
-        'school_year_name': schoolYearName,
+        'is_facultative': isFacultative,
+        'is_active': isActive,
+        'domain_id': domainId,
+        'domain_name': domainName,
+        'description': description,
       };
 }
 
-class SubjectDto {
-  final int id;
-  final String name;
-  final String? code;
+/// Réponse paginée de liste de matières (SubjectListResponse).
+class SubjectListResponse {
+  final List<SubjectDto> items;
+  final int total;
 
-  const SubjectDto({required this.id, required this.name, this.code});
+  const SubjectListResponse({this.items = const [], this.total = 0});
 
-  factory SubjectDto.fromJson(Map<String, dynamic> j) => SubjectDto(
-        id: (j['id'] as num).toInt(),
-        name: j['name'] as String? ?? '',
-        code: j['code'] as String?,
+  factory SubjectListResponse.fromJson(Map<String, dynamic> j) =>
+      SubjectListResponse(
+        items: (j['items'] as List?)
+                ?.map((e) => SubjectDto.fromJson(e as Map<String, dynamic>))
+                .toList() ??
+            const [],
+        total: (j['total'] as num?)?.toInt() ?? 0,
       );
-
-  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'code': code};
 }
 
-/// Matière affectée à une classe (avec coefficient).
+/// Matière affectée à une classe (ClassSubjectResponse côté serveur).
+///
+/// ⚠️ `coefficient` est un **int** (pas double) côté serveur.
+/// Champs serveur : {id, subject_id, subject_name, subject_code, coefficient,
+/// is_facultative, assigned_teacher_id, assigned_teacher_name}.
 class ClassSubjectDto {
   final int id;
-  final int classroomId;
   final int subjectId;
   final String subjectName;
-  final double coefficient;
-  final int? teacherId;
-  final String? teacherName;
+  final String subjectCode;
+  final int coefficient;
+  final bool isFacultative;
+  final int? assignedTeacherId;
+  final String? assignedTeacherName;
 
   const ClassSubjectDto({
     required this.id,
-    required this.classroomId,
-    required this.subjectId,
-    required this.subjectName,
-    this.coefficient = 1.0,
-    this.teacherId,
-    this.teacherName,
+    this.subjectId = 0,
+    this.subjectName = '',
+    this.subjectCode = '',
+    this.coefficient = 1,
+    this.isFacultative = false,
+    this.assignedTeacherId,
+    this.assignedTeacherName,
+    // Champs de compatibilité (pour le mobile offline)
+    this.classroomId,
   });
+
+  /// Alias de compatibilité : teacherId = assignedTeacherId.
+  int? get teacherId => assignedTeacherId;
+  String? get teacherName => assignedTeacherName;
 
   factory ClassSubjectDto.fromJson(Map<String, dynamic> j) => ClassSubjectDto(
         id: (j['id'] as num).toInt(),
-        classroomId: (j['classroom_id'] as num).toInt(),
-        subjectId: (j['subject_id'] as num).toInt(),
+        subjectId: (j['subject_id'] as num?)?.toInt() ?? 0,
         subjectName: j['subject_name'] as String? ?? '',
-        coefficient: (j['coefficient'] as num?)?.toDouble() ?? 1.0,
-        teacherId: (j['teacher_id'] as num?)?.toInt(),
-        teacherName: j['teacher_name'] as String?,
+        subjectCode: j['subject_code'] as String? ?? '',
+        coefficient: (j['coefficient'] as num?)?.toInt() ?? 1,
+        isFacultative: (j['is_facultative'] as bool?) ?? false,
+        assignedTeacherId: (j['assigned_teacher_id'] as num?)?.toInt(),
+        assignedTeacherName: j['assigned_teacher_name'] as String?,
+        classroomId: (j['classroom_id'] as num?)?.toInt(),
       );
 
   Map<String, dynamic> toJson() => {
         'id': id,
-        'classroom_id': classroomId,
         'subject_id': subjectId,
         'subject_name': subjectName,
+        'subject_code': subjectCode,
         'coefficient': coefficient,
-        'teacher_id': teacherId,
-        'teacher_name': teacherName,
+        'is_facultative': isFacultative,
+        'assigned_teacher_id': assignedTeacherId,
+        'assigned_teacher_name': assignedTeacherName,
+        'classroom_id': classroomId,
       };
 }
 
@@ -150,7 +235,6 @@ class SchoolYearDto {
     this.alternatingWeekStartDate,
   });
 
-  /// Indique si l'année utilise des semaines alternées A/B.
   bool get hasAlternatingWeeks => alternatingWeekStartDate != null;
 
   factory SchoolYearDto.fromJson(Map<String, dynamic> j) => SchoolYearDto(
@@ -173,42 +257,47 @@ class SchoolYearDto {
       };
 }
 
+/// Période (PeriodResponse côté serveur).
+///
+/// ⚠️ `start_date`/`end_date` sont des **strings** (pas datetime) côté serveur.
+/// Champs serveur : {id, name, start_date: str, end_date: str, is_active}.
 class PeriodDto {
   final int id;
   final String name;
-  final int? schoolYearId;
-  final DateTime? startDate;
-  final DateTime? endDate;
-  final double weight;
+  final String? startDate;
+  final String? endDate;
   final bool isActive;
+  // Champs de compatibilité (non dans la réponse serveur de base)
+  final int? schoolYearId;
+  final double weight;
 
   const PeriodDto({
     required this.id,
     required this.name,
-    this.schoolYearId,
     this.startDate,
     this.endDate,
-    this.weight = 1.0,
     this.isActive = false,
+    this.schoolYearId,
+    this.weight = 1.0,
   });
 
   factory PeriodDto.fromJson(Map<String, dynamic> j) => PeriodDto(
         id: (j['id'] as num).toInt(),
         name: j['name'] as String? ?? '',
-        schoolYearId: (j['school_year_id'] as num?)?.toInt(),
-        startDate: DateFormatter.parse(j['start_date'] as String?),
-        endDate: DateFormatter.parse(j['end_date'] as String?),
-        weight: (j['weight'] as num?)?.toDouble() ?? 1.0,
+        startDate: j['start_date'] as String?,
+        endDate: j['end_date'] as String?,
         isActive: (j['is_active'] as bool?) ?? false,
+        schoolYearId: (j['school_year_id'] as num?)?.toInt(),
+        weight: (j['weight'] as num?)?.toDouble() ?? 1.0,
       );
 
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
-        'school_year_id': schoolYearId,
-        'start_date': DateFormatter.toIso(startDate),
-        'end_date': DateFormatter.toIso(endDate),
-        'weight': weight,
+        'start_date': startDate,
+        'end_date': endDate,
         'is_active': isActive,
+        'school_year_id': schoolYearId,
+        'weight': weight,
       };
 }

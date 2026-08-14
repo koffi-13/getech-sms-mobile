@@ -133,7 +133,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
     });
     FocusScope.of(context).unfocus();
     final ok = await ref.read(authProvider.notifier).changePassword(
-          oldPassword: _oldPasswordCtrl.text,
+          currentPassword: _oldPasswordCtrl.text,
           newPassword: _newPasswordCtrl.text,
         );
     if (!mounted) return;

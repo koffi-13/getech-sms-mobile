@@ -1,10 +1,18 @@
-/// Contrôleur du module Tableau de bord : KPIs, alertes, taux d'occupation.
+/// Contrôleur du module Tableau de bord : KPIs (effectifs, paiements, solde dû),
+/// paiements récents et élèves récemment inscrits.
 ///
 /// Expose [dashboardStatsProvider] qui appelle `GET /dashboard/stats` via le
 /// [dioProvider] et désérialise la réponse en [DashboardStatsDto]. Le provider
 /// ne déclenche l'appel que lorsque le serveur est joignable
 /// ([ConnectionState.canReachServer] ; sinon il lève une erreur `offline`
 /// afin que l'UI puisse afficher un message « Mode hors-ligne ».
+///
+/// Aligné sur `DashboardStats` du desktop (schemas.py) :
+/// {total_students, total_classrooms, total_teachers, total_payments (count),
+/// total_balance_due, total_users, recent_payments[], recent_students[]}.
+/// ⚠️ Les champs `studentsBySex`, `classOccupancy`, `absenteeAlerts`,
+/// `overduePayments`, `paymentsToday` ont été retirés du contrat serveur et ne
+/// sont plus exposés par [DashboardStatsDto].
 library;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';

@@ -1,6 +1,11 @@
 /// Page « Saisie des notes » : sélection classe → période → matière (cascade),
 /// liste des évaluations, création d'évaluation (GRADE_EDIT), saisie des notes
-/// par élève avec champ absent + commentaire.
+/// par élève (GradeEntryDto) avec champ absent + commentaire.
+///
+/// Aligné sur le contrat desktop :
+/// - Évaluations : `GET /grades/assessments?class_subject_id=&period_id=`
+/// - Notes : `GET /grades/assessments/{id}/grades` → list[GradeEntryResponse]
+/// - Sauvegarde : `POST /grades/assessments/{id}/grades` {grades: list[dict]}
 ///
 /// RBAC : si l'utilisateur n'a pas la permission GRADE_READ, affiche un
 /// message « Permission insuffisante ».
@@ -83,10 +88,17 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
     final classrooms = ref.watch(classroomsForGradesProvider);
     final periods = ref.watch(periodsProvider);
 
+    final query = (_classSubjectId != null && _periodId != null)
+        ? AssessmentsQuery(
+            classSubjectId: _classSubjectId!,
+            periodId: _periodId!,
+          )
+        : null;
+
     return Scaffold(
-      floatingActionButton: (canEdit && _classSubjectId != null)
+      floatingActionButton: (canEdit && query != null)
           ? FloatingActionButton.extended(
-              onPressed: _showCreateAssessmentSheet,
+              onPressed: () => _showCreateAssessmentSheet(),
               icon: const Icon(Icons.add),
               label: const Text('Nouvelle évaluation'),
             )
@@ -151,25 +163,25 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
           SectionHeader(
             title: 'Évaluations',
             icon: Icons.assignment_outlined,
-            subtitle: _classSubjectId == null
-                ? 'Sélectionnez une matière pour lister ses évaluations.'
+            subtitle: query == null
+                ? 'Sélectionnez une matière et une période pour lister les évaluations.'
                 : null,
           ),
           const SizedBox(height: 8),
-          if (_classSubjectId == null)
+          if (query == null)
             const EmptyState(
-              title: 'Aucune matière sélectionnée',
+              title: 'Aucune matière ou période sélectionnée',
               icon: Icons.book_outlined,
             )
           else
-            ref.watch(assessmentsProvider(_classSubjectId!)).when(
+            ref.watch(assessmentsProvider(query)).when(
                   data: (list) {
                     if (list.isEmpty) {
                       return EmptyState(
                         title: 'Aucune évaluation',
                         message: canEdit
                             ? 'Créez une évaluation avec le bouton « + Nouvelle évaluation ».'
-                            : 'Aucune évaluation pour cette matière.',
+                            : 'Aucune évaluation pour cette matière/période.',
                         icon: Icons.assignment_late_outlined,
                       );
                     }
@@ -177,7 +189,11 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
                       children: list
                           .map((a) => _AssessmentCard(
                                 assessment: a,
+                                canEdit: canEdit,
                                 onTap: () => _openGradeEntry(a),
+                                onDelete: canEdit
+                                    ? () => _confirmDelete(a)
+                                    : null,
                               ))
                           .toList(),
                     );
@@ -186,8 +202,7 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
                       const AppLoading(label: 'Chargement des évaluations…'),
                   error: (e, _) => AppErrorWidget(
                     message: e.toString(),
-                    onRetry: () =>
-                        ref.invalidate(assessmentsProvider(_classSubjectId!)),
+                    onRetry: () => ref.invalidate(assessmentsProvider(query)),
                   ),
                 ),
         ],
@@ -196,14 +211,14 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
   }
 
   void _showCreateAssessmentSheet() {
-    if (_classSubjectId == null) return;
+    if (_classSubjectId == null || _periodId == null) return;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
       builder: (_) => _CreateAssessmentSheet(
         classSubjectId: _classSubjectId!,
-        defaultPeriodId: _periodId,
+        periodId: _periodId!,
       ),
     );
   }
@@ -214,6 +229,51 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
       isScrollControlled: true,
       showDragHandle: true,
       builder: (_) => _GradeEntrySheet(assessment: assessment),
+    );
+  }
+
+  Future<void> _confirmDelete(AssessmentDto assessment) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Supprimer l\'évaluation'),
+        content: Text(
+            'Supprimer « ${assessment.name} » ? Les notes saisies seront perdues.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Annuler'),
+          ),
+          FilledButton.tonal(
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.red.shade50,
+              foregroundColor: Colors.red.shade700,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Supprimer'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await ref.read(gradeControllerProvider).deleteAssessment(assessment.id);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Évaluation supprimée.')),
+        );
+      }
+    } on ApiException catch (e) {
+      _showError(e.message);
+    } catch (e) {
+      _showError('Erreur : $e');
+    }
+  }
+
+  void _showError(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), backgroundColor: Colors.red.shade700),
     );
   }
 }
@@ -298,7 +358,7 @@ class _ClassSubjectField extends ConsumerWidget {
               .map((c) => DropdownMenuItem(
                     value: c,
                     child: Text(
-                      '${c.subjectName} (coef. ${c.coefficient.toStringAsFixed(1)})',
+                      '${c.subjectName} (coef. ${c.coefficient})',
                       overflow: TextOverflow.ellipsis,
                     ),
                   ))
@@ -335,12 +395,23 @@ class _DisabledField extends StatelessWidget {
 }
 
 class _AssessmentCard extends StatelessWidget {
-  const _AssessmentCard({required this.assessment, required this.onTap});
+  const _AssessmentCard({
+    required this.assessment,
+    required this.onTap,
+    required this.canEdit,
+    this.onDelete,
+  });
   final AssessmentDto assessment;
   final VoidCallback onTap;
+  final bool canEdit;
+  final VoidCallback? onDelete;
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final progress = assessment.totalStudents == 0
+        ? null
+        : assessment.gradesEnteredCount / assessment.totalStudents;
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: InkWell(
@@ -353,12 +424,12 @@ class _AssessmentCard extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.primaryContainer,
+                  color: theme.colorScheme.primaryContainer,
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Icon(
                   Icons.assignment_outlined,
-                  color: Theme.of(context).colorScheme.onPrimaryContainer,
+                  color: theme.colorScheme.onPrimaryContainer,
                   size: 20,
                 ),
               ),
@@ -368,29 +439,56 @@ class _AssessmentCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      assessment.title,
-                      style: Theme.of(context).textTheme.titleSmall,
+                      assessment.name.isEmpty
+                          ? '(sans nom)'
+                          : assessment.name,
+                      style: theme.textTheme.titleSmall,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
                     const SizedBox(height: 2),
                     Wrap(
                       spacing: 8,
+                      runSpacing: 2,
                       children: [
-                        _Chip('${assessment.type.label}'),
+                        if (assessment.assessmentTypeName.isNotEmpty)
+                          _Chip(assessment.assessmentTypeName),
+                        _Chip('Max ${assessment.maxScore.toStringAsFixed(0)}'),
+                        if (assessment.dateTaken != null &&
+                            assessment.dateTaken!.isNotEmpty)
+                          _Chip(DateFormatter.date(
+                              DateFormatter.parse(assessment.dateTaken))),
                         _Chip(
-                            'Max ${assessment.maxScore.toStringAsFixed(0)}'),
-                        _Chip(
-                            'Coef. ${assessment.coefficient.toStringAsFixed(1)}'),
-                        if (assessment.date != null)
-                          _Chip(DateFormatter.date(assessment.date!)),
+                          '${assessment.gradesEnteredCount}/${assessment.totalStudents} saisies',
+                        ),
                       ],
                     ),
+                    if (progress != null) ...[
+                      const SizedBox(height: 6),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: LinearProgressIndicator(
+                          value: progress.clamp(0.0, 1.0),
+                          minHeight: 4,
+                          backgroundColor:
+                              theme.colorScheme.surfaceContainerHighest,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
+              const SizedBox(width: 4),
+              if (canEdit && onDelete != null)
+                IconButton(
+                  tooltip: 'Supprimer',
+                  visualDensity: VisualDensity.compact,
+                  icon: Icon(Icons.delete_outline,
+                      size: 20, color: Colors.red.shade400),
+                  onPressed: onDelete,
+                ),
               Icon(Icons.chevron_right,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant),
+                  color: theme.colorScheme.onSurfaceVariant),
             ],
           ),
         ),
@@ -420,14 +518,17 @@ class _Chip extends StatelessWidget {
 }
 
 /// Bottom sheet de création d'évaluation (RBAC GRADE_EDIT).
+///
+/// Champs serveur (AssessmentCreateRequest) : {class_subject_id, period_id,
+/// name, assessment_type_id, max_score, date_taken}.
 class _CreateAssessmentSheet extends ConsumerStatefulWidget {
   const _CreateAssessmentSheet({
     required this.classSubjectId,
-    this.defaultPeriodId,
+    required this.periodId,
   });
 
   final int classSubjectId;
-  final int? defaultPeriodId;
+  final int periodId;
 
   @override
   ConsumerState<_CreateAssessmentSheet> createState() =>
@@ -436,16 +537,16 @@ class _CreateAssessmentSheet extends ConsumerStatefulWidget {
 
 class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> {
   final _formKey = GlobalKey<FormState>();
-  final _titleCtrl = TextEditingController();
-  AssessmentType _type = AssessmentType.devoir;
+  final _nameCtrl = TextEditingController();
+  final _typeIdCtrl = TextEditingController(text: '1');
   DateTime? _date = DateTime.now();
   double _maxScore = defaultMaxScore;
-  double _coefficient = 1.0;
   bool _saving = false;
 
   @override
   void dispose() {
-    _titleCtrl.dispose();
+    _nameCtrl.dispose();
+    _typeIdCtrl.dispose();
     super.dispose();
   }
 
@@ -467,33 +568,46 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
             children: [
               Text('Nouvelle évaluation',
                   style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 4),
+              Text(
+                'class_subject #${widget.classSubjectId} • période #${widget.periodId}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
               const SizedBox(height: 16),
               TextFormField(
-                controller: _titleCtrl,
+                controller: _nameCtrl,
                 decoration: const InputDecoration(
-                  labelText: 'Titre *',
+                  labelText: 'Nom *',
+                  hintText: 'ex : Devoir 1',
                   border: OutlineInputBorder(),
                   isDense: true,
                 ),
                 textCapitalization: TextCapitalization.sentences,
                 validator: (v) =>
-                    (v == null || v.trim().isEmpty) ? 'Titre requis' : null,
+                    (v == null || v.trim().isEmpty) ? 'Nom requis' : null,
               ),
               const SizedBox(height: 12),
-              DropdownButtonFormField<AssessmentType>(
-                value: _type,
+              TextFormField(
+                controller: _typeIdCtrl,
                 decoration: const InputDecoration(
-                  labelText: 'Type',
+                  labelText: 'Type d\'évaluation (ID) *',
+                  hintText: 'ex : 1',
                   border: OutlineInputBorder(),
                   isDense: true,
                 ),
-                items: AssessmentType.values
-                    .map((t) => DropdownMenuItem(
-                          value: t,
-                          child: Text(t.label),
-                        ))
-                    .toList(),
-                onChanged: (t) => setState(() => _type = t ?? _type),
+                keyboardType: TextInputType.number,
+                validator: (v) {
+                  final n = int.tryParse(v ?? '');
+                  if (n == null || n <= 0) return 'ID type invalide';
+                  return null;
+                },
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Astuce : Devoir=1, Composition=2, Interrogation=3, TP=4 (selon le référentiel serveur).',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
               ),
               const SizedBox(height: 12),
               InkWell(
@@ -509,7 +623,7 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
                 },
                 child: InputDecorator(
                   decoration: const InputDecoration(
-                    labelText: 'Date',
+                    labelText: 'Date de l\'évaluation',
                     border: OutlineInputBorder(),
                     isDense: true,
                   ),
@@ -517,30 +631,13 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
                 ),
               ),
               const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: _NumberStepper(
-                      label: 'Note maximale',
-                      value: _maxScore,
-                      min: 1,
-                      max: 100,
-                      step: 1,
-                      onChanged: (v) => setState(() => _maxScore = v),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _NumberStepper(
-                      label: 'Coefficient',
-                      value: _coefficient,
-                      min: 0.5,
-                      max: 20,
-                      step: gradeStep,
-                      onChanged: (v) => setState(() => _coefficient = v),
-                    ),
-                  ),
-                ],
+              _NumberStepper(
+                label: 'Note maximale',
+                value: _maxScore,
+                min: 1,
+                max: 100,
+                step: 1,
+                onChanged: (v) => setState(() => _maxScore = v),
               ),
               const SizedBox(height: 20),
               FilledButton.icon(
@@ -566,13 +663,14 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
     setState(() => _saving = true);
     try {
       await ref.read(gradeControllerProvider).createAssessment(
-            classSubjectId: widget.classSubjectId,
-            title: _titleCtrl.text.trim(),
-            type: _type,
-            date: _date,
-            maxScore: _maxScore,
-            coefficient: _coefficient,
-            periodId: widget.defaultPeriodId,
+            AssessmentCreateRequest(
+              classSubjectId: widget.classSubjectId,
+              periodId: widget.periodId,
+              name: _nameCtrl.text.trim(),
+              assessmentTypeId: int.parse(_typeIdCtrl.text.trim()),
+              maxScore: _maxScore,
+              dateTaken: DateFormatter.toIso(_date),
+            ),
           );
       if (mounted) {
         Navigator.of(context).pop();
@@ -656,6 +754,10 @@ class _NumberStepper extends StatelessWidget {
 
 /// Bottom sheet de saisie des notes d'une évaluation : un élève par ligne,
 /// champ numérique (0–maxScore, pas 0.5) + case « Absent » + commentaire.
+///
+/// Utilise [GradeEntryDto] (aligné sur GradeEntryResponse serveur) :
+/// {student_id, student_name, student_matricule, grade_id, value, is_absent,
+/// comment, is_locked}.
 class _GradeEntrySheet extends ConsumerStatefulWidget {
   const _GradeEntrySheet({required this.assessment});
   final AssessmentDto assessment;
@@ -668,7 +770,7 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
   /// Brouillons de notes indexés par `studentId`. Initialisés paresseusement
   /// à partir de la première réponse de l'API et conservés entre les rebuilds
   /// pour ne pas perdre les saisies en cours.
-  final Map<int, GradeDto> _drafts = {};
+  final Map<int, GradeEntryDto> _drafts = {};
   bool _saving = false;
 
   @override
@@ -692,7 +794,9 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
               children: [
                 Expanded(
                   child: Text(
-                    widget.assessment.title,
+                    widget.assessment.name.isEmpty
+                        ? '(sans nom)'
+                        : widget.assessment.name,
                     style: Theme.of(context).textTheme.titleLarge,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
@@ -702,7 +806,11 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
             ),
             const SizedBox(height: 4),
             Text(
-              '${widget.assessment.type.label} • Max ${widget.assessment.maxScore.toStringAsFixed(0)} • Coef. ${widget.assessment.coefficient.toStringAsFixed(1)}',
+              [
+                if (widget.assessment.assessmentTypeName.isNotEmpty)
+                  widget.assessment.assessmentTypeName,
+                'Max ${widget.assessment.maxScore.toStringAsFixed(0)}',
+              ].join(' • '),
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const Divider(height: 24),
@@ -767,14 +875,19 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
     final grades = _drafts.values.toList();
     setState(() => _saving = true);
     try {
-      await ref
+      final resp = await ref
           .read(gradeControllerProvider)
           .saveGrades(widget.assessment.id, grades);
       if (mounted) {
         Navigator.of(context).pop();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-              content: Text('${grades.length} note(s) enregistrée(s).')),
+            content: Text(
+              resp.skippedCount > 0
+                  ? '${resp.savedCount} note(s) enregistrée(s), ${resp.skippedCount} ignorée(s).'
+                  : '${resp.savedCount} note(s) enregistrée(s).',
+            ),
+          ),
         );
       }
     } on ApiException catch (e) {
@@ -795,7 +908,8 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
 }
 
 /// Ligne de saisie d'une note : nom + matricule de l'élève, champ numérique
-/// (0–maxScore, snap au pas 0.5) et case « Absent » qui désactive le champ.
+/// (0–maxScore, snap au pas 0.5), case « Absent » qui désactive le champ,
+/// et champ commentaire. Badge « verrouillé » si `is_locked`.
 ///
 /// Le [TextEditingController] est géré dans un [State] dédié pour conserver
 /// la position du curseur entre les rebuilds et synchroniser le texte quand
@@ -807,31 +921,35 @@ class _GradeRow extends StatefulWidget {
     required this.onChanged,
   });
 
-  final GradeDto grade;
+  final GradeEntryDto grade;
   final double maxScore;
-  final ValueChanged<GradeDto> onChanged;
+  final ValueChanged<GradeEntryDto> onChanged;
 
   @override
   State<_GradeRow> createState() => _GradeRowState();
 }
 
 class _GradeRowState extends State<_GradeRow> {
-  late final TextEditingController _ctrl;
+  late final TextEditingController _valueCtrl;
+  late final TextEditingController _commentCtrl;
 
   @override
   void initState() {
     super.initState();
-    _ctrl = TextEditingController(text: _formattedValue);
-    _ctrl.addListener(_onCtrlChanged);
+    _valueCtrl = TextEditingController(text: _formattedValue);
+    _commentCtrl = TextEditingController(text: widget.grade.comment ?? '');
+    _valueCtrl.addListener(_onValueCtrlChanged);
+    _commentCtrl.addListener(_onCommentCtrlChanged);
   }
 
-  String get _formattedValue => widget.grade.isAbsent || widget.grade.value == null
-      ? ''
-      : widget.grade.value!.toStringAsFixed(2);
+  String get _formattedValue =>
+      widget.grade.isAbsent || widget.grade.value == null
+          ? ''
+          : widget.grade.value!.toStringAsFixed(2);
 
-  void _onCtrlChanged() {
+  void _onValueCtrlChanged() {
     if (widget.grade.isAbsent) return; // Champ désactivé.
-    final v = _ctrl.text;
+    final v = _valueCtrl.text;
     final parsed = double.tryParse(v.replaceAll(',', '.'));
     final snapped = parsed == null
         ? null
@@ -841,15 +959,26 @@ class _GradeRowState extends State<_GradeRow> {
     }
   }
 
-  GradeDto _copyWith({double? value, bool? isAbsent}) => GradeDto(
-        id: widget.grade.id,
-        assessmentId: widget.grade.assessmentId,
+  void _onCommentCtrlChanged() {
+    if (widget.grade.comment != _commentCtrl.text) {
+      widget.onChanged(_copyWith(comment: _commentCtrl.text));
+    }
+  }
+
+  GradeEntryDto _copyWith({
+    double? value,
+    bool? isAbsent,
+    String? comment,
+  }) =>
+      GradeEntryDto(
         studentId: widget.grade.studentId,
         studentName: widget.grade.studentName,
-        matricule: widget.grade.matricule,
+        studentMatricule: widget.grade.studentMatricule,
+        gradeId: widget.grade.gradeId,
         value: value,
         isAbsent: isAbsent ?? widget.grade.isAbsent,
-        comments: widget.grade.comments,
+        comment: comment ?? widget.grade.comment,
+        isLocked: widget.grade.isLocked,
       );
 
   @override
@@ -858,71 +987,132 @@ class _GradeRowState extends State<_GradeRow> {
     // Resynchronise le texte uniquement quand l'état « Absent » bascule :
     // on évite ainsi de perturber le curseur pendant la frappe.
     if (oldWidget.grade.isAbsent != widget.grade.isAbsent) {
-      _ctrl.text = _formattedValue;
+      _valueCtrl.text = _formattedValue;
     }
   }
 
   @override
   void dispose() {
-    _ctrl.removeListener(_onCtrlChanged);
-    _ctrl.dispose();
+    _valueCtrl.removeListener(_onValueCtrlChanged);
+    _commentCtrl.removeListener(_onCommentCtrlChanged);
+    _valueCtrl.dispose();
+    _commentCtrl.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final locked = widget.grade.isLocked;
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
       child: Padding(
         padding: const EdgeInsets.all(12),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(widget.grade.studentName,
-                      style: Theme.of(context).textTheme.titleSmall,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis),
-                  if (widget.grade.matricule != null)
-                    Text(widget.grade.matricule!,
-                        style: Theme.of(context).textTheme.bodySmall),
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            SizedBox(
-              width: 90,
-              child: TextField(
-                controller: _ctrl,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-                enabled: !widget.grade.isAbsent,
-                decoration: InputDecoration(
-                  prefixText: '/ ${widget.maxScore.toStringAsFixed(0)}  ',
-                  isDense: true,
-                  border: const OutlineInputBorder(),
-                ),
-                textAlign: TextAlign.center,
-              ),
-            ),
-            const SizedBox(width: 8),
-            Column(
-              mainAxisSize: MainAxisSize.min,
+            Row(
               children: [
-                Checkbox(
-                  value: widget.grade.isAbsent,
-                  onChanged: (v) {
-                    final absent = v ?? false;
-                    // On préserve `value` pour pouvoir revenir en arrière
-                    // (décocher « Absent » restaure la note saisie).
-                    widget.onChanged(
-                        _copyWith(value: widget.grade.value, isAbsent: absent));
-                  },
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              widget.grade.studentName,
+                              style: theme.textTheme.titleSmall,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (locked)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.grey.shade300,
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.lock,
+                                      size: 11, color: Colors.grey.shade700),
+                                  const SizedBox(width: 2),
+                                  Text(
+                                    'Verrouillé',
+                                    style: theme.textTheme.labelSmall?.copyWith(
+                                      color: Colors.grey.shade700,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                      if (widget.grade.studentMatricule.isNotEmpty)
+                        Text(widget.grade.studentMatricule,
+                            style: theme.textTheme.bodySmall),
+                    ],
+                  ),
                 ),
-                const Text('Abs', style: TextStyle(fontSize: 11)),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 90,
+                  child: TextField(
+                    controller: _valueCtrl,
+                    keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true),
+                    enabled: !widget.grade.isAbsent && !locked,
+                    decoration: InputDecoration(
+                      prefixText: '/ ${widget.maxScore.toStringAsFixed(0)}  ',
+                      isDense: true,
+                      border: const OutlineInputBorder(),
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Checkbox(
+                      value: widget.grade.isAbsent,
+                      onChanged: locked
+                          ? null
+                          : (v) {
+                              final absent = v ?? false;
+                              // On préserve `value` pour pouvoir revenir en
+                              // arrière (décocher « Absent » restaure la note
+                              // saisie). Si on coche Absent, value=null côté
+                              // serveur.
+                              widget.onChanged(_copyWith(
+                                  value: absent ? null : widget.grade.value,
+                                  isAbsent: absent));
+                            },
+                    ),
+                    const Text('Abs', style: TextStyle(fontSize: 11)),
+                  ],
+                ),
               ],
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _commentCtrl,
+              enabled: !locked,
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: 'Commentaire (optionnel)',
+                border: const OutlineInputBorder(),
+                prefixIcon: const Icon(Icons.comment_outlined, size: 18),
+                contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 10, vertical: 10),
+              ),
+              style: theme.textTheme.bodySmall,
+              maxLines: 1,
             ),
           ],
         ),

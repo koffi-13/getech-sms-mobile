@@ -275,7 +275,7 @@ class _SubjectTile extends StatelessWidget {
                       ),
                       overflow: TextOverflow.ellipsis,
                     ),
-                    if (subject.code != null && subject.code!.isNotEmpty) ...[
+                    if (subject.code.isNotEmpty) ...[
                       const SizedBox(height: 2),
                       Text(
                         'Code : ${subject.code}',

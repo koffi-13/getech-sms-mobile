@@ -365,7 +365,7 @@ class _ClassSubjectCardState extends ConsumerState<_ClassSubjectCard> {
   void initState() {
     super.initState();
     _coefCtrl = TextEditingController(
-      text: widget.item.coefficient.toStringAsFixed(1),
+      text: widget.item.coefficient.toString(),
     );
   }
 
@@ -386,10 +386,10 @@ class _ClassSubjectCardState extends ConsumerState<_ClassSubjectCard> {
         );
       }
       // Restaure la valeur initiale.
-      _coefCtrl.text = widget.item.coefficient.toStringAsFixed(1);
+      _coefCtrl.text = widget.item.coefficient.toString();
       return;
     }
-    if ((value - widget.item.coefficient).abs() < 0.01) return; // Inchangé.
+    if ((value - widget.item.coefficient.toDouble()).abs() < 0.5) return; // Inchangé.
     setState(() => _isSaving = true);
     try {
       await ref.read(subjectRepositoryProvider).updateClassSubject(

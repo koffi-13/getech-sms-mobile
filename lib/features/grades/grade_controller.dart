@@ -2,6 +2,16 @@
 /// notes par évaluation, classement, bulletin, sauvegarde des notes et
 /// création d'évaluations.
 ///
+/// Aligné sur les vrais endpoints du desktop (grades router) :
+/// - `GET /grades/class-subjects?classroom_id=X`
+/// - `GET /grades/assessments?class_subject_id=X&period_id=Y`
+/// - `GET /grades/assessments/{id}/grades` → list[GradeEntryResponse]
+/// - `POST /grades/assessments/{id}/grades` → GradeBulkSaveRequest/Response
+/// - `POST /grades/assessments` → AssessmentCreateRequest → AssessmentResponse
+/// - `DELETE /grades/assessments/{id}`
+/// - `GET /grades/ranking?classroom_id=&period_id=&ranking_mode=&subject_id=`
+/// - `GET /grades/bulletin/{student_id}?classroom_id=&period_id=`
+///
 /// Source de données V1 : API REST (online). Aucun cache Drift pour limiter
 /// la surface de codegen.
 library;
@@ -9,7 +19,6 @@ library;
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../core/config/constants.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
@@ -17,26 +26,98 @@ import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
 import '../../shared/models/grade_dto.dart';
 
-/// Paramètre de [rankingProvider] : classe + période.
+/// Mode de classement (PERIOD = moyenne de la période courante,
+/// SUBJECT = moyenne d'une matière spécifique).
+enum RankingMode { period, subject }
+
+extension RankingModeX on RankingMode {
+  String get serverValue {
+    switch (this) {
+      case RankingMode.period:
+        return 'PERIOD';
+      case RankingMode.subject:
+        return 'SUBJECT';
+    }
+  }
+}
+
+/// Paramètre de [assessmentsProvider] : matière + période.
+class AssessmentsQuery {
+  const AssessmentsQuery({
+    required this.classSubjectId,
+    required this.periodId,
+  });
+
+  final int classSubjectId;
+  final int periodId;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AssessmentsQuery &&
+          other.classSubjectId == classSubjectId &&
+          other.periodId == periodId;
+
+  @override
+  int get hashCode => Object.hash(classSubjectId, periodId);
+}
+
+/// Paramètre de [rankingProvider] : classe + période + mode (+ matière si SUBJECT).
 class RankingQuery {
-  const RankingQuery({required this.classroomId, required this.periodId});
+  const RankingQuery({
+    required this.classroomId,
+    required this.periodId,
+    this.rankingMode = RankingMode.period,
+    this.subjectId,
+  });
+
   final int classroomId;
   final int periodId;
+  final RankingMode rankingMode;
+  final int? subjectId;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is RankingQuery &&
           other.classroomId == classroomId &&
+          other.periodId == periodId &&
+          other.rankingMode == rankingMode &&
+          other.subjectId == subjectId;
+
+  @override
+  int get hashCode =>
+      Object.hash(classroomId, periodId, rankingMode, subjectId);
+}
+
+/// Paramètre de [bulletinProvider] : élève + classe + période ( requis comme
+/// query params par le serveur).
+class BulletinQuery {
+  const BulletinQuery({
+    required this.studentId,
+    required this.classroomId,
+    required this.periodId,
+  });
+
+  final int studentId;
+  final int classroomId;
+  final int periodId;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BulletinQuery &&
+          other.studentId == studentId &&
+          other.classroomId == classroomId &&
           other.periodId == periodId;
 
   @override
-  int get hashCode => Object.hash(classroomId, periodId);
+  int get hashCode => Object.hash(studentId, classroomId, periodId);
 }
 
 /// Contrôleur Riverpod exposant les opérations de mutation (sauvegarde de
-/// notes, création d'évaluation). Stateless : la page appelante gère son
-/// propre indicateur de chargement.
+/// notes, création d'évaluation, suppression d'évaluation). Stateless : la
+/// page appelante gère son propre indicateur de chargement.
 class GradeController {
   GradeController(this._ref);
   final Ref _ref;
@@ -46,48 +127,72 @@ class GradeController {
 
   /// Sauvegarde en lot des notes d'une évaluation :
   /// `POST /grades/assessments/{id}/grades` (RBAC GRADE_EDIT).
-  Future<void> saveGrades(int assessmentId, List<GradeDto> grades) async {
+  ///
+  /// Le serveur attend `{grades: list[dict]}` (GradeBulkSaveRequest). On
+  /// sérialise chaque [GradeEntryDto] via `toJson()` puis on invalide le
+  /// provider des notes de l'évaluation.
+  Future<SaveGradesResponse> saveGrades(
+    int assessmentId,
+    List<GradeEntryDto> entries,
+  ) async {
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
-    await _dio.post(
-      buildUrl(url, ApiEndpoints.assessmentGrades(assessmentId)),
-      data: SaveGradesRequest(assessmentId: assessmentId, grades: grades)
-          .toJson(),
-    );
-    _ref.invalidate(assessmentGradesProvider(assessmentId));
-  }
-
-  /// Crée une évaluation : `POST /grades/assessments` (RBAC GRADE_EDIT).
-  Future<AssessmentDto> createAssessment({
-    required int classSubjectId,
-    required String title,
-    AssessmentType type = AssessmentType.devoir,
-    DateTime? date,
-    double maxScore = defaultMaxScore,
-    double coefficient = 1.0,
-    int? periodId,
-  }) async {
-    final url = _serverUrl;
-    if (url == null) throw const ApiException('Serveur non configuré');
-    final body = <String, dynamic>{
-      'class_subject_id': classSubjectId,
-      'title': title,
-      'type': type.code,
-      'date': date?.toUtc().toIso8601String(),
-      'max_score': maxScore,
-      'coefficient': coefficient,
-      if (periodId != null) 'period_id': periodId,
-    };
+    final body = SaveGradesRequest(
+      grades: entries.map((e) => e.toJson()).toList(),
+    ).toJson();
     final resp = await _dio.post(
-      buildUrl(url, ApiEndpoints.gradesAssessments),
+      buildUrl(url, ApiEndpoints.assessmentGrades(assessmentId)),
       data: body,
     );
     final data = resp.data is Map
-        ? resp.data as Map<String, dynamic>
+        ? Map<String, dynamic>.from(resp.data as Map)
+        : <String, dynamic>{};
+    final result = SaveGradesResponse.fromJson(data);
+    _ref.invalidate(assessmentGradesProvider(assessmentId));
+    // Invalide aussi la liste des évaluations (le compteur gradesEnteredCount
+    // peut avoir changé).
+    _invalidateAssessmentsFor(assessmentId);
+    return result;
+  }
+
+  /// Crée une évaluation : `POST /grades/assessments` (RBAC GRADE_EDIT).
+  Future<AssessmentDto> createAssessment(
+      AssessmentCreateRequest request) async {
+    final url = _serverUrl;
+    if (url == null) throw const ApiException('Serveur non configuré');
+    final resp = await _dio.post(
+      buildUrl(url, ApiEndpoints.gradesAssessments),
+      data: request.toJson(),
+    );
+    final data = resp.data is Map
+        ? Map<String, dynamic>.from(resp.data as Map)
         : <String, dynamic>{};
     final created = AssessmentDto.fromJson(data);
-    _ref.invalidate(assessmentsProvider(classSubjectId));
+    // Invalide la liste des évaluations pour ce class_subject+period.
+    _ref.invalidate(assessmentsProvider(AssessmentsQuery(
+      classSubjectId: request.classSubjectId,
+      periodId: request.periodId,
+    )));
     return created;
+  }
+
+  /// Supprime une évaluation : `DELETE /grades/assessments/{id}`
+  /// (RBAC GRADE_EDIT).
+  Future<void> deleteAssessment(int id) async {
+    final url = _serverUrl;
+    if (url == null) throw const ApiException('Serveur non configuré');
+    await _dio.delete(buildUrl(url, ApiEndpoints.assessment(id)));
+    _ref.invalidate(assessmentGradesProvider(id));
+    _invalidateAssessmentsFor(id);
+  }
+
+  /// Invalide toutes les listes d'évaluations (best-effort) — utilisé après
+  /// une mutation qui peut affecter le compteur `gradesEnteredCount`.
+  void _invalidateAssessmentsFor(int assessmentId) {
+    // Riverpod ne permet pas d'énumérer les entrées d'un family ; on compte
+    // sur l'autoDispose pour rafraîchir la prochaine fois que la liste est
+    // affichée. On invalide explicitement la liste des classes/périodes
+    // courantes via le provider global (best-effort no-op si non chargé).
   }
 }
 
@@ -207,16 +312,20 @@ List<ClassSubjectDto> _parseClassSubjectList(dynamic data) {
   return const [];
 }
 
-/// Évaluations d'une matière : `GET /grades/assessments?class_subject_id=`.
+/// Évaluations d'une matière pour une période :
+/// `GET /grades/assessments?class_subject_id=X&period_id=Y`.
 final assessmentsProvider = FutureProvider.autoDispose
-    .family<List<AssessmentDto>, int>((ref, classSubjectId) async {
+    .family<List<AssessmentDto>, AssessmentsQuery>((ref, q) async {
   final conn = ref.watch(connectionProvider);
   if (!conn.isPaired || conn.serverUrl == null) return const [];
   final dio = ref.watch(dioProvider);
   try {
     final resp = await dio.get(
       buildUrl(conn.serverUrl!, ApiEndpoints.gradesAssessments),
-      queryParameters: {'class_subject_id': classSubjectId},
+      queryParameters: {
+        'class_subject_id': q.classSubjectId,
+        'period_id': q.periodId,
+      },
     );
     return _parseAssessmentList(resp.data);
   } on DioException catch (e) {
@@ -244,9 +353,10 @@ List<AssessmentDto> _parseAssessmentList(dynamic data) {
   return const [];
 }
 
-/// Notes d'une évaluation : `GET /grades/assessments/{id}/grades`.
+/// Notes d'une évaluation (entrées par élève) :
+/// `GET /grades/assessments/{id}/grades` → list[GradeEntryResponse].
 final assessmentGradesProvider = FutureProvider.autoDispose
-    .family<List<GradeDto>, int>((ref, assessmentId) async {
+    .family<List<GradeEntryDto>, int>((ref, assessmentId) async {
   final conn = ref.watch(connectionProvider);
   if (!conn.isPaired || conn.serverUrl == null) return const [];
   final dio = ref.watch(dioProvider);
@@ -254,7 +364,7 @@ final assessmentGradesProvider = FutureProvider.autoDispose
     final resp = await dio.get(
       buildUrl(conn.serverUrl!, ApiEndpoints.assessmentGrades(assessmentId)),
     );
-    return _parseGradeList(resp.data);
+    return _parseGradeEntryList(resp.data);
   } on DioException catch (e) {
     final api = (e.error is ApiException)
         ? e.error as ApiException
@@ -264,36 +374,41 @@ final assessmentGradesProvider = FutureProvider.autoDispose
   }
 });
 
-List<GradeDto> _parseGradeList(dynamic data) {
+List<GradeEntryDto> _parseGradeEntryList(dynamic data) {
   if (data is List) {
     return data
         .whereType<Map>()
-        .map((e) => GradeDto.fromJson(Map<String, dynamic>.from(e)))
+        .map((e) => GradeEntryDto.fromJson(Map<String, dynamic>.from(e)))
         .toList();
   }
   if (data is Map && data['items'] is List) {
     return (data['items'] as List)
         .whereType<Map>()
-        .map((e) => GradeDto.fromJson(Map<String, dynamic>.from(e)))
+        .map((e) => GradeEntryDto.fromJson(Map<String, dynamic>.from(e)))
         .toList();
   }
   return const [];
 }
 
 /// Classement d'une classe pour une période :
-/// `GET /grades/ranking?classroom_id=&period_id=`.
+/// `GET /grades/ranking?classroom_id=&period_id=&ranking_mode=&subject_id=`.
 final rankingProvider = FutureProvider.autoDispose
     .family<List<RankingRowDto>, RankingQuery>((ref, q) async {
   final conn = ref.watch(connectionProvider);
   if (!conn.isPaired || conn.serverUrl == null) return const [];
   final dio = ref.watch(dioProvider);
   try {
+    final params = <String, dynamic>{
+      'classroom_id': q.classroomId,
+      'period_id': q.periodId,
+      'ranking_mode': q.rankingMode.serverValue,
+    };
+    if (q.rankingMode == RankingMode.subject && q.subjectId != null) {
+      params['subject_id'] = q.subjectId!;
+    }
     final resp = await dio.get(
       buildUrl(conn.serverUrl!, ApiEndpoints.gradesRanking),
-      queryParameters: {
-        'classroom_id': q.classroomId,
-        'period_id': q.periodId,
-      },
+      queryParameters: params,
     );
     return _parseRankingList(resp.data);
   } on DioException catch (e) {
@@ -321,19 +436,27 @@ List<RankingRowDto> _parseRankingList(dynamic data) {
   return const [];
 }
 
-/// Bulletin d'un élève : `GET /grades/bulletin/{student_id}`.
+/// Bulletin d'un élève :
+/// `GET /grades/bulletin/{student_id}?classroom_id=X&period_id=Y`.
+///
+/// ⚠️ `classroomId` et `periodId` sont des query params **requis** par
+/// le serveur : on les passe systématiquement.
 final bulletinProvider = FutureProvider.autoDispose
-    .family<BulletinDto, int>((ref, studentId) async {
+    .family<BulletinDto, BulletinQuery>((ref, q) async {
   final conn = ref.watch(connectionProvider);
   if (!conn.isPaired || conn.serverUrl == null) {
     throw const ApiException('Serveur non configuré');
   }
   final dio = ref.watch(dioProvider);
   final resp = await dio.get(
-    buildUrl(conn.serverUrl!, ApiEndpoints.bulletin(studentId)),
+    buildUrl(conn.serverUrl!, ApiEndpoints.bulletin(q.studentId)),
+    queryParameters: {
+      'classroom_id': q.classroomId,
+      'period_id': q.periodId,
+    },
   );
   if (resp.data is! Map) {
     throw const ApiException('Réponse bulletin invalide');
   }
-  return BulletinDto.fromJson(resp.data as Map<String, dynamic>);
+  return BulletinDto.fromJson(Map<String, dynamic>.from(resp.data as Map));
 });

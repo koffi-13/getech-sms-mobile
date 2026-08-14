@@ -1,7 +1,10 @@
-/// Page Tableau de bord : KPIs, répartition par sexe, taux d'occupation des
-/// classes, alertes d'absentéisme et paiements en retard.
+/// Page Tableau de bord : KPIs (effectifs, classes, enseignants, utilisateurs,
+/// paiements, solde dû), paiements récents et élèves récemment inscrits.
 ///
-/// Données fournies par [dashboardStatsProvider] (GET /dashboard/stats).
+/// Aligné sur `DashboardStats` du desktop (schemas.py) :
+/// {total_students, total_classrooms, total_teachers, total_payments (count),
+/// total_balance_due, total_users, recent_payments[], recent_students[]}.
+///
 /// Le bouton "Synchroniser" de l'AppBar déclenche [SyncEngine.syncNow] puis
 /// rafraîchit les statistiques. Si le serveur est injoignable, un bandeau
 /// « Mode hors-ligne » est affiché en lieu et place du contenu.
@@ -130,7 +133,7 @@ class _SyncButtonState extends ConsumerState<_SyncButton> {
   }
 }
 
-/// Contenu complet du tableau de bord (KPIs + sections).
+/// Contenu complet du tableau de bord (KPIs + sections récentes).
 class _DashboardContent extends StatelessWidget {
   const _DashboardContent({
     required this.stats,
@@ -154,16 +157,9 @@ class _DashboardContent extends StatelessWidget {
           ),
         _KpiGrid(stats: stats),
         const SizedBox(height: 16),
-        _SexDistributionCard(
-          studentsBySex: stats.studentsBySex,
-          total: stats.totalStudents,
-        ),
+        _RecentPaymentsCard(payments: stats.recentPayments),
         const SizedBox(height: 16),
-        _ClassOccupancyCard(items: stats.classOccupancy),
-        const SizedBox(height: 16),
-        _AbsenteeAlertsCard(items: stats.absenteeAlerts),
-        const SizedBox(height: 16),
-        _OverduePaymentsCard(items: stats.overduePayments),
+        _RecentStudentsCard(students: stats.recentStudents),
         const SizedBox(height: 8),
         Text(
           'Devise : $defaultCurrency',
@@ -207,7 +203,7 @@ class _OfflineBanner extends StatelessWidget {
   }
 }
 
-/// Grille 2 colonnes de KPI cards.
+/// Grille 2 colonnes de KPI cards (6 tuiles).
 class _KpiGrid extends StatelessWidget {
   const _KpiGrid({required this.stats});
   final DashboardStatsDto stats;
@@ -243,14 +239,20 @@ class _KpiGrid extends StatelessWidget {
           color: Colors.indigo,
         ),
         KpiCard(
-          label: 'Paiements du jour',
-          value: MoneyFormatter.compact(stats.paymentsToday),
+          label: 'Utilisateurs',
+          value: '${stats.totalUsers}',
+          icon: Icons.manage_accounts,
+          color: Colors.deepPurple,
+        ),
+        KpiCard(
+          label: 'Paiements',
+          value: '${stats.totalPayments}',
           icon: Icons.payments,
           color: Colors.green,
         ),
         KpiCard(
           label: 'Solde dû',
-          value: MoneyFormatter.compact(stats.outstandingBalance),
+          value: MoneyFormatter.compact(stats.totalBalanceDue),
           icon: Icons.account_balance_wallet,
           color: Colors.red.shade700,
         ),
@@ -259,133 +261,137 @@ class _KpiGrid extends StatelessWidget {
   }
 }
 
-/// Carte "Répartition par sexe" : barre horizontale proportionnelle M/F.
-class _SexDistributionCard extends StatelessWidget {
-  const _SexDistributionCard({
-    required this.studentsBySex,
-    required this.total,
-  });
-
-  final Map<String, int> studentsBySex;
-  final int total;
+/// Carte "Paiements récents" : liste des derniers paiements enregistrés.
+class _RecentPaymentsCard extends StatelessWidget {
+  const _RecentPaymentsCard({required this.payments});
+  final List<DashboardRecentPaymentDto> payments;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    // Accepte à la fois les codes courts ('M'/'F') et les libellés longs
-    // retournés par certaines variantes de l'API.
-    final masculin = studentsBySex['M'] ?? studentsBySex['Masculin'] ?? 0;
-    final feminin = studentsBySex['F'] ?? studentsBySex['Féminin'] ?? 0;
-
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const SectionHeader(
-              title: 'Répartition par sexe',
-              icon: Icons.pie_chart_outline,
+            SectionHeader(
+              title: 'Paiements récents',
+              icon: Icons.receipt_long_outlined,
+              subtitle: '${payments.length} paiement(s) récent(s)',
             ),
-            const SizedBox(height: 8),
-            if (masculin == 0 && feminin == 0)
-              Text(
-                'Aucune donnée disponible.',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
+            const SizedBox(height: 4),
+            if (payments.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: EmptyState(
+                  title: 'Aucun paiement récent',
+                  message: 'Les derniers paiements apparaîtront ici.',
+                  icon: Icons.receipt_long_outlined,
                 ),
               )
             else
-              ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: SizedBox(
-                  height: 22,
-                  child: Row(
-                    children: [
-                      if (masculin > 0)
-                        Expanded(
-                          flex: masculin,
-                          child: Container(
-                            color: Colors.blue,
-                            alignment: Alignment.center,
-                            child: Text(
-                              '$masculin',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        ),
-                      if (feminin > 0)
-                        Expanded(
-                          flex: feminin,
-                          child: Container(
-                            color: Colors.pink,
-                            alignment: Alignment.center,
-                            child: Text(
-                              '$feminin',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
+              ...payments.map((p) => _PaymentTile(p: p)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PaymentTile extends StatelessWidget {
+  const _PaymentTile({required this.p});
+  final DashboardRecentPaymentDto p;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final status = PaymentStatus.fromCode(p.status);
+    return ListTile(
+      dense: true,
+      contentPadding: const EdgeInsets.symmetric(vertical: 4),
+      leading: CircleAvatar(
+        backgroundColor: Colors.green.withValues(alpha: 0.14),
+        child: const Icon(Icons.payments, color: Colors.green, size: 20),
+      ),
+      title: Row(
+        children: [
+          Expanded(
+            child: Text(
+              MoneyFormatter.format(p.amount, withSymbol: false),
+              style: theme.textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.w700,
+                color: Colors.green.shade700,
               ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                _LegendDot(color: Colors.blue, label: 'Garçons ($masculin)'),
-                const SizedBox(width: 16),
-                _LegendDot(color: Colors.pink, label: 'Filles ($feminin)'),
-                const Spacer(),
-                Text(
-                  'Total : $total',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
             ),
-          ],
-        ),
+          ),
+          if (status != null)
+            _PaymentStatusBadge(status: status),
+        ],
       ),
+      subtitle: Wrap(
+        spacing: 8,
+        runSpacing: 2,
+        children: [
+          if (p.method != null && p.method!.isNotEmpty)
+            Text(
+              PaymentMethod.fromCode(p.method)?.label ?? p.method!,
+              style: theme.textTheme.bodySmall,
+            ),
+          if (p.receiptNumber != null && p.receiptNumber!.isNotEmpty)
+            Text(
+              'Reçu : ${p.receiptNumber}',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          Text(
+            p.paymentDate == null
+                ? '—'
+                : DateFormatter.relative(p.paymentDate),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+      onTap: p.studentId == null
+          ? null
+          : () => context.push('/students/${p.studentId}'),
     );
   }
 }
 
-class _LegendDot extends StatelessWidget {
-  const _LegendDot({required this.color, required this.label});
-  final Color color;
-  final String label;
+class _PaymentStatusBadge extends StatelessWidget {
+  const _PaymentStatusBadge({required this.status});
+  final PaymentStatus status;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 10,
-          height: 10,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-        ),
-        const SizedBox(width: 6),
-        Text(label, style: Theme.of(context).textTheme.bodySmall),
-      ],
-    );
+    final (color, _) = _statusStyle(status);
+    return StatusBadge(label: status.label, color: color, filled: false);
+  }
+
+  (Color, IconData) _statusStyle(PaymentStatus s) {
+    switch (s) {
+      case PaymentStatus.valide:
+        return (Colors.green, Icons.check_circle);
+      case PaymentStatus.enAttente:
+        return (Colors.orange, Icons.hourglass_top);
+      case PaymentStatus.echec:
+        return (Colors.red, Icons.error);
+      case PaymentStatus.rembourse:
+        return (Colors.blueGrey, Icons.undo);
+      case PaymentStatus.annule:
+        return (Colors.grey, Icons.cancel);
+    }
   }
 }
 
-/// Carte "Taux d'occupation des classes" : liste avec barre de progression.
-class _ClassOccupancyCard extends StatelessWidget {
-  const _ClassOccupancyCard({required this.items});
-  final List<ClassOccupancyDto> items;
+/// Carte "Élèves récemment inscrits" : liste des derniers élèves enregistrés.
+class _RecentStudentsCard extends StatelessWidget {
+  const _RecentStudentsCard({required this.students});
+  final List<DashboardRecentStudentDto> students;
 
   @override
   Widget build(BuildContext context) {
@@ -396,216 +402,50 @@ class _ClassOccupancyCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const SectionHeader(
-              title: 'Taux d\'occupation des classes',
-              icon: Icons.meeting_room_outlined,
+            SectionHeader(
+              title: 'Élèves récemment inscrits',
+              icon: Icons.person_add_outlined,
+              subtitle: '${students.length} nouvel(s) élève(s)',
             ),
             const SizedBox(height: 4),
-            if (items.isEmpty)
+            if (students.isEmpty)
               const Padding(
-                padding: EdgeInsets.symmetric(vertical: 16),
+                padding: EdgeInsets.symmetric(vertical: 8),
                 child: EmptyState(
-                  title: 'Aucune classe',
-                  message: 'Aucun taux d\'occupation à afficher.',
-                  icon: Icons.school_outlined,
+                  title: 'Aucune inscription récente',
+                  message: 'Les dernières inscriptions apparaîtront ici.',
+                  icon: Icons.person_add_outlined,
                 ),
               )
             else
-              ...items.map((c) {
-                final rate = c.capacity == 0
-                    ? 0.0
-                    : (c.studentCount / c.capacity).clamp(0.0, 1.0);
-                final pct = (rate * 100).round();
-                return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              c.classroomName,
-                              style: theme.textTheme.bodyMedium
-                                  ?.copyWith(fontWeight: FontWeight.w500),
-                            ),
-                          ),
-                          Text(
-                            '${c.studentCount} / ${c.capacity}',
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            '$pct %',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.primary,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      LinearProgressIndicator(
-                        value: rate,
-                        minHeight: 8,
-                        backgroundColor:
-                            theme.colorScheme.surfaceContainerHighest,
-                        color: _colorForRate(rate),
-                      ),
-                    ],
-                  ),
-                );
-              }),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Color _colorForRate(double r) {
-    if (r >= 0.9) return Colors.red.shade700;
-    if (r >= 0.7) return Colors.orange;
-    return Colors.green;
-  }
-}
-
-/// Carte "Alertes — Absentéisme" : liste des élèves à risque.
-class _AbsenteeAlertsCard extends StatelessWidget {
-  const _AbsenteeAlertsCard({required this.items});
-  final List<AbsenteeAlertDto> items;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SectionHeader(
-              title: 'Alertes — Absentéisme',
-              icon: Icons.warning_amber_rounded,
-            ),
-            const SizedBox(height: 4),
-            if (items.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 16),
-                child: EmptyState(
-                  title: 'Aucune alerte',
-                  message: 'Aucun élève en situation d\'absentéisme.',
-                  icon: Icons.check_circle_outline,
-                ),
-              )
-            else
-              ...items.map((a) => ListTile(
+              ...students.map((s) => ListTile(
                     dense: true,
-                    contentPadding: EdgeInsets.zero,
+                    contentPadding:
+                        const EdgeInsets.symmetric(vertical: 4),
                     leading: CircleAvatar(
                       backgroundColor:
-                          Colors.orange.withValues(alpha: 0.16),
-                      child: const Icon(Icons.person_off_outlined,
-                          color: Colors.orange, size: 20),
-                    ),
-                    title: Text(
-                      a.studentName,
-                      style: theme.textTheme.bodyMedium
-                          ?.copyWith(fontWeight: FontWeight.w500),
-                    ),
-                    subtitle: Text(
-                      [
-                        if (a.classroomName != null) a.classroomName!,
-                        if (a.matricule != null) 'Mat. ${a.matricule}',
-                      ].join(' · '),
-                      style: theme.textTheme.bodySmall,
-                    ),
-                    trailing: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text(
-                          '${a.absenceCount} absence${a.absenceCount > 1 ? 's' : ''}',
-                          style: theme.textTheme.labelMedium?.copyWith(
-                            color: Colors.orange.shade800,
-                            fontWeight: FontWeight.w700,
-                          ),
+                          theme.colorScheme.primaryContainer,
+                      child: Text(
+                        s.fullName.isNotEmpty
+                            ? s.fullName[0].toUpperCase()
+                            : '?',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          color: theme.colorScheme.onPrimaryContainer,
                         ),
-                        Text(
-                          a.lastAbsence == null
-                              ? '—'
-                              : DateFormatter.relative(a.lastAbsence),
-                          style: theme.textTheme.labelSmall,
-                        ),
-                      ],
-                    ),
-                    onTap: () => context.push('/students/${a.studentId}'),
-                  )),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Carte "Paiements en retard" : liste des élèves en retard de paiement.
-class _OverduePaymentsCard extends StatelessWidget {
-  const _OverduePaymentsCard({required this.items});
-  final List<OverduePaymentDto> items;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SectionHeader(
-              title: 'Paiements en retard',
-              icon: Icons.payment_outlined,
-            ),
-            const SizedBox(height: 4),
-            if (items.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 16),
-                child: EmptyState(
-                  title: 'Aucun retard',
-                  message: 'Tous les paiements sont à jour.',
-                  icon: Icons.check_circle_outline,
-                ),
-              )
-            else
-              ...items.map((p) => ListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    leading: CircleAvatar(
-                      backgroundColor: Colors.red.withValues(alpha: 0.14),
-                      child: const Icon(Icons.error_outline,
-                          color: Colors.red, size: 20),
-                    ),
-                    title: Text(
-                      p.studentName,
-                      style: theme.textTheme.bodyMedium
-                          ?.copyWith(fontWeight: FontWeight.w500),
-                    ),
-                    subtitle: Text(
-                      [
-                        if (p.classroomName != null) p.classroomName!,
-                        'Échéance : ${DateFormatter.date(p.dueDate)}',
-                      ].join(' · '),
-                      style: theme.textTheme.bodySmall,
-                    ),
-                    trailing: Text(
-                      MoneyFormatter.format(p.amountDue, withSymbol: false),
-                      style: theme.textTheme.labelLarge?.copyWith(
-                        color: Colors.red.shade700,
-                        fontWeight: FontWeight.w700,
                       ),
                     ),
-                    onTap: () => context.push('/students/${p.studentId}'),
+                    title: Text(
+                      s.fullName.isEmpty ? '(sans nom)' : s.fullName,
+                      style: theme.textTheme.bodyMedium
+                          ?.copyWith(fontWeight: FontWeight.w500),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text(
+                      s.matricule.isEmpty ? 'Mat. —' : 'Mat. ${s.matricule}',
+                      style: theme.textTheme.bodySmall,
+                    ),
+                    onTap: () => context.push('/students/${s.id}'),
                   )),
           ],
         ),

@@ -1,54 +1,75 @@
-/// DTOs Élèves (identité + satellites : contact, médical, scolarité, parents, tuteur).
+/// DTOs Élèves — alignés sur les schémas Pydantic du desktop.
+///
+/// `StudentResponse` serveur : {id, public_id, matricule, nom, prenoms,
+/// establishment_id, dob, sexe, classroom_name, inscription_type_label,
+/// student_status_label, age, photo_path}.
+///
+/// Les satellites (contact, médical, scolarité, parents, tuteur) ne sont PAS
+/// inclus dans la réponse liste ; ils proviennent d'endpoints dédiés ou d'un
+/// enrichissement futur de /students/{id}.
 library;
 
 import '../../core/config/constants.dart';
 import '../../core/utils/formatters.dart';
 
+/// Élève (StudentResponse côté serveur).
 class StudentDto {
   final int id;
+  final String publicId;
   final String matricule;
-  final String nom;
+  final String? nom;
   final String? prenoms;
+  final int? establishmentId;
   final DateTime? dob;
   final Sexe? sexe;
+  // Champs enrichis (desktop-app parity)
+  final String? classroomName;
+  final String? inscriptionTypeLabel;
+  final String? studentStatusLabel;
+  final int? age;
+  final String? photoPath;
+  // Champs satellites (non dans la réponse liste, mais utilisés en détail/form)
   final String? birthPlace;
   final String? birthPrefecture;
   final String? birthRegion;
   final String? birthCountry;
-  final String? photoPath;
   final String? groupe;
+  final int? classroomId;
+  final StudentStatus? status;
+  final InscriptionType? inscriptionType;
   final StudentContactDto? contact;
   final StudentMedicalDto? medical;
   final StudentScholasticDto? scholastic;
   final List<StudentParentDto> parents;
   final List<GuardianDto> guardians;
-  final int? classroomId;
-  final String? classroomName;
-  final StudentStatus? status;
-  final InscriptionType? inscriptionType;
 
   const StudentDto({
     required this.id,
+    this.publicId = '',
     required this.matricule,
-    required this.nom,
+    this.nom,
     this.prenoms,
+    this.establishmentId,
     this.dob,
     this.sexe,
+    this.classroomName,
+    this.inscriptionTypeLabel,
+    this.studentStatusLabel,
+    this.age,
+    this.photoPath,
     this.birthPlace,
     this.birthPrefecture,
     this.birthRegion,
     this.birthCountry,
-    this.photoPath,
     this.groupe,
+    this.classroomId,
+    this.status,
+    this.inscriptionType,
     this.contact,
     this.medical,
     this.scholastic,
     this.parents = const [],
     this.guardians = const [],
-    this.classroomId,
-    this.classroomName,
-    this.status,
-    this.inscriptionType,
   });
 
   String get fullName =>
@@ -56,23 +77,34 @@ class StudentDto {
 
   String get displayInitials {
     final p = prenoms?.isNotEmpty == true ? prenoms![0] : '';
-    final n = nom.isNotEmpty ? nom[0] : '';
+    final n = (nom?.isNotEmpty == true) ? nom![0] : '';
     return '$p$n'.toUpperCase();
   }
 
   factory StudentDto.fromJson(Map<String, dynamic> j) => StudentDto(
         id: (j['id'] as num).toInt(),
+        publicId: j['public_id'] as String? ?? '',
         matricule: j['matricule'] as String? ?? '',
-        nom: j['nom'] as String? ?? '',
+        nom: j['nom'] as String?,
         prenoms: j['prenoms'] as String?,
+        establishmentId: (j['establishment_id'] as num?)?.toInt(),
         dob: DateFormatter.parse(j['dob'] as String?),
         sexe: Sexe.fromCode(j['sexe'] as String?),
+        classroomName: j['classroom_name'] as String?,
+        inscriptionTypeLabel: j['inscription_type_label'] as String?,
+        studentStatusLabel: j['student_status_label'] as String?,
+        age: (j['age'] as num?)?.toInt(),
+        photoPath: j['photo_path'] as String?,
+        // Satellites (présents seulement en détail enrichi)
         birthPlace: j['birth_place'] as String?,
         birthPrefecture: j['birth_prefecture'] as String?,
         birthRegion: j['birth_region'] as String?,
         birthCountry: j['birth_country'] as String?,
-        photoPath: j['photo_path'] as String?,
         groupe: j['groupe'] as String?,
+        classroomId: (j['classroom_id'] as num?)?.toInt(),
+        status: StudentStatus.fromCode(j['status'] as String?),
+        inscriptionType:
+            InscriptionType.fromCode(j['inscription_type'] as String?),
         contact: j['contact'] == null
             ? null
             : StudentContactDto.fromJson(j['contact'] as Map<String, dynamic>),
@@ -91,35 +123,53 @@ class StudentDto {
                 ?.map((e) => GuardianDto.fromJson(e as Map<String, dynamic>))
                 .toList() ??
             const [],
-        classroomId: (j['classroom_id'] as num?)?.toInt(),
-        classroomName: j['classroom_name'] as String?,
-        status: StudentStatus.fromCode(j['status'] as String?),
-        inscriptionType: InscriptionType.fromCode(j['inscription_type'] as String?),
       );
 
   Map<String, dynamic> toJson() => {
         'id': id,
+        'public_id': publicId,
         'matricule': matricule,
         'nom': nom,
         'prenoms': prenoms,
+        'establishment_id': establishmentId,
         'dob': DateFormatter.toIso(dob),
         'sexe': sexe?.code,
+        'classroom_name': classroomName,
+        'inscription_type_label': inscriptionTypeLabel,
+        'student_status_label': studentStatusLabel,
+        'age': age,
+        'photo_path': photoPath,
         'birth_place': birthPlace,
         'birth_prefecture': birthPrefecture,
         'birth_region': birthRegion,
         'birth_country': birthCountry,
-        'photo_path': photoPath,
         'groupe': groupe,
+        'classroom_id': classroomId,
+        'status': status?.code,
+        'inscription_type': inscriptionType?.code,
         'contact': contact?.toJson(),
         'medical': medical?.toJson(),
         'scholastic': scholastic?.toJson(),
         'parents': parents.map((e) => e.toJson()).toList(),
         'guardians': guardians.map((e) => e.toJson()).toList(),
-        'classroom_id': classroomId,
-        'classroom_name': classroomName,
-        'status': status?.code,
-        'inscription_type': inscriptionType?.code,
       };
+}
+
+/// Réponse paginée de liste d'élèves (StudentListResponse).
+class StudentListResponse {
+  final List<StudentDto> items;
+  final int total;
+
+  const StudentListResponse({this.items = const [], this.total = 0});
+
+  factory StudentListResponse.fromJson(Map<String, dynamic> j) =>
+      StudentListResponse(
+        items: (j['items'] as List?)
+                ?.map((e) => StudentDto.fromJson(e as Map<String, dynamic>))
+                .toList() ??
+            const [],
+        total: (j['total'] as num?)?.toInt() ?? 0,
+      );
 }
 
 class StudentContactDto {
@@ -197,7 +247,6 @@ class StudentScholasticDto {
       };
 }
 
-/// Parent d'un élève (père ou mère).
 class StudentParentDto {
   final int? id;
   final String role; // 'PERE' | 'MERE'
@@ -237,7 +286,6 @@ class StudentParentDto {
       };
 }
 
-/// Tuteur légal (relation N-N via student_guardians).
 class GuardianDto {
   final int? id;
   final String? nom;

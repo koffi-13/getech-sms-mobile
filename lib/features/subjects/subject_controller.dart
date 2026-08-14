@@ -234,8 +234,8 @@ class SubjectRepository {
         classroomId: classroomId,
         subjectId: subjectId,
         subjectName: '',
-        coefficient: coefficient,
-        teacherId: teacherId,
+        coefficient: coefficient.toInt(),
+        assignedTeacherId: teacherId,
       );
     }
     try {
@@ -287,8 +287,8 @@ class SubjectRepository {
         classroomId: classroomId,
         subjectId: 0,
         subjectName: '',
-        coefficient: coefficient ?? 1.0,
-        teacherId: clearTeacher ? null : teacherId,
+        coefficient: (coefficient ?? 1).toInt(),
+        assignedTeacherId: clearTeacher ? null : teacherId,
       );
     }
     try {

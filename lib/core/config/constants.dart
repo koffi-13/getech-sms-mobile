@@ -163,14 +163,10 @@ enum AssessmentType {
   const AssessmentType(this.code, this.label);
 }
 
-/// Type de paiement (frais de scolarité, inscription, etc.).
+/// Type de transaction (aligné sur PaymentType du desktop).
 enum PaymentType {
-  scolarite('SCOLARITE', 'Scolarité'),
-  inscription('INSCRIPTION', 'Inscription'),
-  cantine('CANTEEN', 'Cantine'),
-  transport('TRANSPORT', 'Transport'),
-  activite('ACTIVITE', 'Activités'),
-  autre('AUTRE', 'Autre');
+  paiement('PAYMENT', 'Paiement'),
+  remboursement('REFUND', 'Remboursement');
 
   final String code;
   final String label;
@@ -185,13 +181,36 @@ enum PaymentType {
   }
 }
 
-/// Méthode de paiement.
+/// Catégorie de frais (alignée sur FeeCategory du desktop).
+enum FeeCategoryCode {
+  inscription('ENR', 'Inscription'),
+  scolarite('SCHOOL_FEES', 'Scolarité'),
+  cantine('CANTEEN', 'Cantine'),
+  transport('TRANSPORT', 'Transport'),
+  activite('ACTIVITIES', 'Activités'),
+  autre('OTHER', 'Autre');
+
+  final String code;
+  final String label;
+  const FeeCategoryCode(this.code, this.label);
+
+  static FeeCategoryCode? fromCode(String? code) {
+    if (code == null) return null;
+    for (final f in values) {
+      if (f.code == code) return f;
+    }
+    return null;
+  }
+}
+
+/// Méthode de paiement (alignée sur PaymentMethod du desktop).
 enum PaymentMethod {
   espece('CASH', 'Espèces'),
   mobileMoney('MOBILE_MONEY', 'Mobile Money'),
+  virement('BANK_TRANSFER', 'Virement'),
+  carte('CARD', 'Carte'),
   cheque('CHEQUE', 'Chèque'),
-  virement('TRANSFER', 'Virement'),
-  carte('CARD', 'Carte');
+  autre('OTHER', 'Autre');
 
   final String code;
   final String label;
@@ -206,10 +225,12 @@ enum PaymentMethod {
   }
 }
 
-/// Statut d'un paiement.
+/// Statut d'un paiement (aligné sur PaymentStatus du desktop).
 enum PaymentStatus {
-  valide('VALIDATED', 'Validé'),
   enAttente('PENDING', 'En attente'),
+  valide('COMPLETED', 'Validé'),
+  echec('FAILED', 'Échec'),
+  rembourse('REFUNDED', 'Remboursé'),
   annule('CANCELLED', 'Annulé');
 
   final String code;
@@ -217,6 +238,26 @@ enum PaymentStatus {
   const PaymentStatus(this.code, this.label);
 
   static PaymentStatus? fromCode(String? code) {
+    if (code == null) return null;
+    for (final s in values) {
+      if (s.code == code) return s;
+    }
+    return null;
+  }
+}
+
+/// Statut d'une subscription de frais (aligné sur SubscriptionStatus du desktop).
+enum SubscriptionStatus {
+  active('ACTIVE', 'Active'),
+  partiel('PARTIAL', 'Partiel'),
+  payed('PAID', 'Soldée'),
+  annule('CANCELLED', 'Annulée');
+
+  final String code;
+  final String label;
+  const SubscriptionStatus(this.code, this.label);
+
+  static SubscriptionStatus? fromCode(String? code) {
     if (code == null) return null;
     for (final s in values) {
       if (s.code == code) return s;

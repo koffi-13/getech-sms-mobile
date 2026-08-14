@@ -143,8 +143,8 @@ class _ClassroomTile extends StatelessWidget {
 
     final subtitleParts = <String>[];
     if (classroom.levelName != null) subtitleParts.add(classroom.levelName!);
-    if (classroom.streamName != null) subtitleParts.add(classroom.streamName!);
-    if (classroom.code != null) subtitleParts.add('#${classroom.code}');
+    if (classroom.cycleName != null) subtitleParts.add(classroom.cycleName!);
+    if (classroom.seriesName != null) subtitleParts.add(classroom.seriesName!);
 
     return Card(
       child: InkWell(

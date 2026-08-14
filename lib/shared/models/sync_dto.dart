@@ -4,56 +4,112 @@ library;
 import '../../core/utils/formatters.dart';
 
 /// Statistiques du tableau de bord : `GET /dashboard/stats`.
+///
+/// ⚠️ Aligné sur `DashboardStats` du desktop (schemas.py) :
+/// {total_students, total_classrooms, total_teachers, total_payments (count),
+/// total_balance_due, total_users, recent_payments[], recent_students[]}.
 class DashboardStatsDto {
   final int totalStudents;
   final int totalClassrooms;
   final int totalTeachers;
-  final double paymentsToday;
-  final double outstandingBalance;
-  final Map<String, int> studentsBySex; // {'M': 120, 'F': 95}
-  final List<ClassOccupancyDto> classOccupancy;
-  final List<AbsenteeAlertDto> absenteeAlerts;
-  final List<OverduePaymentDto> overduePayments;
+  final int totalPayments; // NOMBRE de paiements (pas un montant)
+  final double totalBalanceDue; // solde total dû
+  final int totalUsers;
+  final List<DashboardRecentPaymentDto> recentPayments;
+  final List<DashboardRecentStudentDto> recentStudents;
 
   const DashboardStatsDto({
     this.totalStudents = 0,
     this.totalClassrooms = 0,
     this.totalTeachers = 0,
-    this.paymentsToday = 0,
-    this.outstandingBalance = 0,
-    this.studentsBySex = const {},
-    this.classOccupancy = const [],
-    this.absenteeAlerts = const [],
-    this.overduePayments = const [],
+    this.totalPayments = 0,
+    this.totalBalanceDue = 0,
+    this.totalUsers = 0,
+    this.recentPayments = const [],
+    this.recentStudents = const [],
   });
 
-  factory DashboardStatsDto.fromJson(Map<String, dynamic> j) => DashboardStatsDto(
+  /// Alias de compatibilité : outstandingBalance = totalBalanceDue.
+  double get outstandingBalance => totalBalanceDue;
+
+  factory DashboardStatsDto.fromJson(Map<String, dynamic> j) =>
+      DashboardStatsDto(
         totalStudents: (j['total_students'] as num?)?.toInt() ?? 0,
         totalClassrooms: (j['total_classrooms'] as num?)?.toInt() ?? 0,
         totalTeachers: (j['total_teachers'] as num?)?.toInt() ?? 0,
-        paymentsToday: (j['payments_today'] as num?)?.toDouble() ?? 0,
-        outstandingBalance:
-            (j['outstanding_balance'] as num?)?.toDouble() ?? 0,
-        studentsBySex: Map<String, int>.from(
-          (j['students_by_sex'] as Map?)?.map(
-                  (k, v) => MapEntry(k.toString(), (v as num).toInt())) ??
-              const {},
-        ),
-        classOccupancy: (j['class_occupancy'] as List?)
-                ?.map((e) =>
-                    ClassOccupancyDto.fromJson(e as Map<String, dynamic>))
+        totalPayments: (j['total_payments'] as num?)?.toInt() ?? 0,
+        totalBalanceDue: (j['total_balance_due'] as num?)?.toDouble() ??
+            (j['outstanding_balance'] as num?)?.toDouble() ??
+            0,
+        totalUsers: (j['total_users'] as num?)?.toInt() ?? 0,
+        recentPayments: (j['recent_payments'] as List?)
+                ?.map((e) => DashboardRecentPaymentDto.fromJson(
+                    e as Map<String, dynamic>))
                 .toList() ??
             const [],
-        absenteeAlerts: (j['absentee_alerts'] as List?)
-                ?.map((e) =>
-                    AbsenteeAlertDto.fromJson(e as Map<String, dynamic>))
+        recentStudents: (j['recent_students'] as List?)
+                ?.map((e) => DashboardRecentStudentDto.fromJson(
+                    e as Map<String, dynamic>))
                 .toList() ??
             const [],
-        overduePayments: (j['overdue_payments'] as List?)
-                ?.map((e) =>
-                    OverduePaymentDto.fromJson(e as Map<String, dynamic>))
-                .toList() ??
-            const [],
+      );
+}
+
+/// Paiement récent (DashboardRecentPayment côté serveur).
+class DashboardRecentPaymentDto {
+  final int id;
+  final double amount;
+  final String? method;
+  final String? status;
+  final String? receiptNumber;
+  final DateTime? paymentDate;
+  final int? studentId;
+
+  const DashboardRecentPaymentDto({
+    required this.id,
+    this.amount = 0,
+    this.method,
+    this.status,
+    this.receiptNumber,
+    this.paymentDate,
+    this.studentId,
+  });
+
+  factory DashboardRecentPaymentDto.fromJson(Map<String, dynamic> j) =>
+      DashboardRecentPaymentDto(
+        id: (j['id'] as num).toInt(),
+        amount: (j['amount'] as num?)?.toDouble() ?? 0,
+        method: j['method'] as String?,
+        status: j['status'] as String?,
+        receiptNumber: j['receipt_number'] as String?,
+        paymentDate: DateFormatter.parse(j['payment_date'] as String?),
+        studentId: (j['student_id'] as num?)?.toInt(),
+      );
+}
+
+/// Élève récemment inscrit (DashboardRecentStudent côté serveur).
+class DashboardRecentStudentDto {
+  final int id;
+  final String matricule;
+  final String? nom;
+  final String? prenoms;
+
+  const DashboardRecentStudentDto({
+    required this.id,
+    this.matricule = '',
+    this.nom,
+    this.prenoms,
+  });
+
+  String get fullName =>
+      [prenoms, nom].whereType<String>().where((s) => s.isNotEmpty).join(' ');
+
+  factory DashboardRecentStudentDto.fromJson(Map<String, dynamic> j) =>
+      DashboardRecentStudentDto(
+        id: (j['id'] as num).toInt(),
+        matricule: j['matricule'] as String? ?? '',
+        nom: j['nom'] as String?,
+        prenoms: j['prenoms'] as String?,
       );
 }
 

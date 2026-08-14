@@ -1,11 +1,16 @@
-/// Page "Soldes élèves" : liste des soldes (du / payé / reste à payer) avec
-/// recherche, filtre par classe, KPIs de synthèse et progression visuelle.
+/// Page "Soldes élèves" : liste des subscriptions avec solde dû, triée par
+/// `balance_due` décroissant (déjà fait côté serveur).
+///
+/// Chaque `FeeSubscriptionDto` représente une `StudentFeeSubscription` avec
+/// `agreed_amount`, `balance_due`, `total_paid` (= agreed - balance),
+/// `payment_rate`, `status` (SubscriptionStatus).
+///
+/// KPIs de synthèse : Total dû, Total encaissé, Solde restant.
+///
+/// Tap sur une subscription → ouvre la page d'enregistrement d'un paiement
+/// pour l'élève concerné (`/finance/payments/new?student_id=<id>`).
 ///
 /// RBAC : PAYMENT_READ requis pour visualiser la page.
-///
-/// Tri par défaut : solde restant décroissant (plus gros débiteurs en tête).
-/// Tap sur un élève → ouvre la page d'enregistrement d'un paiement pour cet
-/// élève (`'/finance/payments/new?student_id=<id>'`).
 library;
 
 import 'package:flutter/material.dart';
@@ -92,7 +97,7 @@ class _BalancesPageState extends ConsumerState<BalancesPage> {
   }
 
   List<Widget> _buildSlivers(
-    AsyncValue<List<StudentBalanceDto>> balancesAsync,
+    AsyncValue<List<FeeSubscriptionDto>> balancesAsync,
     AsyncValue<List<ClassroomDto>> classroomsAsync,
   ) {
     final slivers = <Widget>[
@@ -140,31 +145,32 @@ class _BalancesPageState extends ConsumerState<BalancesPage> {
       return slivers;
     }
 
-    final balances = balancesAsync.value ?? const <StudentBalanceDto>[];
+    final balances = balancesAsync.value ?? const <FeeSubscriptionDto>[];
     if (balances.isEmpty) {
       slivers.add(const SliverFillRemaining(
         hasScrollBody: false,
         child: EmptyState(
           icon: Icons.account_balance_wallet_outlined,
-          title: 'Aucun solde',
-          message: 'Aucun élève ne correspond à votre recherche.',
+          title: 'Aucun solde dû',
+          message: 'Aucune subscription avec solde restant à payer.',
         ),
       ));
       slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 24)));
       return slivers;
     }
 
-    // Tri : solde restant décroissant (plus gros débiteurs en tête).
-    final sorted = List<StudentBalanceDto>.from(balances)
-      ..sort((a, b) => b.outstanding.compareTo(a.outstanding));
+    // Tri : solde dû décroissant (le serveur le fait déjà, mais on le
+    // re-tri côté client pour garantir l'ordre après filtrage).
+    final sorted = List<FeeSubscriptionDto>.from(balances)
+      ..sort((a, b) => b.balanceDue.compareTo(a.balanceDue));
 
     // KPIs.
-    double totalDue = 0, totalPaid = 0;
+    double totalDue = 0, totalPaid = 0, totalOutstanding = 0;
     for (final b in sorted) {
-      totalDue += b.totalDue;
+      totalDue += b.agreedAmount;
       totalPaid += b.totalPaid;
+      totalOutstanding += b.balanceDue;
     }
-    final totalOutstanding = totalDue - totalPaid;
 
     slivers.add(SliverToBoxAdapter(
       child: Padding(
@@ -197,15 +203,14 @@ class _BalancesPageState extends ConsumerState<BalancesPage> {
               label: 'Solde restant',
               value: MoneyFormatter.format(totalOutstanding),
               icon: Icons.account_balance_outlined,
-              color: totalOutstanding > 0
-                  ? Colors.orange
-                  : Colors.green,
+              color: totalOutstanding > 0 ? Colors.orange : Colors.green,
             ),
             const SizedBox(height: 8),
             SectionHeader(
-              title: 'Élèves',
-              subtitle: '${sorted.length} élève${sorted.length > 1 ? 's' : ''}',
-              icon: Icons.people_outline,
+              title: 'Subscriptions',
+              subtitle:
+                  '${sorted.length} subscription${sorted.length > 1 ? 's' : ''}',
+              icon: Icons.assignment_outlined,
             ),
           ],
         ),
@@ -218,7 +223,7 @@ class _BalancesPageState extends ConsumerState<BalancesPage> {
         itemCount: sorted.length,
         separatorBuilder: (_, __) => const SizedBox(height: 4),
         itemBuilder: (context, i) =>
-            _BalanceTile(balance: sorted[i]),
+            _BalanceTile(subscription: sorted[i]),
       ),
     ));
     slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 24)));
@@ -332,7 +337,7 @@ class _ClassroomFilter extends StatelessWidget {
             const Divider(height: 1),
             ...classrooms.map((c) => ListTile(
                   title: Text(c.name),
-                  subtitle: c.code == null ? null : Text(c.code!),
+                  subtitle: c.code.isEmpty ? null : Text(c.code),
                   trailing: filter.classroomId == c.id
                       ? const Icon(Icons.check)
                       : null,
@@ -352,24 +357,40 @@ class _ClassroomFilter extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Tuile solde élève
+// Tuile subscription (solde élève)
 // ---------------------------------------------------------------------------
 
+/// Couleur associée à un [SubscriptionStatus].
+Color _subscriptionStatusColor(SubscriptionStatus s) {
+  switch (s) {
+    case SubscriptionStatus.active:
+      return Colors.blue;
+    case SubscriptionStatus.partiel:
+      return Colors.orange;
+    case SubscriptionStatus.payed:
+      return Colors.green;
+    case SubscriptionStatus.annule:
+      return Colors.grey;
+  }
+}
+
 class _BalanceTile extends StatelessWidget {
-  const _BalanceTile({required this.balance});
-  final StudentBalanceDto balance;
+  const _BalanceTile({required this.subscription});
+  final FeeSubscriptionDto subscription;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final settled = balance.isSettled;
-    final initials = _initials(balance.studentName);
+    final sub = subscription;
+    final settled = sub.isSettled;
+    final initials = _initials(sub.studentName);
+    final statusColor = _subscriptionStatusColor(sub.status);
 
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
       child: InkWell(
         onTap: () => context.push(
-          '/finance/payments/new?student_id=${balance.studentId}',
+          '/finance/payments/new?student_id=${sub.studentId}',
         ),
         borderRadius: BorderRadius.circular(12),
         child: Padding(
@@ -398,18 +419,18 @@ class _BalanceTile extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          balance.studentName,
+                          sub.studentName ?? 'Élève inconnu',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: theme.textTheme.titleSmall,
                         ),
                         Text(
                           [
-                            if (balance.matricule != null &&
-                                balance.matricule!.isNotEmpty)
-                              balance.matricule!,
-                            if (balance.classroomName != null)
-                              balance.classroomName!,
+                            if (sub.matricule != null &&
+                                sub.matricule!.isNotEmpty)
+                              sub.matricule!,
+                            if (sub.classroomName != null)
+                              sub.classroomName!,
                           ].join(' • '),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
@@ -421,10 +442,8 @@ class _BalanceTile extends StatelessWidget {
                     ),
                   ),
                   StatusBadge(
-                    label: settled
-                        ? 'Soldé'
-                        : 'Reste ${MoneyFormatter.format(balance.outstanding, withSymbol: false)} FCFA',
-                    color: settled ? Colors.green : Colors.orange,
+                    label: sub.status.label,
+                    color: statusColor,
                     icon: settled ? Icons.check_circle : Icons.schedule,
                   ),
                 ],
@@ -435,16 +454,16 @@ class _BalanceTile extends StatelessWidget {
                 children: [
                   Expanded(
                     child: _AmountColumn(
-                      label: 'Dû',
-                      value: MoneyFormatter.format(balance.totalDue,
+                      label: 'Convenu',
+                      value: MoneyFormatter.format(sub.agreedAmount,
                           withSymbol: false),
-                      color: Colors.red.shade700,
+                      color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
                   Expanded(
                     child: _AmountColumn(
                       label: 'Payé',
-                      value: MoneyFormatter.format(balance.totalPaid,
+                      value: MoneyFormatter.format(sub.totalPaid,
                           withSymbol: false),
                       color: Colors.green.shade700,
                     ),
@@ -452,9 +471,9 @@ class _BalanceTile extends StatelessWidget {
                   Expanded(
                     child: _AmountColumn(
                       label: 'Reste',
-                      value: MoneyFormatter.format(balance.outstanding,
+                      value: MoneyFormatter.format(sub.balanceDue,
                           withSymbol: false),
-                      color: balance.outstanding > 0
+                      color: sub.balanceDue > 0
                           ? Colors.orange.shade700
                           : Colors.green.shade700,
                       bold: true,
@@ -467,23 +486,20 @@ class _BalanceTile extends StatelessWidget {
               ClipRRect(
                 borderRadius: BorderRadius.circular(4),
                 child: LinearProgressIndicator(
-                  value: balance.paymentRate,
+                  value: sub.paymentRate,
                   minHeight: 6,
                   backgroundColor:
                       theme.colorScheme.surfaceContainerHighest,
                   color: settled ? Colors.green : Colors.orange,
                 ),
               ),
-              if (balance.lastPaymentDate != null) ...[
-                const SizedBox(height: 6),
-                Text(
-                  'Dernier paiement : ${DateFormatter.date(balance.lastPaymentDate)}',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                    fontStyle: FontStyle.italic,
-                  ),
+              const SizedBox(height: 4),
+              Text(
+                'Taux : ${(sub.paymentRate * 100).toStringAsFixed(0)} %',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
                 ),
-              ],
+              ),
             ],
           ),
         ),
@@ -531,8 +547,8 @@ class _AmountColumn extends StatelessWidget {
 
 // --- Helpers ---
 
-String _initials(String name) {
-  if (name.isEmpty) return '?';
+String _initials(String? name) {
+  if (name == null || name.isEmpty) return '?';
   final parts = name.trim().split(RegExp(r'\s+'));
   if (parts.length >= 2) {
     return '${parts[0][0]}${parts[1][0]}'.toUpperCase();

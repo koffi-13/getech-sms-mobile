@@ -1,5 +1,14 @@
-/// Page "Enregistrer un paiement" : formulaire de saisie d'un paiement avec
-/// sélection d'élève, type, montant, méthode, date, référence et notes.
+/// Page "Enregistrer un paiement" : flux basé sur les subscriptions.
+///
+/// Flux réel (aligné sur le desktop `finance` router) :
+/// 1. L'utilisateur sélectionne un élève (recherche par nom/matricule).
+/// 2. On charge ses subscriptions actives via `studentSubscriptionsProvider`
+///    (celles avec `balance_due > 0`).
+/// 3. L'utilisateur sélectionne UNE subscription sur laquelle encaisser.
+/// 4. Saisie du montant (> 0 et <= balance_due), méthode, référence.
+/// 5. `POST /finance/payments` avec `{student_id, subscription_id, amount,
+///    method, reference}` → le serveur crée la transaction, l'allocation,
+///    met à jour la subscription et attribue un `receipt_number`.
 ///
 /// RBAC : PAYMENT_VALIDATE requis pour afficher le formulaire.
 ///
@@ -39,13 +48,11 @@ class _RecordPaymentPageState extends ConsumerState<RecordPaymentPage> {
   // Contrôleurs de texte.
   late final TextEditingController _amountCtrl;
   late final TextEditingController _referenceCtrl;
-  late final TextEditingController _notesCtrl;
 
   // État du formulaire.
   StudentDto? _selectedStudent;
-  PaymentType _type = PaymentType.scolarite;
+  FeeSubscriptionDto? _selectedSubscription;
   PaymentMethod _method = PaymentMethod.espece;
-  DateTime _date = DateTime.now();
 
   bool _saving = false;
 
@@ -54,25 +61,13 @@ class _RecordPaymentPageState extends ConsumerState<RecordPaymentPage> {
     super.initState();
     _amountCtrl = TextEditingController();
     _referenceCtrl = TextEditingController();
-    _notesCtrl = TextEditingController();
   }
 
   @override
   void dispose() {
     _amountCtrl.dispose();
     _referenceCtrl.dispose();
-    _notesCtrl.dispose();
     super.dispose();
-  }
-
-  Future<void> _pickDate() async {
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: _date,
-      firstDate: DateTime(_date.year - 2),
-      lastDate: DateTime.now().add(const Duration(days: 1)),
-    );
-    if (picked != null) setState(() => _date = picked);
   }
 
   Future<void> _openStudentPicker() async {
@@ -81,8 +76,22 @@ class _RecordPaymentPageState extends ConsumerState<RecordPaymentPage> {
       builder: (_) => const _StudentPickerDialog(),
     );
     if (selected != null) {
-      setState(() => _selectedStudent = selected);
+      setState(() {
+        _selectedStudent = selected;
+        _selectedSubscription = null;
+        _amountCtrl.clear();
+        _referenceCtrl.clear();
+      });
     }
+  }
+
+  void _clearStudent() {
+    setState(() {
+      _selectedStudent = null;
+      _selectedSubscription = null;
+      _amountCtrl.clear();
+      _referenceCtrl.clear();
+    });
   }
 
   double? get _parsedAmount {
@@ -91,11 +100,29 @@ class _RecordPaymentPageState extends ConsumerState<RecordPaymentPage> {
     return double.tryParse(normalized);
   }
 
+  /// Reste à payer après saisie du montant (balance_due - amount).
+  /// Retourne `null` si le montant saisi est invalide.
+  double? get _remainingDue {
+    final sub = _selectedSubscription;
+    final amt = _parsedAmount;
+    if (sub == null || amt == null) return null;
+    return sub.balanceDue - amt;
+  }
+
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
-    if (_selectedStudent == null) {
+    final student = _selectedStudent;
+    final sub = _selectedSubscription;
+    if (student == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Veuillez sélectionner un élève.')),
+      );
+      return;
+    }
+    if (sub == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Veuillez sélectionner une subscription.')),
       );
       return;
     }
@@ -106,18 +133,25 @@ class _RecordPaymentPageState extends ConsumerState<RecordPaymentPage> {
       );
       return;
     }
+    if (amount > sub.balanceDue) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+              'Le montant dépasse le solde dû (${MoneyFormatter.format(sub.balanceDue, withSymbol: false)} FCFA).'),
+        ),
+      );
+      return;
+    }
 
     setState(() => _saving = true);
     final req = PaymentRequest(
-      studentId: _selectedStudent!.id,
-      type: _type,
+      studentId: student.id,
+      subscriptionId: sub.id,
       amount: amount,
       method: _method,
-      date: _date,
       reference: _referenceCtrl.text.trim().isEmpty
           ? null
           : _referenceCtrl.text.trim(),
-      notes: _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(),
     );
 
     try {
@@ -128,11 +162,13 @@ class _RecordPaymentPageState extends ConsumerState<RecordPaymentPage> {
       // Invalide les listes pour rafraîchir.
       ref.invalidate(paymentsListProvider);
       ref.invalidate(balancesProvider);
-      ref.invalidate(paymentsTodayProvider);
+      ref.invalidate(studentSubscriptionsProvider);
 
       final msg = payment.status == PaymentStatus.enAttente
           ? 'Paiement mis en file d\'attente (hors-ligne). Il sera synchronisé ultérieurement.'
-          : 'Paiement enregistré${payment.receiptNumber != null && payment.receiptNumber!.isNotEmpty ? ' — Reçu n°${payment.receiptNumber}' : ''}.';
+          : 'Paiement enregistré'
+              '${payment.receiptNumber != null && payment.receiptNumber!.isNotEmpty ? ' — Reçu n°${payment.receiptNumber}' : ''}'
+              '.';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(msg),
@@ -194,130 +230,42 @@ class _RecordPaymentPageState extends ConsumerState<RecordPaymentPage> {
                       const _OfflineWarning(),
                       const SizedBox(height: 12),
                     ],
-                    // Élève.
+                    // Étape 1 : Élève.
                     _StudentField(
                       student: _selectedStudent,
                       onTap: _openStudentPicker,
+                      onClear: _selectedStudent != null ? _clearStudent : null,
                     ),
                     const SizedBox(height: 16),
-                    // Type.
-                    DropdownButtonFormField<PaymentType>(
-                      value: _type,
-                      decoration: const InputDecoration(
-                        labelText: 'Type de paiement',
-                        prefixIcon: Icon(Icons.category_outlined),
+                    // Étape 2 + 3 : subscriptions + saisie (uniquement si élève sélectionné).
+                    if (_selectedStudent != null) ...[
+                      _SubscriptionsSection(
+                        studentId: _selectedStudent!.id,
+                        selected: _selectedSubscription,
+                        onSelect: (sub) {
+                          setState(() {
+                            _selectedSubscription = sub;
+                            _amountCtrl.clear();
+                          });
+                        },
                       ),
-                      items: PaymentType.values
-                          .map((t) => DropdownMenuItem(
-                                value: t,
-                                child: Text(t.label),
-                              ))
-                          .toList(),
-                      onChanged: (v) {
-                        if (v != null) setState(() => _type = v);
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    // Montant.
-                    TextFormField(
-                      controller: _amountCtrl,
-                      keyboardType:
-                          const TextInputType.numberWithOptions(decimal: true),
-                      inputFormatters: [
-                        FilteringTextInputFormatter.allow(
-                            RegExp(r'[\d.,]')),
-                      ],
-                      decoration: const InputDecoration(
-                        labelText: 'Montant',
-                        hintText: '0',
-                        suffixText: 'FCFA',
-                        prefixIcon: Icon(Icons.payments_outlined),
-                      ),
-                      validator: (v) {
-                        final amt = _parsedAmount;
-                        if (amt == null || amt <= 0) {
-                          return 'Entrez un montant valide (> 0).';
-                        }
-                        return null;
-                      },
-                      onChanged: (_) => setState(() {}),
-                    ),
-                    const SizedBox(height: 16),
-                    // Méthode.
-                    DropdownButtonFormField<PaymentMethod>(
-                      value: _method,
-                      decoration: const InputDecoration(
-                        labelText: 'Méthode de paiement',
-                        prefixIcon:
-                            Icon(Icons.account_balance_wallet_outlined),
-                      ),
-                      items: PaymentMethod.values
-                          .map((m) => DropdownMenuItem(
-                                value: m,
-                                child: Text(m.label),
-                              ))
-                          .toList(),
-                      onChanged: (v) {
-                        if (v != null) setState(() => _method = v);
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    // Date.
-                    InkWell(
-                      onTap: _pickDate,
-                      child: InputDecorator(
-                        decoration: const InputDecoration(
-                          labelText: 'Date',
-                          prefixIcon: Icon(Icons.calendar_today_outlined),
+                      const SizedBox(height: 16),
+                      if (_selectedSubscription != null)
+                        _PaymentForm(
+                          subscription: _selectedSubscription!,
+                          amountCtrl: _amountCtrl,
+                          referenceCtrl: _referenceCtrl,
+                          method: _method,
+                          onMethodChanged: (m) {
+                            if (m != null) setState(() => _method = m);
+                          },
+                          parsedAmount: _parsedAmount,
+                          remainingDue: _remainingDue,
+                          saving: _saving,
+                          onSubmit: _submit,
+                          onAmountChanged: (_) => setState(() {}),
                         ),
-                        child: Text(DateFormatter.date(_date)),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    // Référence.
-                    TextFormField(
-                      controller: _referenceCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Référence (optionnel)',
-                        hintText: 'Ex. ID transaction Mobile Money',
-                        prefixIcon: Icon(Icons.tag),
-                      ),
-                      onChanged: (_) => setState(() {}),
-                    ),
-                    const SizedBox(height: 16),
-                    // Notes.
-                    TextFormField(
-                      controller: _notesCtrl,
-                      maxLines: 3,
-                      decoration: const InputDecoration(
-                        labelText: 'Notes (optionnel)',
-                        prefixIcon: Icon(Icons.notes),
-                      ),
-                      onChanged: (_) => setState(() {}),
-                    ),
-                    const SizedBox(height: 24),
-                    // Récapitulatif.
-                    _RecapCard(
-                      student: _selectedStudent,
-                      type: _type,
-                      amount: _parsedAmount ?? 0,
-                      method: _method,
-                      date: _date,
-                    ),
-                    const SizedBox(height: 16),
-                    // Bouton.
-                    FilledButton.icon(
-                      onPressed: _saving ? null : _submit,
-                      icon: _saving
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                  strokeWidth: 2, color: Colors.white),
-                            )
-                          : const Icon(Icons.check),
-                      label: Text(_saving ? 'Enregistrement…' : 'Enregistrer'),
-                    ),
+                    ],
                     const SizedBox(height: 24),
                   ],
                 ),
@@ -367,9 +315,14 @@ class _OfflineWarning extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 class _StudentField extends StatelessWidget {
-  const _StudentField({required this.student, required this.onTap});
+  const _StudentField({
+    required this.student,
+    required this.onTap,
+    this.onClear,
+  });
   final StudentDto? student;
   final VoidCallback onTap;
+  final VoidCallback? onClear;
 
   @override
   Widget build(BuildContext context) {
@@ -382,7 +335,13 @@ class _StudentField extends StatelessWidget {
         decoration: InputDecoration(
           labelText: 'Élève *',
           prefixIcon: const Icon(Icons.person_outline),
-          suffixIcon: const Icon(Icons.search),
+          suffixIcon: hasStudent
+              ? IconButton(
+                  icon: const Icon(Icons.clear),
+                  onPressed: onClear,
+                  tooltip: 'Changer d\'élève',
+                )
+              : const Icon(Icons.search),
           border: const OutlineInputBorder(),
         ),
         child: hasStudent
@@ -441,81 +400,450 @@ class _StudentField extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Carte récapitulative
+// Section "Subscriptions" : liste des subscriptions actives de l'élève
 // ---------------------------------------------------------------------------
 
-class _RecapCard extends StatelessWidget {
-  const _RecapCard({
-    required this.student,
-    required this.type,
-    required this.amount,
-    required this.method,
-    required this.date,
+class _SubscriptionsSection extends ConsumerWidget {
+  const _SubscriptionsSection({
+    required this.studentId,
+    required this.selected,
+    required this.onSelect,
   });
 
-  final StudentDto? student;
-  final PaymentType type;
-  final double amount;
-  final PaymentMethod method;
-  final DateTime date;
+  final int studentId;
+  final FeeSubscriptionDto? selected;
+  final ValueChanged<FeeSubscriptionDto> onSelect;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(studentSubscriptionsProvider(studentId));
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SectionHeader(
+          title: 'Subscriptions à encaisser',
+          subtitle: 'Sélectionnez la subscription à solder',
+          icon: Icons.assignment_outlined,
+        ),
+        const SizedBox(height: 4),
+        async.when(
+          data: (subs) {
+            if (subs.isEmpty) {
+              return Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      Icon(Icons.check_circle,
+                          color: Colors.green.shade400, size: 40),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Cet élève n\'a pas de solde dû',
+                        style: Theme.of(context).textTheme.titleMedium,
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Aucune subscription active avec un solde restant à payer.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }
+            return Column(
+              children: subs
+                  .map((s) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: _SubscriptionTile(
+                          subscription: s,
+                          selected: selected?.id == s.id,
+                          onTap: () => onSelect(s),
+                        ),
+                      ))
+                  .toList(),
+            );
+          },
+          loading: () => const Card(
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: Center(
+                child: SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            ),
+          ),
+          error: (e, _) => AppErrorWidget(message: e.toString()),
+        ),
+      ],
+    );
+  }
+}
+
+class _SubscriptionTile extends StatelessWidget {
+  const _SubscriptionTile({
+    required this.subscription,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final FeeSubscriptionDto subscription;
+  final bool selected;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final sub = subscription;
+    final settled = sub.isSettled;
     return Card(
-      color: theme.colorScheme.primaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.receipt_long,
-                    color: theme.colorScheme.onPrimaryContainer, size: 20),
-                const SizedBox(width: 8),
-                Text(
-                  'Récapitulatif',
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    color: theme.colorScheme.onPrimaryContainer,
-                    fontWeight: FontWeight.w600,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: selected
+            ? BorderSide(color: theme.colorScheme.primary, width: 2)
+            : BorderSide.none,
+      ),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.assignment_outlined,
+                      size: 18, color: theme.colorScheme.primary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      sub.classroomName ?? 'Subscription #${sub.id}',
+                      style: theme.textTheme.titleSmall,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
+                  StatusBadge(
+                    label: sub.status.label,
+                    color: _subscriptionStatusColor(sub.status),
+                  ),
+                  if (selected) ...[
+                    const SizedBox(width: 8),
+                    Icon(Icons.check_circle,
+                        color: theme.colorScheme.primary, size: 20),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: _AmountColumn(
+                      label: 'Convenu',
+                      value: MoneyFormatter.format(sub.agreedAmount,
+                          withSymbol: false),
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  Expanded(
+                    child: _AmountColumn(
+                      label: 'Payé',
+                      value: MoneyFormatter.format(sub.totalPaid,
+                          withSymbol: false),
+                      color: Colors.green.shade700,
+                    ),
+                  ),
+                  Expanded(
+                    child: _AmountColumn(
+                      label: 'Reste',
+                      value: MoneyFormatter.format(sub.balanceDue,
+                          withSymbol: false),
+                      color: sub.balanceDue > 0
+                          ? Colors.orange.shade700
+                          : Colors.green.shade700,
+                      bold: true,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(
+                  value: sub.paymentRate,
+                  minHeight: 6,
+                  backgroundColor: theme.colorScheme.surfaceContainerHighest,
+                  color: settled ? Colors.green : Colors.orange,
                 ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            _RecapRow(
-              label: 'Élève',
-              value: student?.fullName ?? '—',
-              onColor: theme.colorScheme.onPrimaryContainer,
-            ),
-            _RecapRow(
-              label: 'Type',
-              value: type.label,
-              onColor: theme.colorScheme.onPrimaryContainer,
-            ),
-            _RecapRow(
-              label: 'Montant',
-              value: MoneyFormatter.format(amount),
-              onColor: theme.colorScheme.onPrimaryContainer,
-              valueStyle: TextStyle(
-                color: theme.colorScheme.onPrimaryContainer,
-                fontWeight: FontWeight.w700,
-                fontSize: 18,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Taux : ${(sub.paymentRate * 100).toStringAsFixed(0)} %',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AmountColumn extends StatelessWidget {
+  const _AmountColumn({
+    required this.label,
+    required this.value,
+    required this.color,
+    this.bold = false,
+  });
+
+  final String label;
+  final String value;
+  final Color color;
+  final bool bold;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        Text(
+          value,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: color,
+            fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Couleur associée à un [SubscriptionStatus].
+Color _subscriptionStatusColor(SubscriptionStatus s) {
+  switch (s) {
+    case SubscriptionStatus.active:
+      return Colors.blue;
+    case SubscriptionStatus.partiel:
+      return Colors.orange;
+    case SubscriptionStatus.payed:
+      return Colors.green;
+    case SubscriptionStatus.annule:
+      return Colors.grey;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Formulaire de saisie du paiement (montant + méthode + référence + submit)
+// ---------------------------------------------------------------------------
+
+class _PaymentForm extends StatelessWidget {
+  const _PaymentForm({
+    required this.subscription,
+    required this.amountCtrl,
+    required this.referenceCtrl,
+    required this.method,
+    required this.onMethodChanged,
+    required this.parsedAmount,
+    required this.remainingDue,
+    required this.saving,
+    required this.onSubmit,
+    required this.onAmountChanged,
+  });
+
+  final FeeSubscriptionDto subscription;
+  final TextEditingController amountCtrl;
+  final TextEditingController referenceCtrl;
+  final PaymentMethod method;
+  final ValueChanged<PaymentMethod?> onMethodChanged;
+  final double? parsedAmount;
+  final double? remainingDue;
+  final bool saving;
+  final VoidCallback onSubmit;
+  final ValueChanged<String> onAmountChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final sub = subscription;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+          // Carte récapitulative de la subscription sélectionnée.
+          Card(
+            color: theme.colorScheme.primaryContainer,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.receipt_long,
+                          color: theme.colorScheme.onPrimaryContainer,
+                          size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Subscription sélectionnée',
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            color: theme.colorScheme.onPrimaryContainer,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      StatusBadge(
+                        label: sub.status.label,
+                        color: _subscriptionStatusColor(sub.status)
+                            .withValues(alpha: 0.9),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  _RecapRow(
+                    label: 'Convenu',
+                    value: MoneyFormatter.format(sub.agreedAmount),
+                    onColor: theme.colorScheme.onPrimaryContainer,
+                  ),
+                  _RecapRow(
+                    label: 'Déjà payé',
+                    value: MoneyFormatter.format(sub.totalPaid),
+                    onColor: theme.colorScheme.onPrimaryContainer,
+                  ),
+                  _RecapRow(
+                    label: 'Solde dû',
+                    value: MoneyFormatter.format(sub.balanceDue),
+                    onColor: theme.colorScheme.onPrimaryContainer,
+                    valueStyle: TextStyle(
+                      color: theme.colorScheme.onPrimaryContainer,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 18,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: sub.paymentRate,
+                      minHeight: 6,
+                      backgroundColor:
+                          theme.colorScheme.onPrimaryContainer.withValues(
+                        alpha: 0.2,
+                      ),
+                      color: theme.colorScheme.onPrimaryContainer,
+                    ),
+                  ),
+                ],
               ),
             ),
-            _RecapRow(
-              label: 'Méthode',
-              value: method.label,
-              onColor: theme.colorScheme.onPrimaryContainer,
+          ),
+          const SizedBox(height: 16),
+          // Montant.
+          TextFormField(
+            controller: amountCtrl,
+            keyboardType:
+                const TextInputType.numberWithOptions(decimal: true),
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(RegExp(r'[\d.,]')),
+            ],
+            decoration: const InputDecoration(
+              labelText: 'Montant',
+              hintText: '0',
+              suffixText: 'FCFA',
+              prefixIcon: Icon(Icons.payments_outlined),
             ),
-            _RecapRow(
-              label: 'Date',
-              value: DateFormatter.date(date),
-              onColor: theme.colorScheme.onPrimaryContainer,
+            validator: (v) {
+              final amt = parsedAmount;
+              if (amt == null || amt <= 0) {
+                return 'Entrez un montant valide (> 0).';
+              }
+              if (amt > sub.balanceDue) {
+                return 'Le montant ne peut pas dépasser le solde dû '
+                    '(${MoneyFormatter.format(sub.balanceDue, withSymbol: false)} FCFA).';
+              }
+              return null;
+            },
+            onChanged: onAmountChanged,
+          ),
+          const SizedBox(height: 8),
+          // Reste à payer (live).
+          if (parsedAmount != null && parsedAmount! > 0)
+            Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: Text(
+                () {
+                  final rem = remainingDue ?? sub.balanceDue - parsedAmount!;
+                  if (rem < 0) {
+                    return '⚠️ Dépasse le solde dû de '
+                        '${MoneyFormatter.format(-rem, withSymbol: false)} FCFA.';
+                  }
+                  return 'Reste à payer après ce paiement : '
+                      '${MoneyFormatter.format(rem, withSymbol: false)} FCFA.';
+                }(),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: (remainingDue ?? 0) < 0
+                      ? Colors.red.shade700
+                      : Colors.green.shade700,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
-          ],
-        ),
+          const SizedBox(height: 16),
+          // Méthode.
+          DropdownButtonFormField<PaymentMethod>(
+            value: method,
+            decoration: const InputDecoration(
+              labelText: 'Méthode de paiement',
+              prefixIcon: Icon(Icons.account_balance_wallet_outlined),
+            ),
+            items: PaymentMethod.values
+                .map((m) => DropdownMenuItem(
+                      value: m,
+                      child: Text(m.label),
+                    ))
+                .toList(),
+            onChanged: onMethodChanged,
+          ),
+          const SizedBox(height: 16),
+          // Référence.
+          TextFormField(
+            controller: referenceCtrl,
+            decoration: const InputDecoration(
+              labelText: 'Référence (optionnel)',
+              hintText: 'Ex. ID transaction Mobile Money',
+              prefixIcon: Icon(Icons.tag),
+            ),
+          ),
+          const SizedBox(height: 24),
+          // Bouton.
+          FilledButton.icon(
+            onPressed: saving ? null : onSubmit,
+            icon: saving
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Colors.white),
+                  )
+                : const Icon(Icons.check),
+            label: Text(saving ? 'Enregistrement…' : 'Enregistrer'),
+          ),
+        ],
       ),
     );
   }
@@ -575,10 +903,6 @@ class _StudentPickerDialogState extends ConsumerState<_StudentPickerDialog> {
   DateTime? _lastSearchAt;
 
   void _onSearchChanged(String value) {
-    // Debounce : on ne met à jour _search (qui alimente le provider) que 300ms
-    // après la dernière frappe. L'AppSearchBar gère l'affichage du texte saisi
-    // immédiatement (contrôleur interne), donc l'utilisateur ne subit pas de
-    // latence visuelle.
     final now = DateTime.now();
     _lastSearchAt = now;
     Future.delayed(const Duration(milliseconds: 300), () {
