@@ -1,0 +1,199 @@
+/// État d'authentification : JWT, utilisateur courant, permissions, établissement.
+///
+/// Le JWT est stocké dans le [SecureStorage] (Keystore/Keychain). L'interceptor
+/// Dio le lit via `ref.read(authProvider).token` à chaque requête.
+library;
+
+import 'package:dio/dio.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../shared/models/auth_dto.dart';
+import '../../features/connections/connection_state.dart';
+import '../network/api_endpoints.dart';
+import '../network/api_exceptions.dart';
+import '../network/dio_client.dart';
+import 'secure_storage.dart';
+
+/// État immuable d'authentification.
+class AuthState {
+  final UserDto? user;
+  final String? token;
+  final List<String> permissions;
+  final List<String> roles;
+  final int? establishmentId;
+  final bool isLoading;
+  final String? error;
+
+  const AuthState({
+    this.user,
+    this.token,
+    this.permissions = const [],
+    this.roles = const [],
+    this.establishmentId,
+    this.isLoading = false,
+    this.error,
+  });
+
+  bool get isAuthenticated => token != null && token!.isNotEmpty && user != null;
+  bool get isSuperuser => permissions.contains('*');
+
+  AuthState copyWith({
+    UserDto? user,
+    String? token,
+    List<String>? permissions,
+    List<String>? roles,
+    int? establishmentId,
+    bool? isLoading,
+    String? error,
+    bool clearError = false,
+  }) =>
+      AuthState(
+        user: user ?? this.user,
+        token: token ?? this.token,
+        permissions: permissions ?? this.permissions,
+        roles: roles ?? this.roles,
+        establishmentId: establishmentId ?? this.establishmentId,
+        isLoading: isLoading ?? this.isLoading,
+        error: clearError ? null : (error ?? this.error),
+      );
+
+  static const initial = AuthState();
+}
+
+/// Provider d'authentification.
+final authProvider =
+    NotifierProvider<AuthNotifier, AuthState>(AuthNotifier.new);
+
+class AuthNotifier extends Notifier<AuthState> {
+  @override
+  AuthState build() {
+    _restoreSession();
+    return const AuthState();
+  }
+
+  Dio get _dio => ref.read(dioProvider);
+  SecureStorage get _storage => ref.read(secureStorageProvider);
+
+  String? get _serverUrl => ref.read(connectionProvider).serverUrl;
+
+  /// Restaure la session JWT depuis le stockage sécurisé au démarrage.
+  Future<void> _restoreSession() async {
+    final token = await _storage.getJwt();
+    if (token == null || token.isEmpty) return;
+    state = state.copyWith(token: token);
+    // Vérifie la validité du token via /auth/me.
+    await fetchMe();
+  }
+
+  /// Connexion : `POST /auth/login`.
+  Future<bool> login({
+    required String username,
+    required String password,
+    required String establishmentCode,
+  }) async {
+    if (_serverUrl == null) {
+      state = state.copyWith(error: 'Aucun serveur configuré. Appairez d\'abord un terminal.');
+      return false;
+    }
+    state = state.copyWith(isLoading: true, clearError: true);
+    try {
+      final resp = await _dio.post(
+        buildUrl(_serverUrl!, ApiEndpoints.authLogin),
+        data: LoginRequest(
+          username: username,
+          password: password,
+          establishmentCode: establishmentCode,
+        ).toJson(),
+      );
+      final login = LoginResponse.fromJson(resp.data as Map<String, dynamic>);
+      await _storage.saveJwt(login.accessToken);
+      await _storage.saveCredentials(username, password);
+      state = state.copyWith(
+        token: login.accessToken,
+        user: login.user,
+        permissions: login.permissions,
+        roles: login.roles,
+        establishmentId: login.establishment?.id,
+        isLoading: false,
+      );
+      return true;
+    } on DioException catch (e) {
+      final api = (e.error is ApiException) ? e.error as ApiException : dioErrorToApiException(e);
+      state = state.copyWith(isLoading: false, error: api.message);
+      return false;
+    } catch (e) {
+      state = state.copyWith(isLoading: false, error: e.toString());
+      return false;
+    }
+  }
+
+  /// Récupère le profil courant : `GET /auth/me`.
+  Future<void> fetchMe() async {
+    if (_serverUrl == null || state.token == null) return;
+    try {
+      final resp = await _dio.get(buildUrl(_serverUrl!, ApiEndpoints.authMe));
+      final data = resp.data as Map<String, dynamic>;
+      final user = UserDto.fromJson(data['user'] as Map<String, dynamic>? ?? data);
+      final perms = List<String>.from(data['permissions'] as List? ?? const []);
+      final roles = List<String>.from(data['roles'] as List? ?? const []);
+      final estId = (data['establishment_id'] as num?)?.toInt();
+      state = state.copyWith(
+        user: user,
+        permissions: perms,
+        roles: roles,
+        establishmentId: estId,
+        clearError: true,
+      );
+    } catch (_) {
+      // Token peut être expiré → on déconnecte.
+      await logoutLocal();
+    }
+  }
+
+  /// Change le mot de passe : `POST /auth/change-password`.
+  Future<bool> changePassword({
+    required String oldPassword,
+    required String newPassword,
+  }) async {
+    if (_serverUrl == null) return false;
+    try {
+      await _dio.post(
+        buildUrl(_serverUrl!, ApiEndpoints.authChangePassword),
+        data: {
+          'old_password': oldPassword,
+          'new_password': newPassword,
+        },
+      );
+      return true;
+    } on DioException catch (e) {
+      final api = (e.error is ApiException) ? e.error as ApiException : dioErrorToApiException(e);
+      state = state.copyWith(error: api.message);
+      return false;
+    }
+  }
+
+  /// Déconnexion locale (efface le JWT).
+  Future<void> logoutLocal() async {
+    await _storage.deleteJwt();
+    state = const AuthState();
+  }
+
+  /// Déconnexion serveur + locale : `POST /auth/logout`.
+  Future<void> logout() async {
+    if (_serverUrl != null && state.token != null) {
+      try {
+        await _dio.post(buildUrl(_serverUrl!, ApiEndpoints.authLogout));
+      } catch (_) {
+        // Ignoré : on déconnecte quand même localement.
+      }
+    }
+    await logoutLocal();
+  }
+
+  /// Appelé par l'interceptor Dio en cas de 401.
+  void handleUnauthorized() {
+    if (state.token != null) {
+      logoutLocal();
+    }
+  }
+}
