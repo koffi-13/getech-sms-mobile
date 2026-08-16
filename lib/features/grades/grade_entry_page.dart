@@ -1,17 +1,23 @@
 /// Page « Saisie des notes » : sélection classe → période → matière (cascade),
-/// liste des évaluations, création d'évaluation (GRADE_EDIT), saisie des notes
-/// par élève (GradeEntryDto) avec champ absent + commentaire.
+/// liste des évaluations (avec progress + maxScore), création d'évaluation
+/// (GRADE_EDIT, type via [CommonAssessmentTypes.defaults]), saisie des notes
+/// par élève ([GradeEntryDto]) avec champ absent + commentaire + **verrouillage**
+/// (is_locked) : si la note est verrouillée, l'input et la case « Absent » sont
+/// désactivés et un badge « Verrouillée » s'affiche. Le serveur ignore les
+/// notes verrouillées dans le bulk_save (skipped_count).
+///
+/// RBAC :
+/// - GRADE_READ  → lecture seule (sheet ouverte en consultation, bouton
+///   « Enregistrer » masqué).
+/// - GRADE_EDIT  → création / suppression d'évaluations + saisie des notes.
 ///
 /// Aligné sur le contrat desktop :
 /// - Évaluations : `GET /grades/assessments?class_subject_id=&period_id=`
 /// - Notes : `GET /grades/assessments/{id}/grades` → list[GradeEntryResponse]
 /// - Sauvegarde : `POST /grades/assessments/{id}/grades` {grades: list[dict]}
-///
-/// RBAC : si l'utilisateur n'a pas la permission GRADE_READ, affiche un
-/// message « Permission insuffisante ».
 library;
 
-import 'package:collection/collection.dart'; // firstOrNull (extension Iterable)
+import 'package:collection/collection.dart'; // firstOrNull
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -26,6 +32,7 @@ import '../../shared/models/classroom_dto.dart';
 import '../../shared/models/grade_dto.dart';
 import '../../shared/widgets/widgets.dart';
 import 'grade_controller.dart';
+import 'grade_utils.dart';
 
 class GradeEntryPage extends ConsumerWidget {
   const GradeEntryPage({super.key});
@@ -190,7 +197,7 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
                           .map((a) => _AssessmentCard(
                                 assessment: a,
                                 canEdit: canEdit,
-                                onTap: () => _openGradeEntry(a),
+                                onTap: () => _openGradeEntry(a, canEdit),
                                 onDelete: canEdit
                                     ? () => _confirmDelete(a)
                                     : null,
@@ -223,12 +230,15 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
     );
   }
 
-  void _openGradeEntry(AssessmentDto assessment) {
+  void _openGradeEntry(AssessmentDto assessment, bool canEdit) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (_) => _GradeEntrySheet(assessment: assessment),
+      builder: (_) => _GradeEntrySheet(
+        assessment: assessment,
+        canEdit: canEdit,
+      ),
     );
   }
 
@@ -334,7 +344,8 @@ class _ClassSubjectField extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (classroomId == null) {
-      return _DisabledField(label: 'Matière', hint: 'Sélectionnez une classe d\'abord.');
+      return const _DisabledField(
+          label: 'Matière', hint: 'Sélectionnez une classe d\'abord.');
     }
     final async = ref.watch(classSubjectsProvider(classroomId!));
     return async.when(
@@ -521,6 +532,10 @@ class _Chip extends StatelessWidget {
 ///
 /// Champs serveur (AssessmentCreateRequest) : {class_subject_id, period_id,
 /// name, assessment_type_id, max_score, date_taken}.
+///
+/// Le type d'évaluation est choisi parmi [CommonAssessmentTypes.defaults]
+/// (aucun endpoint REST ne liste les types pour le moment — réf. serveur).
+/// La note maximale est pré-remplie avec `type.defaultMaxScore`.
 class _CreateAssessmentSheet extends ConsumerStatefulWidget {
   const _CreateAssessmentSheet({
     required this.classSubjectId,
@@ -538,16 +553,25 @@ class _CreateAssessmentSheet extends ConsumerStatefulWidget {
 class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> {
   final _formKey = GlobalKey<FormState>();
   final _nameCtrl = TextEditingController();
-  final _typeIdCtrl = TextEditingController(text: '1');
+  AssessmentTypeInfo? _type = CommonAssessmentTypes.defaults.first;
   DateTime? _date = DateTime.now();
-  double _maxScore = defaultMaxScore;
+  double _maxScore = CommonAssessmentTypes.defaults.first.defaultMaxScore.toDouble();
   bool _saving = false;
 
   @override
   void dispose() {
     _nameCtrl.dispose();
-    _typeIdCtrl.dispose();
     super.dispose();
+  }
+
+  void _onTypeChanged(AssessmentTypeInfo? t) {
+    if (t == null) return;
+    setState(() {
+      _type = t;
+      // Pré-remplit la note maximale avec le défaut du type sélectionné
+      // si l'utilisateur n'a pas encore personnalisé la valeur.
+      _maxScore = t.defaultMaxScore.toDouble();
+    });
   }
 
   @override
@@ -587,24 +611,28 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
                     (v == null || v.trim().isEmpty) ? 'Nom requis' : null,
               ),
               const SizedBox(height: 12),
-              TextFormField(
-                controller: _typeIdCtrl,
+              DropdownButtonFormField<AssessmentTypeInfo>(
+                value: _type,
                 decoration: const InputDecoration(
-                  labelText: 'Type d\'évaluation (ID) *',
-                  hintText: 'ex : 1',
+                  labelText: 'Type d\'évaluation *',
                   border: OutlineInputBorder(),
                   isDense: true,
                 ),
-                keyboardType: TextInputType.number,
-                validator: (v) {
-                  final n = int.tryParse(v ?? '');
-                  if (n == null || n <= 0) return 'ID type invalide';
-                  return null;
-                },
+                items: CommonAssessmentTypes.defaults
+                    .map((t) => DropdownMenuItem(
+                          value: t,
+                          child: Text(
+                            '${t.name} (${t.category.label})',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ))
+                    .toList(),
+                onChanged: _onTypeChanged,
               ),
               const SizedBox(height: 8),
               Text(
-                'Astuce : Devoir=1, Composition=2, Interrogation=3, TP=4 (selon le référentiel serveur).',
+                'Astuce : les types d\'évaluation sont gérés côté desktop. '
+                'Si l\'ID attendu par le serveur diffère, la création renverra une erreur.',
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
@@ -660,6 +688,7 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
 
   Future<void> _submit() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
+    if (_type == null) return;
     setState(() => _saving = true);
     try {
       await ref.read(gradeControllerProvider).createAssessment(
@@ -667,7 +696,7 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
               classSubjectId: widget.classSubjectId,
               periodId: widget.periodId,
               name: _nameCtrl.text.trim(),
-              assessmentTypeId: int.parse(_typeIdCtrl.text.trim()),
+              assessmentTypeId: _type!.id,
               maxScore: _maxScore,
               dateTaken: DateFormatter.toIso(_date),
             ),
@@ -755,12 +784,22 @@ class _NumberStepper extends StatelessWidget {
 /// Bottom sheet de saisie des notes d'une évaluation : un élève par ligne,
 /// champ numérique (0–maxScore, pas 0.5) + case « Absent » + commentaire.
 ///
+/// **Verrouillage** : si `grade.isLocked == true`, l'input de note, la case
+/// « Absent » et le commentaire sont désactivés, et un badge « Verrouillée »
+/// s'affiche. Le serveur ignore les notes verrouillées dans le bulk_save
+/// (skipped_count) — le résultat renvoyé l'indique explicitement.
+///
+/// **Lecture seule** : si [canEdit] est `false` (GRADE_READ uniquement), le
+/// bouton « Enregistrer » est masqué et un bandeau « Lecture seule » s'affiche.
+///
 /// Utilise [GradeEntryDto] (aligné sur GradeEntryResponse serveur) :
 /// {student_id, student_name, student_matricule, grade_id, value, is_absent,
 /// comment, is_locked}.
 class _GradeEntrySheet extends ConsumerStatefulWidget {
-  const _GradeEntrySheet({required this.assessment});
+  const _GradeEntrySheet({required this.assessment, required this.canEdit});
+
   final AssessmentDto assessment;
+  final bool canEdit;
 
   @override
   ConsumerState<_GradeEntrySheet> createState() => _GradeEntrySheetState();
@@ -813,6 +852,32 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
               ].join(' • '),
               style: Theme.of(context).textTheme.bodySmall,
             ),
+            if (!widget.canEdit) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.blueGrey.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.visibility_outlined,
+                        size: 14, color: Colors.blueGrey.shade700),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Lecture seule (GRADE_READ)',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: Colors.blueGrey.shade700,
+                            fontWeight: FontWeight.w600,
+                          ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             const Divider(height: 24),
             Expanded(
               child: async.when(
@@ -838,6 +903,7 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
                       return _GradeRow(
                         grade: draft,
                         maxScore: widget.assessment.maxScore,
+                        editable: widget.canEdit,
                         onChanged: (g) =>
                             setState(() => _drafts[original.studentId] = g),
                       );
@@ -853,18 +919,20 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
                 ),
               ),
             ),
-            const SizedBox(height: 8),
-            FilledButton.icon(
-              onPressed: _saving ? null : _save,
-              icon: _saving
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.save_outlined),
-              label: const Text('Enregistrer'),
-            ),
+            if (widget.canEdit) ...[
+              const SizedBox(height: 8),
+              FilledButton.icon(
+                onPressed: _saving ? null : _save,
+                icon: _saving
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.save_outlined),
+                label: const Text('Enregistrer'),
+              ),
+            ],
           ],
         ),
       ),
@@ -884,7 +952,8 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
           SnackBar(
             content: Text(
               resp.skippedCount > 0
-                  ? '${resp.savedCount} note(s) enregistrée(s), ${resp.skippedCount} ignorée(s).'
+                  ? '${resp.savedCount} note(s) enregistrée(s), '
+                      '${resp.skippedCount} ignorée(s) (verrouillées).'
                   : '${resp.savedCount} note(s) enregistrée(s).',
             ),
           ),
@@ -909,20 +978,24 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
 
 /// Ligne de saisie d'une note : nom + matricule de l'élève, champ numérique
 /// (0–maxScore, snap au pas 0.5), case « Absent » qui désactive le champ,
-/// et champ commentaire. Badge « verrouillé » si `is_locked`.
+/// et champ commentaire.
 ///
-/// Le [TextEditingController] est géré dans un [State] dédié pour conserver
-/// la position du curseur entre les rebuilds et synchroniser le texte quand
-/// l'utilisateur bascule la case « Absent ».
+/// **Verrouillage** : si `grade.isLocked == true`, badge « Verrouillée »,
+/// tous les champs désactivés.
+///
+/// **Lecture seule** : si [editable] est `false`, idem (champs désactivés),
+/// sans le badge de verrouillage.
 class _GradeRow extends StatefulWidget {
   const _GradeRow({
     required this.grade,
     required this.maxScore,
+    required this.editable,
     required this.onChanged,
   });
 
   final GradeEntryDto grade;
   final double maxScore;
+  final bool editable;
   final ValueChanged<GradeEntryDto> onChanged;
 
   @override
@@ -1004,6 +1077,8 @@ class _GradeRowState extends State<_GradeRow> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final locked = widget.grade.isLocked;
+    final readOnly = !widget.editable;
+    final disabled = locked || readOnly;
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
       child: Padding(
@@ -1032,24 +1107,31 @@ class _GradeRowState extends State<_GradeRow> {
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 6, vertical: 2),
                               decoration: BoxDecoration(
-                                color: Colors.grey.shade300,
+                                color: Colors.orange.shade50,
                                 borderRadius: BorderRadius.circular(6),
                               ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
                                   Icon(Icons.lock,
-                                      size: 11, color: Colors.grey.shade700),
+                                      size: 11, color: Colors.orange.shade700),
                                   const SizedBox(width: 2),
                                   Text(
-                                    'Verrouillé',
+                                    'Verrouillée',
                                     style: theme.textTheme.labelSmall?.copyWith(
-                                      color: Colors.grey.shade700,
+                                      color: Colors.orange.shade700,
                                       fontWeight: FontWeight.w600,
                                     ),
                                   ),
                                 ],
                               ),
+                            ),
+                          if (readOnly && !locked)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 4),
+                              child: Icon(Icons.visibility_outlined,
+                                  size: 14,
+                                  color: theme.colorScheme.onSurfaceVariant),
                             ),
                         ],
                       ),
@@ -1066,7 +1148,7 @@ class _GradeRowState extends State<_GradeRow> {
                     controller: _valueCtrl,
                     keyboardType: const TextInputType.numberWithOptions(
                         decimal: true),
-                    enabled: !widget.grade.isAbsent && !locked,
+                    enabled: !widget.grade.isAbsent && !disabled,
                     decoration: InputDecoration(
                       prefixText: '/ ${widget.maxScore.toStringAsFixed(0)}  ',
                       isDense: true,
@@ -1081,7 +1163,7 @@ class _GradeRowState extends State<_GradeRow> {
                   children: [
                     Checkbox(
                       value: widget.grade.isAbsent,
-                      onChanged: locked
+                      onChanged: disabled
                           ? null
                           : (v) {
                               final absent = v ?? false;
@@ -1102,7 +1184,7 @@ class _GradeRowState extends State<_GradeRow> {
             const SizedBox(height: 8),
             TextField(
               controller: _commentCtrl,
-              enabled: !locked,
+              enabled: !disabled,
               decoration: InputDecoration(
                 isDense: true,
                 hintText: 'Commentaire (optionnel)',

@@ -1,7 +1,13 @@
-/// Page « Bulletin » d'un élève : en-tête (élève, classe, période, année),
-/// moyenne générale (gros), rang/effectif, tableau des matières (matière,
-/// coef, moyenne, moyenne classe, enseignant), détail des évaluations par
-/// matière (dépliable) et appréciation générale.
+/// Page « Bulletin » d'un élève : en-tête (avatar coloré par sexe, élève,
+/// classe, période, année, statut), 3 KPI (moyenne générale colorée par
+/// mention, rang avec ex-æquo, mention), carte honneurs/distinctions si
+/// présente, carte conduite/absences/retards, tableau des matières (matière
+/// + code + coef + fac + enseignant + domaine, moyenne colorée + badge
+/// mention, note de composition, moyenne de classe, badge « Note importée »
+/// si from_previous_grade, détail dépliable des évaluations), appréciation
+/// générale, action « Partager / Imprimer » (snackbar — endpoint PDF à venir).
+///
+/// Si `overall_average` est nul : message « Aucune note pour cette période ».
 ///
 /// Le contrat serveur `GET /grades/bulletin/{student_id}` exige `classroom_id`
 /// et `period_id` comme query params. Si l'appelant (ex : RankingPage) les
@@ -19,6 +25,7 @@ import '../../shared/models/classroom_dto.dart';
 import '../../shared/models/grade_dto.dart';
 import '../../shared/widgets/widgets.dart';
 import 'grade_controller.dart';
+import 'grade_utils.dart';
 
 class BulletinPage extends ConsumerWidget {
   const BulletinPage({super.key, required this.studentId});
@@ -111,7 +118,10 @@ class _BulletinScopeState extends ConsumerState<_BulletinScope> {
             icon: const Icon(Icons.print_outlined),
             onPressed: () {
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Export PDF à venir')),
+                const SnackBar(
+                  content: Text(
+                      'Export PDF — fonctionnalité à venir (endpoint serveur requis).'),
+                ),
               );
             },
           ),
@@ -255,77 +265,42 @@ class _BulletinView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Cas « aucune note » : moyenne générale nulle.
+    if (bulletin.overallAverage == null) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _BulletinHeader(bulletin: bulletin),
+          const SizedBox(height: 16),
+          const EmptyState(
+            title: 'Aucune note pour cette période',
+            message:
+                'Aucune note n\'a encore été saisie pour cet élève sur la période sélectionnée.',
+            icon: Icons.assignment_late_outlined,
+          ),
+        ],
+      );
+    }
+
+    final totalCoef = _totalCoef(bulletin.subjects);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         // --- En-tête ---
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    CircleAvatar(
-                      radius: 24,
-                      backgroundColor:
-                          Theme.of(context).colorScheme.primaryContainer,
-                      child: Text(
-                        bulletin.studentName.isNotEmpty
-                            ? bulletin.studentName[0].toUpperCase()
-                            : '?',
-                        style: Theme.of(context)
-                            .textTheme
-                            .headlineSmall
-                            ?.copyWith(
-                            color: Theme.of(context)
-                                .colorScheme
-                                .onPrimaryContainer,
-                          ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            bulletin.studentName,
-                            style: Theme.of(context).textTheme.titleLarge,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          if (bulletin.matricule != null &&
-                              bulletin.matricule!.isNotEmpty)
-                            Text('Mat. ${bulletin.matricule}',
-                                style: Theme.of(context).textTheme.bodySmall),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                const Divider(height: 24),
-                _HeaderRow(label: 'Classe', value: bulletin.classroomName),
-                _HeaderRow(label: 'Période', value: bulletin.periodName),
-                if (bulletin.schoolYearName != null)
-                  _HeaderRow(
-                      label: 'Année scolaire', value: bulletin.schoolYearName!),
-              ],
-            ),
-          ),
-        ),
+        _BulletinHeader(bulletin: bulletin),
         const SizedBox(height: 16),
 
-        // --- Moyenne générale + rang ---
+        // --- 3 KPI : Moyenne / Rang / Mention ---
         Row(
           children: [
             Expanded(
+              flex: 2,
               child: _KpiTile(
                 label: 'Moyenne générale',
                 value: GradeFormatter.format(bulletin.overallAverage),
                 icon: Icons.school,
-                color: Theme.of(context).colorScheme.primary,
+                color: MentionHelper.color(bulletin.overallAverage),
               ),
             ),
             const SizedBox(width: 12),
@@ -340,22 +315,51 @@ class _BulletinView extends StatelessWidget {
                 color: Colors.amber.shade700,
               ),
             ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _KpiTile(
+                label: 'Mention',
+                value: bulletin.mention ??
+                    MentionHelper.mention(bulletin.overallAverage),
+                icon: Icons.emoji_events_outlined,
+                color: MentionHelper.color(bulletin.overallAverage),
+                compact: true,
+              ),
+            ),
           ],
         ),
         const SizedBox(height: 16),
+
+        // --- Honneurs / distinctions ---
+        if (bulletin.honors != null && bulletin.honors!.hasAny) ...[
+          _HonorsCard(honors: bulletin.honors!),
+          const SizedBox(height: 16),
+        ],
+
+        // --- Conduite / absences / retards ---
+        if (bulletin.conduct != null ||
+            bulletin.absencesCount != null ||
+            bulletin.delaysCount != null) ...[
+          _ConductCard(
+            conduct: bulletin.conduct,
+            absences: bulletin.absencesCount,
+            delays: bulletin.delaysCount,
+          ),
+          const SizedBox(height: 16),
+        ],
 
         // --- Tableau des matières ---
         SectionHeader(
           title: 'Matières',
           icon: Icons.book_outlined,
           subtitle:
-              '${bulletin.subjects.length} matière(s) — coefficient total ${_totalCoef(bulletin.subjects)}',
+              '${bulletin.subjects.length} matière(s) — coefficient total $totalCoef',
         ),
         const SizedBox(height: 8),
         if (bulletin.subjects.isEmpty)
           const EmptyState(
             title: 'Aucune matière',
-            message: 'Aucune note n\'a été saisie pour cette période.',
+            message: 'Aucune matière n\'est rattachée à ce bulletin.',
             icon: Icons.book_outlined,
           )
         else
@@ -411,6 +415,21 @@ class _BulletinView extends StatelessWidget {
             ),
           ),
         ],
+
+        // --- Action partager / imprimer ---
+        const SizedBox(height: 16),
+        OutlinedButton.icon(
+          onPressed: () {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                    'Export PDF — fonctionnalité à venir (endpoint serveur requis).'),
+              ),
+            );
+          },
+          icon: const Icon(Icons.share_outlined),
+          label: const Text('Partager / Imprimer'),
+        ),
         const SizedBox(height: 24),
       ],
     );
@@ -422,6 +441,170 @@ class _BulletinView extends StatelessWidget {
       if (!sub.isFacultative) s += sub.coefficient;
     }
     return s;
+  }
+}
+
+/// En-tête du bulletin : avatar coloré par sexe, nom + matricule + sexe +
+/// statut, classe, période, année scolaire.
+class _BulletinHeader extends StatelessWidget {
+  const _BulletinHeader({required this.bulletin});
+  final BulletinDto bulletin;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isMale = (bulletin.sexe ?? '').toUpperCase() == 'M';
+    final avatarColor = bulletin.sexe == null
+        ? theme.colorScheme.primaryContainer
+        : (isMale
+            ? const Color(0xFF3B82F6).withValues(alpha: 0.18)
+            : const Color(0xFFEC4899).withValues(alpha: 0.18));
+    final avatarFg = bulletin.sexe == null
+        ? theme.colorScheme.onPrimaryContainer
+        : (isMale ? const Color(0xFF3B82F6) : const Color(0xFFEC4899));
+    final initials = bulletin.studentName.isEmpty
+        ? '?'
+        : bulletin.studentName
+            .split(' ')
+            .where((s) => s.isNotEmpty)
+            .take(2)
+            .map((s) => s[0])
+            .join('')
+            .toUpperCase();
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  radius: 26,
+                  backgroundColor: avatarColor,
+                  child: Text(
+                    initials,
+                    style: theme.textTheme.titleLarge?.copyWith(
+                      color: avatarFg,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        bulletin.studentName,
+                        style: theme.textTheme.titleLarge,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        children: [
+                          if (bulletin.matricule != null &&
+                              bulletin.matricule!.isNotEmpty)
+                            _HeaderChip(
+                              icon: Icons.badge_outlined,
+                              label: bulletin.matricule!,
+                            ),
+                          if (bulletin.sexe != null &&
+                              bulletin.sexe!.isNotEmpty)
+                            _SexeChip(sexe: bulletin.sexe!),
+                          if (bulletin.statusLabel != null &&
+                              bulletin.statusLabel!.isNotEmpty)
+                            _HeaderChip(
+                              icon: Icons.flag_outlined,
+                              label: bulletin.statusLabel!,
+                              color: theme.colorScheme.tertiary,
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const Divider(height: 24),
+            _HeaderRow(label: 'Classe', value: bulletin.classroomName),
+            _HeaderRow(label: 'Période', value: bulletin.periodName),
+            if (bulletin.schoolYearName != null)
+              _HeaderRow(
+                  label: 'Année scolaire', value: bulletin.schoolYearName!),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HeaderChip extends StatelessWidget {
+  const _HeaderChip({
+    required this.icon,
+    required this.label,
+    this.color,
+  });
+  final IconData icon;
+  final String label;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final fg = color ?? theme.colorScheme.onSurfaceVariant;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: fg.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: fg),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: fg,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SexeChip extends StatelessWidget {
+  const _SexeChip({required this.sexe});
+  final String sexe;
+
+  @override
+  Widget build(BuildContext context) {
+    final isMale = sexe.toUpperCase() == 'M';
+    final color =
+        isMale ? const Color(0xFF3B82F6) : const Color(0xFFEC4899);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        sexe.toUpperCase(),
+        style: TextStyle(
+          color: color,
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
   }
 }
 
@@ -457,15 +640,152 @@ class _KpiTile extends StatelessWidget {
     required this.value,
     required this.icon,
     required this.color,
+    this.compact = false,
   });
 
   final String label;
   final String value;
   final IconData icon;
   final Color color;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, size: 18, color: color),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              value,
+              style: (compact
+                      ? theme.textTheme.titleMedium
+                      : theme.textTheme.headlineSmall)
+                  ?.copyWith(
+                    fontWeight: FontWeight.w800,
+                    color: color,
+                  ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: theme.textTheme.bodySmall,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Carte des honneurs/distinctions : primaryLabel avec icône appropriée.
+class _HonorsCard extends StatelessWidget {
+  const _HonorsCard({required this.honors});
+  final BulletinHonorsDto honors;
+
+  IconData get _icon {
+    if (honors.honorRoll) return Icons.emoji_events;
+    if (honors.congratulations) return Icons.celebration;
+    if (honors.encouragement) return Icons.thumb_up_alt_outlined;
+    if (honors.warningBlame) return Icons.warning_amber_outlined;
+    return Icons.star_outline;
+  }
+
+  Color get _color {
+    if (honors.honorRoll) return const Color(0xFF10B981);
+    if (honors.congratulations) return const Color(0xFF3B82F6);
+    if (honors.encouragement) return const Color(0xFFF59E0B);
+    if (honors.warningBlame) return const Color(0xFFEF4444);
+    return Colors.grey;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final label = honors.primaryLabel ?? 'Distinction';
+    final color = _color;
+    return Card(
+      color: color.withValues(alpha: 0.08),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.18),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(_icon, size: 22, color: color),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      color: color,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  if (honors.absencesCount > 0 ||
+                      honors.delaysCount > 0) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      [
+                        if (honors.absencesCount > 0)
+                          '${honors.absencesCount} absence(s)',
+                        if (honors.delaysCount > 0)
+                          '${honors.delaysCount} retard(s)',
+                      ].join(' • '),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Carte conduite / absences / retards.
+class _ConductCard extends StatelessWidget {
+  const _ConductCard({
+    required this.conduct,
+    required this.absences,
+    required this.delays,
+  });
+
+  final String? conduct;
+  final int? absences;
+  final int? delays;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final hasStats = absences != null || delays != null;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -474,32 +794,108 @@ class _KpiTile extends StatelessWidget {
           children: [
             Row(
               children: [
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Icon(icon, size: 18, color: color),
-                ),
+                Icon(Icons.rule_outlined,
+                    size: 18, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Text('Conduite & assiduité',
+                    style: theme.textTheme.titleSmall),
               ],
             ),
-            const SizedBox(height: 12),
-            Text(
-              value,
-              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.w800,
-                    color: color,
-                  ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              label,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
+            if (hasStats) ...[
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  if (absences != null) ...[
+                    Expanded(
+                      child: _AttendanceStat(
+                        icon: Icons.event_busy,
+                        label: 'Absences',
+                        value: '$absences',
+                        color: absences! > 0
+                            ? const Color(0xFFEF4444)
+                            : const Color(0xFF10B981),
+                      ),
+                    ),
+                    if (delays != null) const SizedBox(width: 12),
+                  ],
+                  if (delays != null)
+                    Expanded(
+                      child: _AttendanceStat(
+                        icon: Icons.schedule,
+                        label: 'Retards',
+                        value: '$delays',
+                        color: delays! > 0
+                            ? const Color(0xFFF59E0B)
+                            : const Color(0xFF10B981),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+            if (conduct != null && conduct!.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surfaceContainerHighest
+                      .withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  conduct!,
+                  style: theme.textTheme.bodyMedium,
+                ),
+              ),
+            ],
           ],
         ),
       ),
+    );
+  }
+}
+
+class _AttendanceStat extends StatelessWidget {
+  const _AttendanceStat({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Row(
+      children: [
+        Container(
+          padding: const EdgeInsets.all(6),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.14),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(icon, size: 16, color: color),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(value,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: color,
+                  )),
+              Text(label, style: theme.textTheme.labelSmall),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -519,7 +915,7 @@ class _SubjectHeaderRow extends StatelessWidget {
         children: [
           Expanded(flex: 4, child: Text('Matière', style: style)),
           Expanded(flex: 2, child: Text('Coef.', style: style, textAlign: TextAlign.center)),
-          Expanded(flex: 2, child: Text('Moy.', style: style, textAlign: TextAlign.center)),
+          Expanded(flex: 3, child: Text('Moy. / Mention', style: style, textAlign: TextAlign.center)),
           Expanded(flex: 3, child: Text('Moy. classe', style: style, textAlign: TextAlign.center)),
         ],
       ),
@@ -527,6 +923,9 @@ class _SubjectHeaderRow extends StatelessWidget {
   }
 }
 
+/// Ligne matière : nom + code + badges (coef, fac., importée, domaine),
+/// enseignant, moyenne colorée + badge mention, note de composition,
+/// moyenne de classe, détail dépliable des évaluations.
 class _SubjectRow extends StatefulWidget {
   const _SubjectRow({required this.subject});
   final BulletinSubjectDto subject;
@@ -542,6 +941,7 @@ class _SubjectRowState extends State<_SubjectRow> {
   Widget build(BuildContext context) {
     final s = widget.subject;
     final theme = Theme.of(context);
+    final mentionColor = MentionHelper.color(s.average);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -566,58 +966,103 @@ class _SubjectRowState extends State<_SubjectRow> {
                                     fontWeight: FontWeight.w600)),
                           ),
                           if (s.isFacultative)
-                            Container(
-                              margin: const EdgeInsets.only(left: 6),
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 1),
-                              decoration: BoxDecoration(
-                                color: theme.colorScheme.tertiaryContainer,
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Text(
-                                'Fac.',
-                                style: theme.textTheme.labelSmall?.copyWith(
-                                  color:
-                                      theme.colorScheme.onTertiaryContainer,
-                                  fontWeight: FontWeight.w600,
-                                ),
+                            _MiniBadge(
+                              label: 'Fac.',
+                              color: theme.colorScheme.tertiary,
+                            ),
+                          if (s.isFromPreviousGrade)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 4),
+                              child: _MiniBadge(
+                                label: 'Note importée',
+                                color: Colors.purple,
                               ),
                             ),
                         ],
                       ),
-                      if (s.subjectCode != null && s.subjectCode!.isNotEmpty)
-                        Text(s.subjectCode!,
-                            style: theme.textTheme.bodySmall),
-                      if (s.teacher != null && s.teacher!.isNotEmpty)
-                        Text('Ens. ${s.teacher}',
-                            style: theme.textTheme.bodySmall),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 2,
+                        children: [
+                          if (s.subjectCode != null &&
+                              s.subjectCode!.isNotEmpty)
+                            Text(s.subjectCode!,
+                                style: theme.textTheme.bodySmall),
+                          if (s.domain != null && s.domain!.isNotEmpty)
+                            _InfoChip(s.domain!),
+                          if (s.teacher != null && s.teacher!.isNotEmpty)
+                            _InfoChip('Ens. ${s.teacher}'),
+                        ],
+                      ),
+                      if (s.noteComposition != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          'Composition : ${s.noteComposition!.toStringAsFixed(2)} / 20',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
                 Expanded(
                   flex: 2,
-                  child: Text(
-                    '${s.coefficient}',
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.bodyMedium,
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color:
+                            theme.colorScheme.primary.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        '${s.coefficient}',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                          color: theme.colorScheme.primary,
+                        ),
+                      ),
+                    ),
                   ),
                 ),
                 Expanded(
-                  flex: 2,
-                  child: Text(
-                    GradeFormatter.format(s.average),
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                        color: theme.colorScheme.primary),
+                  flex: 3,
+                  child: Column(
+                    children: [
+                      Text(
+                        GradeFormatter.format(s.average),
+                        textAlign: TextAlign.center,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                            fontWeight: FontWeight.w700, color: mentionColor),
+                      ),
+                      const SizedBox(height: 2),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: MentionHelper.backgroundColor(s.average),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          MentionHelper.mention(s.average),
+                          style: TextStyle(
+                            color: mentionColor,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 Expanded(
                   flex: 3,
                   child: Text(
-                    s.moyenneClasse == null
+                    s.classAverage == null
                         ? '—'
-                        : s.moyenneClasse!.toStringAsFixed(2),
+                        : s.classAverage!.toStringAsFixed(2),
                     textAlign: TextAlign.center,
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
@@ -626,9 +1071,7 @@ class _SubjectRowState extends State<_SubjectRow> {
                 ),
                 if (s.assessments.isNotEmpty)
                   Icon(
-                    _expanded
-                        ? Icons.expand_less
-                        : Icons.expand_more,
+                    _expanded ? Icons.expand_less : Icons.expand_more,
                     color: theme.colorScheme.onSurfaceVariant,
                     size: 20,
                   ),
@@ -656,6 +1099,50 @@ class _SubjectRowState extends State<_SubjectRow> {
         ],
         const Divider(height: 16),
       ],
+    );
+  }
+}
+
+class _MiniBadge extends StatelessWidget {
+  const _MiniBadge({
+    required this.label,
+    required this.color,
+  });
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color.withValues(alpha: 0.4), width: 1),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+class _InfoChip extends StatelessWidget {
+  const _InfoChip(this.label);
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
     );
   }
 }
