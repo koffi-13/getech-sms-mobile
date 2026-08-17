@@ -51,7 +51,7 @@ class EstablishmentsPage extends ConsumerWidget {
             async.when(
               data: (list) {
                 if (list.isEmpty) {
-                  return const SliverFillRemaining(
+                  return SliverFillRemaining(
                     hasScrollBody: false,
                     child: EmptyState(
                       icon: Icons.domain_outlined,

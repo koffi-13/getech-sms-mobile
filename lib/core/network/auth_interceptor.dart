@@ -26,7 +26,7 @@ class _AuthInterceptor extends Interceptor {
       options.headers['Authorization'] = 'Bearer $token';
     }
     // En-tête d'appareil appairé (si disponible).
-    final deviceToken = ref.read(connectionProvider.select((c) => c.deviceToken));
+    final deviceToken = ref.read(connectionProvider.select((c) => c.pairingToken));
     if (deviceToken != null) {
       options.headers['X-Device-Token'] = deviceToken;
     }

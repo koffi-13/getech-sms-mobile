@@ -54,7 +54,7 @@ class Outbox {
   }) async {
     await _db.into(_db.outboxEntries).insert(
           OutboxEntriesCompanion.insert(
-            tableName: table,
+            tableNameColumn: table,
             operation: operation,
             recordId: Value(recordId),
             payload: jsonEncode(payload),

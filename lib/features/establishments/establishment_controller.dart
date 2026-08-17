@@ -17,7 +17,7 @@
 library;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:logger/logger.dart';
+import 'package:logger/logger.dart' as log_pkg;
 
 import '../../core/auth/auth_state.dart';
 import '../../core/network/api_endpoints.dart';
@@ -26,9 +26,9 @@ import '../../core/network/dio_client.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/auth_dto.dart';
 
-final Logger _log = Logger(
-  printer: PrettyPrinter(methodNames: false, noBoxingByDefault: true),
-  level: Level.off,
+final log_pkg.Logger _log = log_pkg.Logger(
+  printer: log_pkg.PrettyPrinter(noBoxingByDefault: true),
+  level: log_pkg.Level.off,
 );
 
 // ---------------------------------------------------------------------------

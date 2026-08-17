@@ -20,7 +20,7 @@ library;
 
 import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:logger/logger.dart';
+import 'package:logger/logger.dart' as log_pkg;
 
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/sync_dto.dart';
@@ -31,9 +31,9 @@ import '../network/dio_client.dart';
 import 'outbox.dart';
 
 /// Logger du module sync.
-final Logger _log = Logger(
-  printer: PrettyPrinter(methodNames: false, noBoxingByDefault: true),
-  level: Level.debug,
+final log_pkg.Logger _log = log_pkg.Logger(
+  printer: log_pkg.PrettyPrinter(noBoxingByDefault: true),
+  level: log_pkg.Level.debug,
 );
 
 // ---------------------------------------------------------------------------
@@ -183,7 +183,7 @@ class SyncEngine {
     }
 
     final dio = _ref.read(dioProvider);
-    final since = conn.lastSync ?? DateTime(2000, 1, 1);
+    final since = conn.lastSyncAt ?? DateTime(2000, 1, 1);
     final url = buildUrl(conn.serverUrl!, ApiEndpoints.syncPull);
 
     try {
@@ -258,7 +258,7 @@ class SyncEngine {
     // Regroupement par table → liste de payloads.
     final changes = <String, List<Map<String, dynamic>>>{};
     for (final entry in pending) {
-      changes.putIfAbsent(entry.tableName, () => []).add(entry.payloadMap);
+      changes.putIfAbsent(entry.tableNameColumn, () => []).add(entry.payloadMap);
     }
 
     final dio = _ref.read(dioProvider);
@@ -288,7 +288,7 @@ class SyncEngine {
       // Marquage des entrées comme traitées.
       for (final entry in pending) {
         final conflictKey = entry.recordId != null
-            ? '${entry.tableName}:${entry.recordId}'
+            ? '${entry.tableNameColumn}:${entry.recordId}'
             : null;
         final isConflict = conflictKey != null &&
             pushResp.conflicts.contains(conflictKey);
@@ -307,7 +307,7 @@ class SyncEngine {
             final isDelete =
                 entry.operation.toUpperCase() == 'DELETE';
             await _updateRowSyncState(
-              entry.tableName,
+              entry.tableNameColumn,
               entry.recordId!,
               pushResp.serverTime,
               deleted: isDelete,
@@ -1153,7 +1153,7 @@ class SyncEngine {
           b.insert(
             _db.syncMetadata,
             SyncMetadataCompanion.insert(
-              tableName: table,
+              tableNameColumn: table,
               lastSyncedAt: Value(serverTime),
               lastCount: Value(totalChanges),
               updatedAt: Value(serverTime),

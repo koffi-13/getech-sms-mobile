@@ -35,7 +35,7 @@ class BalancesPage extends ConsumerStatefulWidget {
 }
 
 class _BalancesPageState extends ConsumerState<BalancesPage> {
-  BalanceFilter _filter = const BalanceFilter.empty();
+  BalanceFilter _filter = BalanceFilter.empty;
   String _searchText = '';
   DateTime? _lastSearchAt;
 
@@ -285,16 +285,12 @@ class _ClassroomFilter extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final selected = filter.classroomId != null;
-    return ActionChip(
+    return FilterChip(
       avatar: const Icon(Icons.school, size: 16),
       label: Text(_label()),
       selected: selected,
-      backgroundColor: selected
-          ? theme.colorScheme.primaryContainer
-          : theme.colorScheme.surfaceContainerHighest,
-      onPressed: () => _openPicker(context),
+      onSelected: (_) => _openPicker(context),
     );
   }
 
@@ -337,7 +333,6 @@ class _ClassroomFilter extends StatelessWidget {
             const Divider(height: 1),
             ...classrooms.map((c) => ListTile(
                   title: Text(c.name),
-                  subtitle: c.code.isEmpty ? null : Text(c.code),
                   trailing: filter.classroomId == c.id
                       ? const Icon(Icons.check)
                       : null,

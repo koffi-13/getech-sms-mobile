@@ -337,6 +337,27 @@ class RankingRowDto {
     );
   }
 
+  Map<String, dynamic> toJson() => {
+        'rank': rank,
+        'student_id': studentId,
+        'nom': nom,
+        'prenoms': prenoms,
+        'matricule': matricule,
+        'sexe': sexe,
+        'average': average,
+        'class_avg': classAvg,
+        'exam_avg': examAvg,
+        'weighted_period_avg': weightedPeriodAvg,
+        'weighted_max_score': weightedMaxScore,
+        'ranking_mode': rankingMode,
+        'subject_id': subjectId,
+        'inscription_type_id': inscriptionTypeId,
+        'student_status_id': studentStatusId,
+        'previous_period_averages': previousPeriodAverages,
+        'annual_average': annualAverage,
+      };
+}
+
 /// Bulletin d'un élève (dict renvoyé par `GET /grades/bulletin/{student_id}`).
 ///
 /// ⚠️ Aligné sur la vraie structure du desktop (grade_service.get_student_bulletin) :
@@ -474,6 +495,15 @@ class BulletinHonorsDto {
         absencesCount: (j['absences_count'] as num?)?.toInt() ?? 0,
         delaysCount: (j['delays_count'] as num?)?.toInt() ?? 0,
       );
+
+  Map<String, dynamic> toJson() => {
+        'honor_roll': honorRoll,
+        'encouragement': encouragement,
+        'congratulations': congratulations,
+        'warning_blame': warningBlame,
+        'absences_count': absencesCount,
+        'delays_count': delaysCount,
+      };
 }
 
 /// Matière dans un bulletin.
@@ -539,6 +569,24 @@ class BulletinSubjectDto {
         isFromPreviousGrade: (j['is_from_previous_grade'] as bool?) ?? false,
         appreciation: j['appreciation'] as String?,
       );
+
+  Map<String, dynamic> toJson() => {
+        'subject_id': subjectId,
+        'subject_name': subjectName,
+        'subject_code': subjectCode,
+        'domain': domain,
+        'coefficient': coefficient,
+        'is_facultative': isFacultative,
+        'teacher': teacher,
+        'average': average,
+        'moyenne_classe': moyenneClasse,
+        'note_composition': noteComposition,
+        'class_average': classAverage,
+        'assessments': assessments.map((e) => e.toJson()).toList(),
+        'mention': mention,
+        'is_from_previous_grade': isFromPreviousGrade,
+        'appreciation': appreciation,
+      };
 }
 
 /// Évaluation dans un bulletin.
@@ -569,4 +617,13 @@ class BulletinAssessmentDto {
         isAbsent: (j['is_absent'] as bool?) ?? false,
         date: j['date'] as String?,
       );
+
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'type': type,
+        'max_score': maxScore,
+        'value': value,
+        'is_absent': isAbsent,
+        'date': date,
+      };
 }

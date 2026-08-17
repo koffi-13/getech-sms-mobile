@@ -1,7 +1,4 @@
 /// État et providers de connexion au serveur (module Connexions).
-///
-/// Gère : URL serveur, code établissement, token d'appairage, statut
-/// en ligne/hors-ligne, latence, dernière synchro, mode hors-ligne forcé.
 library;
 
 import 'dart:async';
@@ -13,7 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/config/app_config.dart';
 import '../../core/network/api_endpoints.dart';
-import '../auth/secure_storage.dart';
+import '../../core/auth/secure_storage.dart';
 
 /// Statut de la connexion au serveur.
 enum ServerStatus {
@@ -23,209 +20,7 @@ enum ServerStatus {
   unpaired,
 }
 
-/// État immuable de la connexion.
-class ConnectionState {
-  final String? serverUrl;
-  final String? establishmentCode;
-  final String? deviceToken;
-  final String? deviceId;
-  final ServerStatus status;
-  final Duration? latency;
-  final DateTime? lastSync;
-  final int? lastSyncCount;
-  final bool forceOffline;
-  final String? discoveredServerName;
-
-  const ConnectionState({
-    this.serverUrl,
-    this.establishmentCode,
-    this.deviceToken,
-    this.deviceId,
-    this.status = ServerStatus.unpaired,
-    this.latency,
-    this.lastSync,
-    this.lastSyncCount,
-    this.forceOffline = false,
-    this.discoveredServerName,
-  });
-
-  bool get isPaired =>
-      serverUrl != null &&
-      serverUrl!.isNotEmpty &&
-      establishmentCode != null &&
-      establishmentCode!.isNotEmpty;
-
-  bool get canReachServer =>
-      isPaired && !forceOffline && status == ServerStatus.online;
-
-  ConnectionState copyWith({
-    String? serverUrl,
-    String? establishmentCode,
-    String? deviceToken,
-    String? deviceId,
-    ServerStatus? status,
-    Duration? latency,
-    DateTime? lastSync,
-    int? lastSyncCount,
-    bool? forceOffline,
-    String? discoveredServerName,
-    bool clearDiscovered = false,
-  }) =>
-      ConnectionState(
-        serverUrl: serverUrl ?? this.serverUrl,
-        establishmentCode: establishmentCode ?? this.establishmentCode,
-        deviceToken: deviceToken ?? this.deviceToken,
-        deviceId: deviceId ?? this.deviceId,
-        status: status ?? this.status,
-        latency: latency ?? this.latency,
-        lastSync: lastSync ?? this.lastSync,
-        lastSyncCount: lastSyncCount ?? this.lastSyncCount,
-        forceOffline: forceOffline ?? this.forceOffline,
-        discoveredServerName: clearDiscovered
-            ? null
-            : (discoveredServerName ?? this.discoveredServerName),
-      );
-
-  static const initial = ConnectionState();
-}
-
-/// Provider du storage sécurisé (singleton).
-final secureStorageProvider = Provider<SecureStorage>((ref) => SecureStorage());
-
-/// Provider de l'état de connexion.
-final connectionProvider =
-    NotifierProvider<ConnectionNotifier, ConnectionState>(ConnectionNotifier.new);
-
-/// Dio "nu" sans interceptor d'auth, pour le ping /health et l'appairage.
-final _bareDioProvider = Provider<Dio>((ref) {
-  return Dio(BaseOptions(
-    connectTimeout: AppConfig.connectTimeout,
-    receiveTimeout: AppConfig.receiveTimeout,
-    sendTimeout: AppConfig.sendTimeout,
-    headers: {'Accept': 'application/json'},
-  ));
-});
-
-class ConnectionNotifier extends Notifier<ConnectionState> {
-  @override
-  ConnectionState build() {
-    _loadFromStorage();
-    return const ConnectionState();
-  }
-
-  Future<void> _loadFromStorage() async {
-    final storage = ref.read(secureStorageProvider);
-    final url = await storage.getServerUrl();
-    final code = await storage.getEstablishmentCode();
-    final token = await storage.getDeviceToken();
-    final deviceId = await storage.getDeviceId();
-    final lastSync = await storage.getLastSync();
-    final prefs = await SharedPreferences.getInstance();
-    final forceOffline = prefs.getBool(AppConfig.prefForceOffline) ?? false;
-    if (url != null && code != null) {
-      state = state.copyWith(
-        serverUrl: url,
-        establishmentCode: code,
-        deviceToken: token,
-        deviceId: deviceId,
-        lastSync: lastSync,
-        forceOffline: forceOffline,
-        status: forceOffline
-            ? ServerStatus.offline
-            : ServerStatus.checking,
-      );
-      if (!forceOffline) await checkStatus();
-    }
-  }
-
-  /// Configure la connexion serveur après appairage.
-  Future<void> configure({
-    required String serverUrl,
-    required String establishmentCode,
-    String? deviceToken,
-    String? deviceId,
-  }) async {
-    final storage = ref.read(secureStorageProvider);
-    await storage.saveServerUrl(serverUrl);
-    await storage.saveEstablishmentCode(establishmentCode);
-    if (deviceToken != null) await storage.saveDeviceToken(deviceToken);
-    if (deviceId != null) await storage.saveDeviceId(deviceId);
-    state = state.copyWith(
-      serverUrl: serverUrl,
-      establishmentCode: establishmentCode,
-      deviceToken: deviceToken,
-      deviceId: deviceId,
-      status: ServerStatus.checking,
-    );
-    await checkStatus();
-  }
-
-  /// Enregistre la dernière synchro réussie.
-  Future<void> recordSync({required int count}) async {
-    final storage = ref.read(secureStorageProvider);
-    final now = DateTime.now().toUtc();
-    await storage.saveLastSync(now);
-    state = state.copyWith(lastSync: now, lastSyncCount: count);
-  }
-
-  /// Bascule le mode hors-ligne forcé.
-  Future<void> toggleForceOffline() async {
-    final next = !state.forceOffline;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(AppConfig.prefForceOffline, next);
-    state = state.copyWith(
-      forceOffline: next,
-      status: next ? ServerStatus.offline : ServerStatus.checking,
-    );
-    if (!next) await checkStatus();
-  }
-
-  /// Vérifie la joignabilité du serveur (ping /health) et mesure la latence.
-  Future<void> checkStatus() async {
-    if (!state.isPaired || state.forceOffline) {
-      state = state.copyWith(
-        status: state.forceOffline
-            ? ServerStatus.offline
-            : (state.isPaired ? ServerStatus.offline : ServerStatus.unpaired),
-      );
-      return;
-    }
-    state = state.copyWith(status: ServerStatus.checking);
-    try {
-      final dio = ref.read(_bareDioProvider);
-      final sw = Stopwatch()..start();
-      await dio.get(
-        buildUrl(state.serverUrl!, ApiEndpoints.health),
-        options: Options(
-          sendTimeout: AppConfig.unreachableThreshold,
-          receiveTimeout: AppConfig.unreachableThreshold,
-        ),
-      );
-      sw.stop();
-      state = state.copyWith(
-        status: ServerStatus.online,
-        latency: Duration(milliseconds: sw.elapsedMilliseconds),
-      );
-    } catch (_) {
-      state = state.copyWith(status: ServerStatus.offline, latency: null);
-    }
-  }
-
-  /// Désappaire le mobile du serveur.
-  Future<void> unpair() async {
-    final storage = ref.read(secureStorageProvider);
-    await storage.delete(key: AppConfig.keyServerUrl);
-    await storage.delete(key: AppConfig.keyEstablishmentCode);
-    await storage.delete(key: AppConfig.keyDeviceToken);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(AppConfig.prefForceOffline, false);
-    state = const ConnectionState();
-  }
-}
-
-// --- mDNS discovery ---
-
-/// Serveur découvert via mDNS/Bonjour.
+/// Modèle d'un serveur découvert via mDNS.
 class DiscoveredServer {
   final String name;
   final String ip;
@@ -241,51 +36,276 @@ class DiscoveredServer {
     this.establishmentName,
   });
 
-  String get serverUrl => 'http://$ip:$port/api/v1';
+  String get url => 'http://$ip:$port';
 }
 
-/// Provider de découverte mDNS (stream des serveurs détectés sur le réseau local).
-///
-/// Le desktop publie le service `_getech-sms._tcp.local`. Ce provider écoute
-/// les événements Bonsoir et résout les serveurs en [DiscoveredServer].
+/// État global de la connexion.
+class ConnectionState {
+  final ServerStatus status;
+  final String? serverIp;
+  final int? serverPort;
+  final String? serverUrlOverride;
+  final String? establishmentCode;
+  final String? pairingToken;
+  final Duration? latency;
+  final DateTime? lastSyncAt;
+  final int? lastSyncCount;
+  final String? errorMessage;
+  final bool forceOffline;
+  final String? discoveredServerName;
+
+  const ConnectionState({
+    this.status = ServerStatus.unpaired,
+    this.serverIp,
+    this.serverPort,
+    this.serverUrlOverride,
+    this.establishmentCode,
+    this.pairingToken,
+    this.latency,
+    this.lastSyncAt,
+    this.lastSyncCount,
+    this.errorMessage,
+    this.forceOffline = false,
+    this.discoveredServerName,
+  });
+
+  bool get isPaired => pairingToken != null && (serverIp != null || serverUrlOverride != null);
+  bool get isOnline => status == ServerStatus.online && !forceOffline;
+  bool get canReachServer => isOnline && status != ServerStatus.offline;
+
+  String? get serverUrl {
+    if (serverUrlOverride != null) return serverUrlOverride;
+    if (serverIp != null) return 'http://$serverIp:$serverPort';
+    return null;
+  }
+
+  String get baseUrl => serverUrl != null ? '$serverUrl/api/v1' : '';
+  DateTime? get lastSync => lastSyncAt;
+
+  ConnectionState copyWith({
+    ServerStatus? status,
+    String? serverIp,
+    int? serverPort,
+    String? serverUrlOverride,
+    String? establishmentCode,
+    String? pairingToken,
+    Duration? latency,
+    DateTime? lastSyncAt,
+    int? lastSyncCount,
+    String? errorMessage,
+    bool? forceOffline,
+    String? discoveredServerName,
+    bool clearError = false,
+  }) {
+    return ConnectionState(
+      status: status ?? this.status,
+      serverIp: serverIp ?? this.serverIp,
+      serverPort: serverPort ?? this.serverPort,
+      serverUrlOverride: serverUrlOverride ?? this.serverUrlOverride,
+      establishmentCode: establishmentCode ?? this.establishmentCode,
+      pairingToken: pairingToken ?? this.pairingToken,
+      latency: latency ?? this.latency,
+      lastSyncAt: lastSyncAt ?? this.lastSyncAt,
+      lastSyncCount: lastSyncCount ?? this.lastSyncCount,
+      errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
+      forceOffline: forceOffline ?? this.forceOffline,
+      discoveredServerName: discoveredServerName ?? this.discoveredServerName,
+    );
+  }
+
+  static const initial = ConnectionState();
+}
+
+// ---------------------------------------------------------------------------
+// Providers
+// ---------------------------------------------------------------------------
+
+final connectionProvider =
+    StateNotifierProvider<ConnectionNotifier, ConnectionState>((ref) {
+  return ConnectionNotifier(ref);
+});
+
+final secureStorageProvider = Provider<SecureStorage>((ref) => SecureStorage());
+
+/// Contrôleur gérant l'état de la connexion.
+class ConnectionNotifier extends StateNotifier<ConnectionState> {
+  final Ref _ref;
+  Timer? _heartbeatTimer;
+
+  ConnectionNotifier(this._ref) : super(ConnectionState.initial) {
+    _init();
+  }
+
+  Future<void> _init() async {
+    final prefs = await SharedPreferences.getInstance();
+    final storage = _ref.read(secureStorageProvider);
+
+    final ip = prefs.getString('server_ip');
+    final port = prefs.getInt('server_port');
+    final url = prefs.getString('server_url');
+    final code = prefs.getString('establishment_code');
+    final force = prefs.getBool('force_offline') ?? false;
+    final lastSync = prefs.getString('last_sync_at');
+    final lastCount = prefs.getInt('last_sync_count');
+    final token = await storage.getPairingToken();
+
+    if (token != null && (ip != null || url != null)) {
+      state = state.copyWith(
+        status: ServerStatus.checking,
+        serverIp: ip,
+        serverPort: port ?? 8000,
+        serverUrlOverride: url,
+        establishmentCode: code,
+        pairingToken: token,
+        forceOffline: force,
+        lastSyncAt: lastSync != null ? DateTime.tryParse(lastSync) : null,
+        lastSyncCount: lastCount,
+      );
+      if (!force) checkStatus();
+      _startHeartbeat();
+    }
+  }
+
+  Future<void> configure({
+    required String serverUrl,
+    required String establishmentCode,
+    required String deviceToken,
+    String? deviceId,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final storage = _ref.read(secureStorageProvider);
+
+    await prefs.setString('server_url', serverUrl);
+    await prefs.setString('establishment_code', establishmentCode);
+    await storage.savePairingToken(deviceToken);
+    if (deviceId != null) await storage.saveDeviceId(deviceId);
+
+    state = state.copyWith(
+      status: ServerStatus.checking,
+      serverUrlOverride: serverUrl,
+      establishmentCode: establishmentCode,
+      pairingToken: deviceToken,
+    );
+    await checkStatus();
+    _startHeartbeat();
+  }
+
+  Future<void> unpair() async {
+    final prefs = await SharedPreferences.getInstance();
+    final storage = _ref.read(secureStorageProvider);
+
+    await prefs.remove('server_ip');
+    await prefs.remove('server_port');
+    await prefs.remove('server_url');
+    await prefs.remove('establishment_code');
+    await storage.deletePairingToken();
+
+    _heartbeatTimer?.cancel();
+    state = ConnectionState.initial;
+  }
+
+  Future<void> checkStatus() async {
+    if (!state.isPaired || state.forceOffline) return;
+
+    final stopwatch = Stopwatch()..start();
+    try {
+      final dio = Dio(BaseOptions(
+        baseUrl: state.baseUrl,
+        connectTimeout: const Duration(seconds: 3),
+      ));
+
+      final response = await dio.get('/devices/server-info');
+      stopwatch.stop();
+
+      if (response.statusCode == 200) {
+        state = state.copyWith(
+          status: ServerStatus.online,
+          latency: stopwatch.elapsed,
+          clearError: true,
+        );
+      } else {
+        state = state.copyWith(status: ServerStatus.offline);
+      }
+    } catch (e) {
+      state = state.copyWith(
+        status: ServerStatus.offline,
+        errorMessage: e.toString(),
+      );
+    }
+  }
+
+  Future<void> toggleForceOffline() async {
+    final prefs = await SharedPreferences.getInstance();
+    final next = !state.forceOffline;
+    await prefs.setBool('force_offline', next);
+    state = state.copyWith(forceOffline: next);
+    if (!next) checkStatus();
+  }
+
+  Future<void> recordSync({int count = 0}) async {
+    final now = DateTime.now();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('last_sync_at', now.toIso8601String());
+    await prefs.setInt('last_sync_count', count);
+    state = state.copyWith(lastSyncAt: now, lastSyncCount: count);
+  }
+
+  void _startHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (!state.forceOffline) checkStatus();
+    });
+  }
+
+  @override
+  void dispose() {
+    _heartbeatTimer?.cancel();
+    super.dispose();
+  }
+}
+
+/// Provider de découverte mDNS.
 final mdnsDiscoveryProvider =
     StreamProvider.autoDispose<List<DiscoveredServer>>((ref) async* {
-  final discovery = BonsoirDiscovery(serviceType: AppConfig.mdnsServiceType);
+  final discovery = BonsoirDiscovery(type: AppConfig.mdnsServiceType);
   await discovery.ready;
+
   final controller = StreamController<List<DiscoveredServer>>();
   final found = <String, DiscoveredServer>{};
 
-  discovery.eventStream?.listen((event) async {
+  discovery.eventStream?.listen((event) {
     if (event.service == null) return;
     final bs = event.service!;
-    if (event.type == BonsoirDiscoveryEventType.discoveryServiceFound) {
-      await bs.resolve();
-    }
-    if (event.type == BonsoirDiscoveryEventType.discoveryServiceResolved ||
-        event.type == BonsoirDiscoveryEventType.discoveryServiceFound) {
-      final ip = bs.ip;
-      final port = bs.port;
-      if (ip != null && ip.isNotEmpty) {
-        final server = DiscoveredServer(
-          name: bs.name,
-          ip: ip,
-          port: port,
-          establishmentCode: bs.attributes?['establishment_code'],
-          establishmentName: bs.attributes?['establishment_name'],
-        );
-        found[bs.name] = server;
-        controller.add(found.values.toList());
+
+    if (event.type == BonsoirDiscoveryEventType.discoveryServiceFound ||
+        event.type == BonsoirDiscoveryEventType.discoveryServiceResolved) {
+
+      final String resolvedIp;
+      if (bs is ResolvedBonsoirService) {
+        resolvedIp = bs.host ?? bs.attributes['ip'] ?? '';
+      } else {
+        resolvedIp = bs.attributes['ip'] ?? '';
       }
+
+      found[bs.name] = DiscoveredServer(
+        name: bs.name,
+        ip: resolvedIp,
+        port: bs.port,
+        establishmentCode: bs.attributes['est_code'],
+        establishmentName: bs.attributes['est_name'],
+      );
     } else if (event.type == BonsoirDiscoveryEventType.discoveryServiceLost) {
       found.remove(bs.name);
-      controller.add(found.values.toList());
     }
-  }, onDone: () => controller.close());
+    controller.add(found.values.toList());
+  });
 
-  // Émet une liste vide initiale pendant la recherche.
-  yield const [];
-  await for (final list in controller.stream) {
-    yield list;
-  }
-  await discovery.stop();
+  discovery.start();
+
+  ref.onDispose(() {
+    discovery.stop();
+    controller.close();
+  });
+
+  yield* controller.stream;
 });

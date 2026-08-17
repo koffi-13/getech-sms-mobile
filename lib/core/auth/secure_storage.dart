@@ -41,6 +41,10 @@ class SecureStorage {
   Future<void> saveDeviceToken(String token) =>
       _storage.write(key: AppConfig.keyDeviceToken, value: token);
 
+  Future<String?> getPairingToken() => getDeviceToken();
+  Future<void> savePairingToken(String token) => saveDeviceToken(token);
+  Future<void> deletePairingToken() => _storage.delete(key: AppConfig.keyDeviceToken);
+
   Future<String?> getDeviceId() => _storage.read(key: AppConfig.keyDeviceId);
   Future<void> saveDeviceId(String id) =>
       _storage.write(key: AppConfig.keyDeviceId, value: id);

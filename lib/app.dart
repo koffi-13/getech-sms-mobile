@@ -126,7 +126,7 @@ final goRouterProvider = Provider<GoRouter>((ref) {
           ),
           GoRoute(
             path: '/more',
-            builder: (context, state) => const _MoreGridPage(),
+            builder: (context, state) => _MoreGridPage(),
           ),
         ],
       ),
@@ -209,8 +209,8 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/subjects/class-subjects',
         builder: (context, state) => ClassSubjectsPage(
-          classroomId: int.tryParse(
-              state.uri.queryParameters['classroom_id'] ?? ''),
+          classroomId: int.parse(
+              state.uri.queryParameters['classroom_id'] ?? '0'),
         ),
       ),
       GoRoute(

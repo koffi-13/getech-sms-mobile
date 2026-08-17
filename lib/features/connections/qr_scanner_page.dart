@@ -47,13 +47,9 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
   }
 
   Future<void> _bootstrap() async {
-    try {
-      final hasTorch = await _controller.hasTorch;
-      if (!mounted) return;
-      setState(() => _hasTorch = hasTorch);
-    } catch (_) {
-      // hasTorch peut échouer sur certains émulateurs : on ignore.
-    }
+    // hasTorch n'est plus disponible dans la nouvelle API mobile_scanner
+    // On assume la torche disponible par défaut
+    setState(() => _hasTorch = true);
     if (!mounted) return;
     setState(() => _starting = false);
   }
@@ -213,7 +209,6 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
         MobileScanner(
           controller: _controller,
           onDetect: _onDetect,
-          onPermissionSet: (_, granted) => _onPermissionSet(granted),
           errorBuilder: (context, error, child) => _CameraError(
             message: error.toString(),
             onManual: _enterManually,

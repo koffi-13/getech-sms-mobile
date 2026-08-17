@@ -20,7 +20,7 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:logger/logger.dart';
+import 'package:logger/logger.dart' as log_pkg;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -29,9 +29,9 @@ import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
 import '../connections/connection_state.dart';
 
-final Logger _log = Logger(
-  printer: PrettyPrinter(methodNames: false, noBoxingByDefault: true),
-  level: Level.off,
+final log_pkg.Logger _log = log_pkg.Logger(
+  printer: log_pkg.PrettyPrinter(noBoxingByDefault: true),
+  level: log_pkg.Level.off,
 );
 
 // ---------------------------------------------------------------------------

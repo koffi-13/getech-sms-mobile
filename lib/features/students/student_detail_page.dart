@@ -282,7 +282,7 @@ class _InfoRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final display = (value == null || value!.isEmpty) ? '—' : value;
+    final display = (value == null || value!.isEmpty) ? '—' : value!;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(

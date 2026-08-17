@@ -140,7 +140,7 @@ class _StudentExportDialogState extends ConsumerState<StudentExportDialog> {
                   _Actions(
                     isExporting: _isExporting,
                     canExport: online &&
-                        !isExporting &&
+                        !_isExporting &&
                         _selectedColumns.isNotEmpty,
                     onExport: _runExport,
                     onCancel: () => Navigator.of(context).maybePop(),
@@ -346,7 +346,7 @@ class _ClassroomFilter extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final async = ref.watch(classroomsListProvider);
+    final async = ref.watch(classroomsProvider);
     final classrooms = async.maybeWhen(
       data: (list) => list,
       orElse: () => const <ClassroomDto>[],
@@ -425,13 +425,11 @@ class _ColumnsSelector extends StatelessWidget {
                   onPressed: onSelectAll,
                   icon: const Icon(Icons.select_all, size: 18),
                   label: const Text('Tout'),
-                  visualDensity: VisualDensity.compact,
                 ),
                 TextButton.icon(
                   onPressed: onClearAll,
                   icon: const Icon(Icons.deselect, size: 18),
                   label: const Text('Aucun'),
-                  visualDensity: VisualDensity.compact,
                 ),
               ],
             ),

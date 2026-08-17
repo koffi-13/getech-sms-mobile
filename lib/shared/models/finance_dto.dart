@@ -1,25 +1,11 @@
 /// DTOs Finances — alignés sur les schémas Pydantic et les modèles SQLAlchemy
 /// du desktop.
-///
-/// ⚠️ Le flux de paiement réel nécessite un `subscription_id` :
-/// 1. L'élève a une `StudentFeeSubscription` (agreed_amount, balance_due, status).
-/// 2. Le paiement est alloué à cette subscription via `PaymentAllocation`.
-/// 3. Le serveur génère un `receipt_number`.
-///
-/// Énumérations serveur (payment_transaction.py) :
-/// - PaymentType: PAYMENT, REFUND
-/// - PaymentStatus: PENDING, COMPLETED, FAILED, REFUNDED, CANCELLED
-/// - PaymentMethod: CASH, MOBILE_MONEY, BANK_TRANSFER, CARD, CHEQUE, OTHER
-/// - SubscriptionStatus: ACTIVE, PARTIAL, PAID, CANCELLED
 library;
 
 import '../../core/config/constants.dart';
 import '../../core/utils/formatters.dart';
 
 /// Paiement (PaymentResponse côté serveur).
-///
-/// Champs serveur : {id, establishment_id, student_id, amount, currency,
-/// method, status, receipt_number, payment_date}.
 class PaymentDto {
   final int id;
   final int? establishmentId;
@@ -30,7 +16,6 @@ class PaymentDto {
   final PaymentStatus status;
   final String? receiptNumber;
   final DateTime? paymentDate;
-  // Champs de compatibilité (non dans la réponse de base, enrichis côté mobile)
   final String? studentName;
   final String? matricule;
   final String? classroomName;
@@ -92,9 +77,7 @@ class PaymentDto {
       };
 }
 
-/// Requête d'enregistrement d'un paiement (PaymentCreateRequest côté serveur).
-///
-/// ⚠️ `subscription_id` est OBLIGATOIRE côté serveur.
+/// Requête d'enregistrement d'un paiement.
 class PaymentRequest {
   final int studentId;
   final int subscriptionId;
@@ -119,7 +102,7 @@ class PaymentRequest {
       };
 }
 
-/// Réponse paginée de paiements (PaymentListResponse).
+/// Réponse paginée de paiements.
 class PaymentListResponse {
   final List<PaymentDto> items;
   final int total;
@@ -136,10 +119,7 @@ class PaymentListResponse {
       );
 }
 
-/// Subscription de frais d'un élève (StudentFeeSubscription côté serveur).
-///
-/// L'endpoint `GET /finance/balances` retourne ces subscriptions avec
-/// `balance_due > 0`, triées par `balance_due` décroissant.
+/// Subscription de frais d'un élève.
 class FeeSubscriptionDto {
   final int id;
   final int studentId;
@@ -147,14 +127,11 @@ class FeeSubscriptionDto {
   final double balanceDue;
   final String currency;
   final SubscriptionStatus status;
-  // Champs enrichis (non dans la réponse balances de base)
   final String? studentName;
   final String? matricule;
   final String? classroomName;
+  final String? feeCategoryName;
   final int? schoolYearId;
-  final int? feeStructureId;
-  final double? discountAmount;
-  final double? discountPct;
   final bool isActive;
 
   const FeeSubscriptionDto({
@@ -167,22 +144,15 @@ class FeeSubscriptionDto {
     this.studentName,
     this.matricule,
     this.classroomName,
+    this.feeCategoryName,
     this.schoolYearId,
-    this.feeStructureId,
-    this.discountAmount,
-    this.discountPct,
     this.isActive = true,
   });
 
-  /// Indique si la subscription est soldée.
   bool get isSettled => balanceDue <= 0 || status == SubscriptionStatus.payed;
-
-  /// Taux de paiement (0..1).
   double get paymentRate => agreedAmount == 0
       ? 1
       : ((agreedAmount - balanceDue) / agreedAmount).clamp(0, 1);
-
-  /// Montant déjà payé.
   double get totalPaid => agreedAmount - balanceDue;
 
   factory FeeSubscriptionDto.fromJson(Map<String, dynamic> j) =>
@@ -197,15 +167,13 @@ class FeeSubscriptionDto {
         studentName: j['student_name'] as String?,
         matricule: j['matricule'] as String?,
         classroomName: j['classroom_name'] as String?,
+        feeCategoryName: j['fee_category_name'] as String?,
         schoolYearId: (j['school_year_id'] as num?)?.toInt(),
-        feeStructureId: (j['fee_structure_id'] as num?)?.toInt(),
-        discountAmount: (j['discount_amount'] as num?)?.toDouble(),
-        discountPct: (j['discount_pct'] as num?)?.toDouble(),
         isActive: (j['is_active'] as bool?) ?? true,
       );
 }
 
-/// Réponse paginée de soldes (balances endpoint).
+/// Réponse paginée de soldes.
 class BalanceListResponse {
   final List<FeeSubscriptionDto> items;
   final int total;
@@ -223,66 +191,12 @@ class BalanceListResponse {
       );
 }
 
-/// DTO de compatibilité pour la page "Soldes" (aggrégation par élève).
-class StudentBalanceDto {
-  final int studentId;
-  final String studentName;
-  final String? matricule;
-  final String? classroomName;
-  final double totalDue;
-  final double totalPaid;
-  final double balance;
-  final DateTime? lastPaymentDate;
-  final List<FeeSubscriptionDto> subscriptions;
-
-  const StudentBalanceDto({
-    required this.studentId,
-    required this.studentName,
-    this.matricule,
-    this.classroomName,
-    this.totalDue = 0,
-    this.totalPaid = 0,
-    this.balance = 0,
-    this.lastPaymentDate,
-    this.subscriptions = const [],
-  });
-
-  double get outstanding => totalDue - totalPaid;
-  bool get isSettled => outstanding <= 0;
-  double get paymentRate =>
-      totalDue == 0 ? 1 : (totalPaid / totalDue).clamp(0, 1);
-
-  /// Construit un StudentBalanceDto à partir d'une liste de subscriptions
-  /// d'un même élève.
-  factory StudentBalanceDto.fromSubscriptions(
-    List<FeeSubscriptionDto> subs, {
-    String? studentName,
-    String? matricule,
-    String? classroomName,
-  }) {
-    final due = subs.fold(0.0, (s, e) => s + e.agreedAmount);
-    final paid = subs.fold(0.0, (s, e) => s + e.totalPaid);
-    return StudentBalanceDto(
-      studentId: subs.first.studentId,
-      studentName: studentName ?? subs.first.studentName ?? '',
-      matricule: matricule ?? subs.first.matricule,
-      classroomName: classroomName ?? subs.first.classroomName,
-      totalDue: due,
-      totalPaid: paid,
-      balance: due - paid,
-      subscriptions: subs,
-    );
-  }
-}
-
 /// Filtres de recherche des paiements.
 class PaymentFilter {
   final int? studentId;
   final int? classroomId;
   final PaymentMethod? method;
   final PaymentStatus? status;
-  final DateTime? fromDate;
-  final DateTime? toDate;
   final String? search;
   final int page;
   final int perPage;
@@ -292,22 +206,15 @@ class PaymentFilter {
     this.classroomId,
     this.method,
     this.status,
-    this.fromDate,
-    this.toDate,
     this.search,
     this.page = 1,
     this.perPage = 50,
   });
 
   Map<String, dynamic> toQuery() {
-    final q = <String, dynamic>{
-      'page': page,
-      'per_page': perPage,
-    };
+    final q = <String, dynamic>{'page': page, 'per_page': perPage};
     if (studentId != null) q['student_id'] = studentId;
     if (method != null) q['method'] = method!.code;
-    // Note: le serveur ne supporte que student_id, page, per_page pour /payments.
-    // classroomId/fromDate/toDate/search nécessitent un enrichissement serveur.
     return q;
   }
 
@@ -316,19 +223,18 @@ class PaymentFilter {
     int? classroomId,
     PaymentMethod? method,
     PaymentStatus? status,
-    DateTime? fromDate,
-    DateTime? toDate,
     String? search,
     int? page,
     int? perPage,
+    bool clearStudent = false,
+    bool clearMethod = false,
+    bool clearStatus = false,
   }) =>
       PaymentFilter(
-        studentId: studentId ?? this.studentId,
+        studentId: clearStudent ? null : (studentId ?? this.studentId),
         classroomId: classroomId ?? this.classroomId,
-        method: method ?? this.method,
-        status: status ?? this.status,
-        fromDate: fromDate ?? this.fromDate,
-        toDate: toDate ?? this.toDate,
+        method: clearMethod ? null : (method ?? this.method),
+        status: clearStatus ? null : (status ?? this.status),
         search: search ?? this.search,
         page: page ?? this.page,
         perPage: perPage ?? this.perPage,

@@ -171,10 +171,12 @@ class ClassSubjectDto {
   final int subjectId;
   final String subjectName;
   final String subjectCode;
-  final int coefficient;
+  final double coefficient;
   final bool isFacultative;
   final int? assignedTeacherId;
   final String? assignedTeacherName;
+  // Champs de compatibilité (pour le mobile offline)
+  final int? classroomId;
 
   const ClassSubjectDto({
     required this.id,
@@ -185,7 +187,6 @@ class ClassSubjectDto {
     this.isFacultative = false,
     this.assignedTeacherId,
     this.assignedTeacherName,
-    // Champs de compatibilité (pour le mobile offline)
     this.classroomId,
   });
 
@@ -198,7 +199,7 @@ class ClassSubjectDto {
         subjectId: (j['subject_id'] as num?)?.toInt() ?? 0,
         subjectName: j['subject_name'] as String? ?? '',
         subjectCode: j['subject_code'] as String? ?? '',
-        coefficient: (j['coefficient'] as num?)?.toInt() ?? 1,
+        coefficient: (j['coefficient'] as num?)?.toDouble() ?? 1.0,
         isFacultative: (j['is_facultative'] as bool?) ?? false,
         assignedTeacherId: (j['assigned_teacher_id'] as num?)?.toInt(),
         assignedTeacherName: j['assigned_teacher_name'] as String?,

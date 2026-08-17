@@ -14,7 +14,7 @@ library;
 
 import 'package:flutter/material.dart';
 
-import '../config/constants.dart';
+import '../../core/config/constants.dart';
 
 /// Calcul des mentions et couleurs associées (miroir de grade_service.py).
 class MentionHelper {

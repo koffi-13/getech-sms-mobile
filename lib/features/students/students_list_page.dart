@@ -13,6 +13,7 @@ import '../../shared/models/classroom_dto.dart';
 import '../../shared/models/student_dto.dart';
 import '../../shared/widgets/widgets.dart';
 import '../classrooms/classroom_controller.dart';
+import '../connections/connection_state.dart';
 import 'student_controller.dart';
 import 'student_export_dialog.dart';
 
@@ -24,7 +25,7 @@ class StudentsListPage extends ConsumerStatefulWidget {
 }
 
 class _StudentsListPageState extends ConsumerState<StudentsListPage> {
-  StudentFilter _filter = const StudentFilter.empty();
+  StudentFilter _filter = StudentFilter.empty;
 
   // Recherche debouncée (léger délai pour limiter les requêtes).
   String _searchText = '';
@@ -42,155 +43,292 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
   }
 
   Future<void> _refresh() async {
-    ref.invalidate(classroomsListProvider);
-    ref.invalidate(studentsListProvider);
-    // Re-déclenche la requête en réécrivant le filtre (force le watch).
+    ref.invalidate(studentControllerProvider);
+    ref.invalidate(classroomsProvider);
+    // On force un rafraîchissement manuel
     setState(() => _filter = _filter.copyWith());
   }
 
   @override
   Widget build(BuildContext context) {
     final auth = ref.watch(authProvider);
-    final perms = auth.permissions;
-    final canCreate = hasPermission(perms, RbacPermissions.studentCreate);
+    final canRead = hasPermission(auth.permissions, RbacPermissions.studentRead);
+    final canCreate = hasPermission(auth.permissions, RbacPermissions.studentCreate);
 
-    final classroomsAsync = ref.watch(classroomsListProvider);
-    final studentsAsync = ref.watch(studentsListProvider(_filter));
+    if (!canRead) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Élèves')),
+        body: const EmptyState(
+          icon: Icons.lock_outline,
+          title: 'Permission insuffisante',
+          message: 'Vous n\'avez pas la permission STUDENT_READ.',
+        ),
+      );
+    }
+
+    final classroomsAsync = ref.watch(classroomsProvider);
+    final studentsAsync = ref.watch(studentControllerProvider);
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Élèves'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.download),
-            tooltip: 'Exporter',
-            onPressed: () {
-              showModalBottomSheet<void>(
-                context: context,
-                isScrollControlled: true,
-                useSafeArea: true,
-                shape: const RoundedRectangleBorder(
-                  borderRadius:
-                      BorderRadius.vertical(top: Radius.circular(20)),
-                ),
-                builder: (_) => const StudentExportDialog(),
-              );
-            },
-          ),
-          IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: 'Rafraîchir',
             onPressed: _refresh,
           ),
+          IconButton(
+            icon: const Icon(Icons.file_upload_outlined),
+            tooltip: 'Export / Import',
+            onPressed: () => _openImportExport(context),
+          ),
         ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: _refresh,
+        child: CustomScrollView(
+          slivers: _buildSlivers(studentsAsync, classroomsAsync),
+        ),
       ),
       floatingActionButton: canCreate
           ? FloatingActionButton.extended(
               onPressed: () => context.push('/students/new'),
-              icon: const Icon(Icons.person_add),
-              label: const Text('Ajouter'),
+              icon: const Icon(Icons.add),
+              label: const Text('Nouvel élève'),
             )
           : null,
-      body: RefreshIndicator(
-        onRefresh: _refresh,
-        child: CustomScrollView(
-          slivers: [
-            // Bannière hors-ligne.
-            SliverToBoxAdapter(child: _OfflineBanner()),
-            // Barre de recherche.
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                child: AppSearchBar(
-                  hint: 'Rechercher un élève (matricule, nom…)',
-                  onChanged: _onSearchChanged,
-                ),
+    );
+  }
+
+  List<Widget> _buildSlivers(
+    AsyncValue<List<StudentDto>> studentsAsync,
+    AsyncValue<List<ClassroomDto>> classroomsAsync,
+  ) {
+    final slivers = <Widget>[
+      const SliverToBoxAdapter(child: _OfflineBanner()),
+      // Barre de recherche.
+      SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+          child: AppSearchBar(
+            hint: 'Nom ou matricule…',
+            onChanged: _onSearchChanged,
+          ),
+        ),
+      ),
+      // Filtres horizontaux.
+      SliverToBoxAdapter(
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
+            children: [
+              _FilterChip(
+                label: _classroomLabel(classroomsAsync),
+                icon: Icons.school_outlined,
+                selected: _filter.classroomId != null,
+                onTap: () => _openClassroomPicker(context, classroomsAsync),
               ),
-            ),
-            // Chips de filtres.
-            SliverToBoxAdapter(
-              child: _FilterChips(
-                filter: _filter,
-                classroomsAsync: classroomsAsync,
-                onChanged: (next) => setState(() => _filter = next),
+              const SizedBox(width: 8),
+              _FilterChip(
+                label: _filter.sexe?.label ?? 'Sexe',
+                icon: Icons.people_outline,
+                selected: _filter.sexe != null,
+                onTap: () => _openSexePicker(context),
               ),
-            ),
-            // Liste des élèves.
-            studentsAsync.when(
-              data: (students) {
-                if (students.isEmpty) {
-                  return const SliverFillRemaining(
-                    hasScrollBody: false,
-                    child: EmptyState(
-                      icon: Icons.people_outline,
-                      title: 'Aucun élève',
-                      message:
-                          'Aucun élève ne correspond à votre recherche ou à votre base locale.',
-                    ),
-                  );
-                }
-                return SliverPadding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  sliver: SliverList.separated(
-                    itemCount: students.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 4),
-                    itemBuilder: (context, i) {
-                      final s = students[i];
-                      return _StudentTile(student: s);
-                    },
+              const SizedBox(width: 8),
+              _FilterChip(
+                label: _filter.status?.label ?? 'Statut',
+                icon: Icons.new_releases_outlined,
+                selected: _filter.status != null,
+                onTap: () => _openStatusPicker(context),
+              ),
+              if (_filter != StudentFilter.empty) ...[
+                const SizedBox(width: 8),
+                TextButton.icon(
+                  onPressed: () => setState(() => _filter = StudentFilter.empty),
+                  icon: const Icon(Icons.clear, size: 16),
+                  label: const Text('Reset'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: Theme.of(context).colorScheme.error,
                   ),
-                );
-              },
-              loading: () => const SliverFillRemaining(
-                hasScrollBody: false,
-                child: AppLoading(label: 'Chargement des élèves…'),
-              ),
-              error: (e, _) => SliverFillRemaining(
-                hasScrollBody: false,
-                child: AppErrorWidget(
-                  message: e.toString(),
-                  onRetry: _refresh,
                 ),
-              ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      const SliverToBoxAdapter(child: SizedBox(height: 8)),
+    ];
+
+    if (studentsAsync.isLoading) {
+      slivers.add(const SliverFillRemaining(
+        hasScrollBody: false,
+        child: AppLoading(label: 'Chargement des élèves…'),
+      ));
+      return slivers;
+    }
+
+    if (studentsAsync.hasError) {
+      slivers.add(SliverFillRemaining(
+        hasScrollBody: false,
+        child: AppErrorWidget(
+          message: studentsAsync.error.toString(),
+          onRetry: _refresh,
+        ),
+      ));
+      return slivers;
+    }
+
+    final students = studentsAsync.value ?? [];
+    if (students.isEmpty) {
+      slivers.add(const SliverFillRemaining(
+        hasScrollBody: false,
+        child: EmptyState(
+          icon: Icons.person_search,
+          title: 'Aucun élève trouvé',
+          message: 'Essayez d\'ajuster vos filtres ou effectuez une synchro.',
+        ),
+      ));
+      return slivers;
+    }
+
+    slivers.add(SliverPadding(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      sliver: SliverList.separated(
+        itemCount: students.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 4),
+        itemBuilder: (context, i) => _StudentTile(student: students[i]),
+      ),
+    ));
+
+    slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 80)));
+    return slivers;
+  }
+
+  String _classroomLabel(AsyncValue<List<ClassroomDto>> async) {
+    if (_filter.classroomId == null) return 'Classe';
+    return async.maybeWhen(
+      data: (list) => list.firstWhere((c) => c.id == _filter.classroomId).name,
+      orElse: () => 'Classe #${_filter.classroomId}',
+    );
+  }
+
+  void _openClassroomPicker(BuildContext context, AsyncValue<List<ClassroomDto>> async) {
+    final list = async.value ?? [];
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            ListTile(
+              title: const Text('Toutes les classes'),
+              onTap: () {
+                setState(() => _filter = _filter.copyWith(clearClassroom: true));
+                Navigator.pop(ctx);
+              },
             ),
-            // Espace pour le FAB.
-            const SliverToBoxAdapter(child: SizedBox(height: 88)),
+            ...list.map((c) => ListTile(
+                  title: Text(c.name),
+                  trailing: _filter.classroomId == c.id ? const Icon(Icons.check) : null,
+                  onTap: () {
+                    setState(() => _filter = _filter.copyWith(classroomId: c.id));
+                    Navigator.pop(ctx);
+                  },
+                )),
           ],
         ),
       ),
     );
   }
+
+  void _openSexePicker(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: const Text('Tous les sexes'),
+              onTap: () {
+                setState(() => _filter = _filter.copyWith(sexe: null));
+                Navigator.pop(ctx);
+              },
+            ),
+            ...Sexe.values.map((v) => ListTile(
+                  title: Text(v.label),
+                  onTap: () {
+                    setState(() => _filter = _filter.copyWith(sexe: v));
+                    Navigator.pop(ctx);
+                  },
+                )),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _openStatusPicker(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: const Text('Tous les statuts'),
+              onTap: () {
+                setState(() => _filter = _filter.copyWith(status: null));
+                Navigator.pop(ctx);
+              },
+            ),
+            ...StudentStatus.values.map((v) => ListTile(
+                  title: Text(v.label),
+                  onTap: () {
+                    setState(() => _filter = _filter.copyWith(status: v));
+                    Navigator.pop(ctx);
+                  },
+                )),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _openImportExport(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (ctx) => const StudentExportDialog(),
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Bannière hors-ligne
+// Composants internes
 // ---------------------------------------------------------------------------
 
 class _OfflineBanner extends ConsumerWidget {
   const _OfflineBanner();
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final conn = ref.watch(connectionProvider);
     if (conn.canReachServer) return const SizedBox.shrink();
     return Material(
       color: Theme.of(context).colorScheme.secondaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         child: Row(
           children: [
-            Icon(Icons.cloud_off,
-                size: 18, color: Theme.of(context).colorScheme.onSecondaryContainer),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'Mode hors-ligne — données locales (sync différée).',
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.onSecondaryContainer,
-                  fontSize: 13,
-                ),
-              ),
-            ),
+            Icon(Icons.cloud_off, size: 16),
+            SizedBox(width: 8),
+            Text('Mode hors-ligne — accès SQLite uniquement',
+                style: TextStyle(fontSize: 12)),
           ],
         ),
       ),
@@ -198,278 +336,53 @@ class _OfflineBanner extends ConsumerWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Filtres (chips)
-// ---------------------------------------------------------------------------
-
-class _FilterChips extends StatelessWidget {
-  const _FilterChips({
-    required this.filter,
-    required this.classroomsAsync,
-    required this.onChanged,
-  });
-
-  final StudentFilter filter;
-  final AsyncValue<List<ClassroomDto>> classroomsAsync;
-  final ValueChanged<StudentFilter> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 4,
-        children: [
-          // Classe — dropdown popup.
-          _ClassroomFilterChip(
-            filter: filter,
-            classroomsAsync: classroomsAsync,
-            onChanged: onChanged,
-          ),
-          // Sexe.
-          _ChoiceChip(
-            label: 'Masculin',
-            selected: filter.sexe == Sexe.masculin,
-            onSelected: (sel) => onChanged(
-              filter.copyWith(
-                sexe: sel ? Sexe.masculin : null,
-                clearSexe: !sel,
-              ),
-            ),
-          ),
-          _ChoiceChip(
-            label: 'Féminin',
-            selected: filter.sexe == Sexe.feminin,
-            onSelected: (sel) => onChanged(
-              filter.copyWith(
-                sexe: sel ? Sexe.feminin : null,
-                clearSexe: !sel,
-              ),
-            ),
-          ),
-          // Statut.
-          _ChoiceChip(
-            label: 'Nouveau',
-            selected: filter.status == StudentStatus.nouveau,
-            onSelected: (sel) => onChanged(
-              filter.copyWith(
-                status: sel ? StudentStatus.nouveau : null,
-                clearStatus: !sel,
-              ),
-            ),
-          ),
-          _ChoiceChip(
-            label: 'Redoublant',
-            selected: filter.status == StudentStatus.redoublant,
-            onSelected: (sel) => onChanged(
-              filter.copyWith(
-                status: sel ? StudentStatus.redoublant : null,
-                clearStatus: !sel,
-              ),
-            ),
-          ),
-          if (filter != const StudentFilter.empty())
-            ActionChip(
-              label: const Text('Réinitialiser'),
-              avatar: const Icon(Icons.clear, size: 18),
-              onPressed: () => onChanged(const StudentFilter.empty()),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ChoiceChip extends StatelessWidget {
-  const _ChoiceChip({
-    required this.label,
-    required this.selected,
-    required this.onSelected,
-  });
+class _FilterChip extends StatelessWidget {
   final String label;
+  final IconData icon;
   final bool selected;
-  final ValueChanged<bool> onSelected;
+  final VoidCallback onTap;
+
+  const _FilterChip({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return ChoiceChip(
+    final theme = Theme.of(context);
+    return FilterChip(
+      avatar: Icon(icon, size: 16),
       label: Text(label),
       selected: selected,
-      onSelected: onSelected,
+      onSelected: (_) => onTap(),
+      backgroundColor: theme.colorScheme.surfaceContainerHighest,
+      selectedColor: theme.colorScheme.primaryContainer,
+      labelStyle: TextStyle(
+        color: selected ? theme.colorScheme.onPrimaryContainer : null,
+      ),
     );
   }
 }
-
-class _ClassroomFilterChip extends StatelessWidget {
-  const _ClassroomFilterChip({
-    required this.filter,
-    required this.classroomsAsync,
-    required this.onChanged,
-  });
-
-  final StudentFilter filter;
-  final AsyncValue<List<ClassroomDto>> classroomsAsync;
-  final ValueChanged<StudentFilter> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final selected = filter.classroomId != null;
-    return ActionChip(
-      avatar: const Icon(Icons.school, size: 18),
-      label: Text(_label(classroomsAsync)),
-      selected: selected,
-      backgroundColor: selected
-          ? theme.colorScheme.primaryContainer
-          : theme.colorScheme.surfaceContainerHighest,
-      onPressed: () => _openClassroomPicker(context),
-    );
-  }
-
-  String _label(AsyncValue<List<ClassroomDto>> async) {
-    if (filter.classroomId == null) return 'Toutes classes';
-    return async.maybeWhen(
-      data: (list) {
-        for (final c in list) {
-          if (c.id == filter.classroomId) return c.name;
-        }
-        return 'Classe #${filter.classroomId}';
-      },
-      orElse: () => 'Classe #${filter.classroomId}',
-    );
-  }
-
-  Future<void> _openClassroomPicker(BuildContext context) async {
-    final classrooms = classroomsAsync.maybeWhen(
-      data: (list) => list,
-      orElse: () => const <ClassroomDto>[],
-    );
-    if (classrooms.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Aucune classe disponible pour le filtrage.'),
-        ),
-      );
-      return;
-    }
-    final selected = await showModalBottomSheet<int>(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) {
-        return SafeArea(
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              ListTile(
-                title: const Text('Toutes les classes'),
-                leading: const Icon(Icons.clear_all),
-                onTap: () => Navigator.pop(ctx, -1),
-              ),
-              const Divider(height: 1),
-              ...classrooms.map((c) => ListTile(
-                    title: Text(c.name),
-                    subtitle: c.code == null ? null : Text(c.code),
-                    trailing: filter.classroomId == c.id
-                        ? const Icon(Icons.check)
-                        : null,
-                    onTap: () => Navigator.pop(ctx, c.id),
-                  )),
-            ],
-          ),
-        );
-      },
-    );
-    if (selected == null) return;
-    if (selected == -1) {
-      onChanged(filter.copyWith(clearClassroom: true));
-    } else {
-      onChanged(filter.copyWith(classroomId: selected));
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Tuile élève
-// ---------------------------------------------------------------------------
 
 class _StudentTile extends StatelessWidget {
-  const _StudentTile({required this.student});
   final StudentDto student;
+  const _StudentTile({required this.student});
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final color = student.sexe == Sexe.feminin
-        ? Colors.pink.shade300
-        : (student.sexe == Sexe.masculin ? Colors.blue.shade300 : Colors.teal);
-
     return Card(
-      margin: const EdgeInsets.symmetric(vertical: 4),
       child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         leading: CircleAvatar(
-          backgroundColor: color,
-          child: student.photoPath != null && student.photoPath!.isNotEmpty
-              ? ClipOval(
-                  child: Image.network(
-                    student.photoPath!,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => Text(
-                      student.displayInitials,
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                  ),
-                )
-              : Text(
-                  student.displayInitials,
-                  style: const TextStyle(color: Colors.white),
-                ),
+          child: Text(student.displayInitials),
         ),
-        title: Text(
-          student.fullName,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: theme.textTheme.titleSmall,
-        ),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(height: 2),
-            Row(
-              children: [
-                Icon(Icons.badge_outlined,
-                    size: 14, color: theme.colorScheme.onSurfaceVariant),
-                const SizedBox(width: 4),
-                Expanded(
-                  child: Text(
-                    student.matricule,
-                    style: theme.textTheme.bodySmall,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ),
-            if (student.classroomName != null) ...[
-              const SizedBox(height: 2),
-              Row(
-                children: [
-                  Icon(Icons.school_outlined,
-                      size: 14, color: theme.colorScheme.onSurfaceVariant),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Text(
-                      student.classroomName!,
-                      style: theme.textTheme.bodySmall,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ],
+        title: Text(student.fullName),
+        subtitle: Text(
+          [
+            if (student.matricule.isNotEmpty) student.matricule,
+            student.classroomName,
+          ].join(' • '),
         ),
         trailing: const Icon(Icons.chevron_right),
         onTap: () => context.push('/students/${student.id}'),

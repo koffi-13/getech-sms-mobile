@@ -20,12 +20,12 @@ class ClassroomsListPage extends ConsumerStatefulWidget {
 
 class _ClassroomsListPageState extends ConsumerState<ClassroomsListPage> {
   Future<void> _refresh() async {
-    ref.invalidate(classroomsListProvider);
+    ref.invalidate(classroomsProvider);
   }
 
   @override
   Widget build(BuildContext context) {
-    final async = ref.watch(classroomsListProvider);
+    final async = ref.watch(classroomsProvider);
 
     return Scaffold(
       appBar: AppBar(

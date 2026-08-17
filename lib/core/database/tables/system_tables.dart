@@ -23,14 +23,14 @@ class Users extends Table {
 
 /// Métadonnées de synchro par table : watermark `last_synced_at`.
 class SyncMetadata extends Table {
-  TextColumn get tableName => text().withLength(min: 1, max: 64)();
+  TextColumn get tableNameColumn => text().withLength(min: 1, max: 64)();
   DateTimeColumn get lastSyncedAt => dateTime().nullable()();
   IntColumn get lastCount => integer().withDefault(const Constant(0))();
   TextColumn get lastError => text().nullable()();
   DateTimeColumn get updatedAt => dateTime().withDefault(currentDateAndTime)();
 
   @override
-  Set<Column> get primaryKey => {tableName};
+  Set<Column> get primaryKey => {tableNameColumn};
 }
 
 /// Opération en attente de push (outbox pattern).
@@ -39,7 +39,7 @@ class SyncMetadata extends Table {
 /// Le sync engine dépile l'outbox et POST vers `/sync/push`.
 class OutboxEntries extends Table {
   IntColumn get id => integer().autoIncrement()();
-  TextColumn get tableName => text()();
+  TextColumn get tableNameColumn => text()();
   TextColumn get operation => text()(); // 'INSERT' | 'UPDATE' | 'DELETE'
   IntColumn get recordId => integer().nullable()();
   TextColumn get payload => text()(); // JSON sérialisé

@@ -105,7 +105,7 @@ class AppDatabase extends _$AppDatabase {
             b.insertAll(
               syncMetadata,
               replicatedTables
-                  .map((t) => SyncMetadataCompanion.insert(tableName: t))
+                  .map((t) => SyncMetadataCompanion.insert(tableNameColumn: t))
                   .toList(),
               mode: InsertMode.insertOrIgnore,
             );

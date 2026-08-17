@@ -16,7 +16,7 @@ library;
 
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:logger/logger.dart';
+import 'package:logger/logger.dart' as log_pkg;
 
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
@@ -25,9 +25,9 @@ import '../../core/sync/outbox.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
 
-final Logger _log = Logger(
-  printer: PrettyPrinter(methodNames: false, noBoxingByDefault: true),
-  level: Level.off,
+final log_pkg.Logger _log = log_pkg.Logger(
+  printer: log_pkg.PrettyPrinter(noBoxingByDefault: true),
+  level: log_pkg.Level.off,
 );
 
 // ===========================================================================
@@ -151,7 +151,7 @@ class SubjectRepository {
         recordId: null,
         payload: payload,
       );
-      return SubjectDto(id: 0, name: name, code: code);
+      return SubjectDto(id: 0, name: name, code: code ?? '');
     }
     try {
       final resp = await _dio.postJson<Map<String, dynamic>>(
@@ -188,7 +188,7 @@ class SubjectRepository {
         recordId: id,
         payload: payload,
       );
-      return SubjectDto(id: id, name: name, code: code);
+      return SubjectDto(id: id, name: name, code: code ?? '');
     }
     try {
       final resp = await _dio.patchJson<Map<String, dynamic>>(
@@ -234,7 +234,7 @@ class SubjectRepository {
         classroomId: classroomId,
         subjectId: subjectId,
         subjectName: '',
-        coefficient: coefficient.toInt(),
+        coefficient: coefficient,
         assignedTeacherId: teacherId,
       );
     }
@@ -287,7 +287,7 @@ class SubjectRepository {
         classroomId: classroomId,
         subjectId: 0,
         subjectName: '',
-        coefficient: (coefficient ?? 1).toInt(),
+        coefficient: coefficient ?? 1.0,
         assignedTeacherId: clearTeacher ? null : teacherId,
       );
     }

@@ -12,7 +12,7 @@ library;
 
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:logger/logger.dart';
+import 'package:logger/logger.dart' as log_pkg;
 
 import '../../core/config/constants.dart';
 import '../../core/network/api_endpoints.dart';
@@ -22,9 +22,9 @@ import '../../core/sync/outbox.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/auth_dto.dart';
 
-final Logger _log = Logger(
-  printer: PrettyPrinter(methodNames: false, noBoxingByDefault: true),
-  level: Level.off,
+final log_pkg.Logger _log = log_pkg.Logger(
+  printer: log_pkg.PrettyPrinter(noBoxingByDefault: true),
+  level: log_pkg.Level.off,
 );
 
 /// Paramètre de requête pour créer / mettre à jour un utilisateur.
@@ -173,7 +173,7 @@ class UserRepository {
         username: req.username,
         firstName: req.firstName,
         lastName: req.lastName,
-        email: req.email,
+        email: req.email ?? '',
         phone: req.phone,
         sexe: req.sexe,
         isActive: req.isActive,
@@ -215,7 +215,7 @@ class UserRepository {
         username: req.username,
         firstName: req.firstName,
         lastName: req.lastName,
-        email: req.email,
+        email: req.email ?? '',
         phone: req.phone,
         sexe: req.sexe,
         isActive: req.isActive,

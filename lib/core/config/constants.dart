@@ -138,14 +138,14 @@ enum SchoolDay {
   vendredi(5, 'Vendredi'),
   samedi(6, 'Samedi');
 
-  final int index;
+  final int dayIndex;
   final String label;
-  const SchoolDay(this.index, this.label);
+  const SchoolDay(this.dayIndex, this.label);
 
   static SchoolDay? fromIndex(int? i) {
     if (i == null) return null;
     for (final d in values) {
-      if (d.index == i) return d;
+      if (d.dayIndex == i) return d;
     }
     return null;
   }

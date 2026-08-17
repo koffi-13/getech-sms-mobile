@@ -12,6 +12,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../app.dart';
+import '../../core/auth/auth_state.dart';
 import '../../core/config/app_config.dart';
 import '../connections/connection_state.dart';
 import '../connections/connections_controller.dart' show serverInfoProvider;
@@ -19,586 +20,244 @@ import '../../shared/models/classroom_dto.dart' show PeriodDto;
 import '../../shared/widgets/widgets.dart';
 import 'settings_controller.dart';
 
-/// Page Paramètres (sans état propre — délègue aux sous-sections).
 class SettingsPage extends ConsumerWidget {
   const SettingsPage({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Paramètres')),
+      appBar: AppBar(
+        title: const Text('Paramètres'),
+      ),
       body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-        children: const [
-          _AppearanceSection(),
-          SizedBox(height: 12),
-          _ConnectionSection(),
-          SizedBox(height: 12),
-          _SchoolYearPeriodSection(),
-          SizedBox(height: 12),
-          _ProfileSection(),
-          SizedBox(height: 12),
-          _AboutSection(),
+        padding: const EdgeInsets.all(16),
+        children: [
+          const _ProfileSection(),
+          const SizedBox(height: 16),
+          const _AppearanceSection(),
+          const SizedBox(height: 16),
+          const _SyncSection(),
+          const SizedBox(height: 16),
+          const _AboutSection(),
+          const SizedBox(height: 32),
+          Center(
+            child: TextButton.icon(
+              onPressed: () => _handleLogout(context, ref),
+              icon: const Icon(Icons.logout),
+              label: const Text('Déconnexion'),
+              style: TextButton.styleFrom(
+                foregroundColor: Theme.of(context).colorScheme.error,
+              ),
+            ),
+          ),
+          const SizedBox(height: 48),
         ],
       ),
     );
   }
-}
 
-// ---------------------------------------------------------------------------
-// Section : Apparence (thème clair / sombre / système)
-// ---------------------------------------------------------------------------
-
-class _AppearanceSection extends ConsumerWidget {
-  const _AppearanceSection();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final current = ref.watch(themeModeProvider);
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SectionHeader(
-              title: 'Apparence',
-              icon: Icons.palette_outlined,
-            ),
-            const SizedBox(height: 8),
-            SegmentedButton<ThemeMode>(
-              segments: const [
-                ButtonSegment(
-                  value: ThemeMode.light,
-                  icon: Icon(Icons.light_mode_outlined),
-                  label: Text('Clair'),
-                ),
-                ButtonSegment(
-                  value: ThemeMode.dark,
-                  icon: Icon(Icons.dark_mode_outlined),
-                  label: Text('Sombre'),
-                ),
-                ButtonSegment(
-                  value: ThemeMode.system,
-                  icon: Icon(Icons.settings_brightness_outlined),
-                  label: Text('Système'),
-                ),
-              ],
-              selected: {current},
-              onSelectionChanged: (selection) async {
-                if (selection.isEmpty) return;
-                final next = selection.first;
-                ref.read(themeModeProvider.notifier).state = next;
-                // Persiste le choix (restauration au démarrage futur).
-                final prefs = await SharedPreferences.getInstance();
-                await prefs.setString(
-                  AppConfig.prefThemeMode,
-                  next.name, // 'light' | 'dark' | 'system'
-                );
-              },
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'Le thème système suit le réglage de votre appareil.',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Section : Connexion serveur
-// ---------------------------------------------------------------------------
-
-class _ConnectionSection extends ConsumerWidget {
-  const _ConnectionSection();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final conn = ref.watch(connectionProvider);
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SectionHeader(
-              title: 'Connexion au serveur',
-              icon: Icons.cloud_outlined,
-            ),
-            const SizedBox(height: 4),
-            _kvRow(
-              context,
-              icon: Icons.link,
-              label: 'URL serveur',
-              value: conn.serverUrl ?? '—',
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Icon(Icons.verified_outlined,
-                    size: 18, color: theme.colorScheme.onSurfaceVariant),
-                const SizedBox(width: 8),
-                const Text('Statut : '),
-                StatusBadge.fromServerStatus(conn.status),
-                if (conn.latency != null) ...[
-                  const SizedBox(width: 10),
-                  Text(
-                    '${conn.latency!.inMilliseconds} ms',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-            const SizedBox(height: 8),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Mode hors-ligne forcé'),
-              subtitle: Text(
-                conn.forceOffline
-                    ? 'Toutes les requêtes réseau sont suspendues.'
-                    : 'Les requêtes réseau sont actives.',
-                style: theme.textTheme.bodySmall,
-              ),
-              value: conn.forceOffline,
-              onChanged: (_) =>
-                  ref.read(connectionProvider.notifier).toggleForceOffline(),
-            ),
-            const SizedBox(height: 4),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: OutlinedButton.icon(
-                onPressed: () => context.push('/connections'),
-                icon: const Icon(Icons.settings_ethernet, size: 18),
-                label: const Text('Gérer les connexions'),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _kvRow(
-    BuildContext context, {
-    required IconData icon,
-    required String label,
-    required String value,
-  }) {
-    final theme = Theme.of(context);
-    return Row(
-      children: [
-        Icon(icon, size: 18, color: theme.colorScheme.onSurfaceVariant),
-        const SizedBox(width: 8),
-        Text(label,
-            style: theme.textTheme.bodyMedium
-                ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text(
-            value,
-            textAlign: TextAlign.right,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              fontWeight: FontWeight.w500,
-            ),
+  Future<void> _handleLogout(BuildContext context, WidgetRef ref) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Déconnexion'),
+        content: const Text('Voulez-vous vraiment vous déconnecter ?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annuler'),
           ),
-        ),
-      ],
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Section : Année scolaire / Période
-// ---------------------------------------------------------------------------
-
-class _SchoolYearPeriodSection extends ConsumerStatefulWidget {
-  const _SchoolYearPeriodSection();
-
-  @override
-  ConsumerState<_SchoolYearPeriodSection> createState() =>
-      _SchoolYearPeriodSectionState();
-}
-
-class _SchoolYearPeriodSectionState
-    extends ConsumerState<_SchoolYearPeriodSection> {
-  int? _selectedSchoolYearId;
-  int? _selectedPeriodId;
-  bool _prefsLoaded = false;
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _loadPrefs();
-  }
-
-  Future<void> _loadPrefs() async {
-    if (_prefsLoaded) return;
-    final prefs = await SharedPreferences.getInstance();
-    if (!mounted) return;
-    setState(() {
-      _selectedSchoolYearId =
-          prefs.getInt(AppConfig.prefCurrentSchoolYearId);
-      _selectedPeriodId = prefs.getInt(AppConfig.prefCurrentPeriodId);
-      _prefsLoaded = true;
-    });
-  }
-
-  Future<void> _persistSchoolYear(int? id) async {
-    final prefs = await SharedPreferences.getInstance();
-    if (id == null) {
-      await prefs.remove(AppConfig.prefCurrentSchoolYearId);
-    } else {
-      await prefs.setInt(AppConfig.prefCurrentSchoolYearId, id);
-    }
-  }
-
-  Future<void> _persistPeriod(int? id) async {
-    final prefs = await SharedPreferences.getInstance();
-    if (id == null) {
-      await prefs.remove(AppConfig.prefCurrentPeriodId);
-    } else {
-      await prefs.setInt(AppConfig.prefCurrentPeriodId, id);
-    }
-  }
-
-  /// Étiquette lisible pour une année scolaire (ex : "2024 - 2025").
-  String _schoolYearLabel(Iterable<PeriodDto> yearPeriods) {
-    final start = yearPeriods
-        .map((p) => p.startDate)
-        .whereType<DateTime>()
-        .reduce((a, b) => a.isBefore(b) ? a : b);
-    final end = yearPeriods
-        .map((p) => p.endDate)
-        .whereType<DateTime>()
-        .reduce((a, b) => a.isAfter(b) ? a : b);
-    if (start.year == end.year) return '${start.year}';
-    return '${start.year} - ${end.year}';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final periodsAsync = ref.watch(periodsProvider);
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SectionHeader(
-              title: 'Année scolaire / Période',
-              subtitle: 'Sélection active pour les notes et bulletins.',
-              icon: Icons.event_outlined,
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.error,
             ),
-            const SizedBox(height: 4),
-            periodsAsync.when(
-              data: (periods) {
-                if (periods.isEmpty) {
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    child: EmptyState(
-                      title: 'Aucune période',
-                      message: _offlineMessage(ref),
-                      icon: Icons.event_busy_outlined,
-                    ),
-                  );
-                }
-
-                // Regroupe les périodes par année scolaire (préserve l'ordre).
-                final yearGroups = <int, List<PeriodDto>>{};
-                for (final p in periods) {
-                  final syId = p.schoolYearId ?? 0;
-                  yearGroups.putIfAbsent(syId, () => []).add(p);
-                }
-                final yearIds = yearGroups.keys.toList();
-
-                // Si la valeur sélectionnée n'est plus valide, on prend
-                // l'année active (is_active) ou la première.
-                if (_selectedSchoolYearId == null ||
-                    !yearGroups.containsKey(_selectedSchoolYearId)) {
-                  final active = periods.firstWhere(
-                    (p) => p.isActive,
-                    orElse: () => periods.first,
-                  );
-                  _selectedSchoolYearId = active.schoolYearId ?? 0;
-                }
-                final yearPeriods =
-                    yearGroups[_selectedSchoolYearId!] ?? const [];
-
-                // Filtre les périodes pour l'année sélectionnée.
-                if (_selectedPeriodId != null &&
-                    !yearPeriods.any((p) => p.id == _selectedPeriodId)) {
-                  _selectedPeriodId = null;
-                }
-                if (_selectedPeriodId == null) {
-                  final active = yearPeriods
-                      .firstWhere((p) => p.isActive, orElse: () => yearPeriods.first);
-                  _selectedPeriodId = active.id;
-                }
-
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    DropdownButtonFormField<int>(
-                      decoration: const InputDecoration(
-                        labelText: 'Année scolaire',
-                        prefixIcon: Icon(Icons.calendar_today_outlined),
-                        border: OutlineInputBorder(),
-                      ),
-                      value: _selectedSchoolYearId,
-                      items: yearIds
-                          .map((id) => DropdownMenuItem(
-                                value: id,
-                                child: Text(_schoolYearLabel(yearGroups[id]!)),
-                              ))
-                          .toList(),
-                      onChanged: (v) async {
-                        setState(() {
-                          _selectedSchoolYearId = v;
-                          _selectedPeriodId = null;
-                        });
-                        await _persistSchoolYear(v);
-                        // Re-sélectionne la période par défaut.
-                        final list = yearGroups[v] ?? const <PeriodDto>[];
-                        if (list.isNotEmpty) {
-                          final def = list.firstWhere(
-                            (p) => p.isActive,
-                            orElse: () => list.first,
-                          );
-                          setState(() => _selectedPeriodId = def.id);
-                          await _persistPeriod(def.id);
-                        }
-                      },
-                    ),
-                    const SizedBox(height: 12),
-                    DropdownButtonFormField<int>(
-                      decoration: const InputDecoration(
-                        labelText: 'Période',
-                        prefixIcon: Icon(Icons.date_range_outlined),
-                        border: OutlineInputBorder(),
-                      ),
-                      value: _selectedPeriodId,
-                      items: yearPeriods
-                          .map((p) => DropdownMenuItem(
-                                value: p.id,
-                                child: Text(
-                                  p.name +
-                                      (p.isActive ? '  (active)' : ''),
-                                ),
-                              ))
-                          .toList(),
-                      onChanged: (v) async {
-                        setState(() => _selectedPeriodId = v);
-                        await _persistPeriod(v);
-                      },
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Choix enregistré localement (appliqué aux prochaines vues).',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                );
-              },
-              loading: () => const Padding(
-                padding: EdgeInsets.symmetric(vertical: 12),
-                child: Center(child: CircularProgressIndicator(strokeWidth: 2.4)),
-              ),
-              error: (err, _) => Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                child: AppErrorWidget(
-                  message: 'Impossible de charger les périodes : $err',
-                  compact: true,
-                  onRetry: () => ref.invalidate(periodsProvider),
-                ),
-              ),
-            ),
-          ],
-        ),
+            child: const Text('Se déconnecter'),
+          ),
+        ],
       ),
     );
-  }
 
-  String _offlineMessage(WidgetRef ref) {
-    final conn = ref.watch(connectionProvider);
-    if (!conn.canReachServer) {
-      return 'Serveur hors-ligne — réessayez plus tard.';
+    if (confirmed == true) {
+      await ref.read(authProvider.notifier).logout();
     }
-    return 'Aucune période n\'a été configurée côté serveur.';
   }
 }
-
-// ---------------------------------------------------------------------------
-// Section : Profil (accès à la page d'édition)
-// ---------------------------------------------------------------------------
 
 class _ProfileSection extends ConsumerWidget {
   const _ProfileSection();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
     final auth = ref.watch(authProvider);
     final user = auth.user;
-    final initials = _initials(user?.fullName);
+    final theme = Theme.of(context);
 
     return Card(
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () => context.push('/settings/profile'),
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(
-            children: [
-              CircleAvatar(
-                radius: 24,
-                backgroundColor: theme.colorScheme.primary,
-                child: Text(
-                  initials,
-                  style: TextStyle(
-                    color: theme.colorScheme.onPrimary,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
+      child: Column(
+        children: [
+          ListTile(
+            leading: CircleAvatar(
+              backgroundColor: theme.colorScheme.primaryContainer,
+              child: Text(
+                user?.username.substring(0, 1).toUpperCase() ?? 'U',
+                style: TextStyle(color: theme.colorScheme.onPrimaryContainer),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      user?.fullName.isNotEmpty == true
-                          ? user!.fullName
-                          : (user?.username ?? 'Utilisateur'),
-                      style: theme.textTheme.titleSmall,
-                    ),
-                    if (user?.email != null) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        user!.email!,
-                        style: theme.textTheme.bodySmall,
-                      ),
-                    ],
-                    const SizedBox(height: 4),
-                    Text(
-                      'Appuyez pour modifier votre profil et votre mot de passe.',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const Icon(Icons.chevron_right),
-            ],
+            ),
+            title: Text(user?.fullName ?? 'Utilisateur'),
+            subtitle: Text(user?.email ?? 'Aucun email'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => context.push('/profile'),
           ),
-        ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AppearanceSection extends ConsumerWidget {
+  const _AppearanceSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(settingsProvider);
+    final themeMode = settings.themeMode;
+
+    return Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Text('Apparence',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+          ListTile(
+            leading: const Icon(Icons.palette_outlined),
+            title: const Text('Thème'),
+            subtitle: Text(_themeModeLabel(themeMode)),
+            onTap: () => _showThemePicker(context, ref, themeMode),
+          ),
+        ],
       ),
     );
   }
 
-  String _initials(String? fullName) {
-    final name = (fullName ?? '').trim();
-    if (name.isEmpty) return 'U';
-    final parts = name.split(RegExp(r'\s+'));
-    if (parts.length == 1) return parts[0][0].toUpperCase();
-    return (parts[0][0] + parts[1][0]).toUpperCase();
+  String _themeModeLabel(ThemeMode mode) {
+    switch (mode) {
+      case ThemeMode.system:
+        return 'Système';
+      case ThemeMode.light:
+        return 'Clair';
+      case ThemeMode.dark:
+        return 'Sombre';
+    }
   }
-}
 
-// ---------------------------------------------------------------------------
-// Section : À propos
-// ---------------------------------------------------------------------------
-
-class _AboutSection extends ConsumerWidget {
-  const _AboutSection();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final serverInfoAsync = ref.watch(serverInfoProvider);
-    final establishmentAsync = ref.watch(establishmentProvider);
-
-    final serverVersion = serverInfoAsync.maybeWhen(
-      data: (s) => s?.serverVersion,
-      orElse: () => null,
-    );
-    final establishmentName = establishmentAsync.maybeWhen(
-      data: (e) => e?.name,
-      orElse: () => null,
-    );
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
+  void _showThemePicker(BuildContext context, WidgetRef ref, ThemeMode current) {
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            const SectionHeader(
-              title: 'À propos',
-              icon: Icons.info_outline,
+            ListTile(
+              leading: const Icon(Icons.brightness_auto_outlined),
+              title: const Text('Système'),
+              trailing: current == ThemeMode.system ? const Icon(Icons.check) : null,
+              onTap: () {
+                ref.read(settingsProvider.notifier).setThemeMode(ThemeMode.system);
+                Navigator.pop(ctx);
+              },
             ),
-            const SizedBox(height: 4),
-            _kvRow(context, 'Application', '${AppConfig.appName} v${AppConfig.appVersion}'),
-            _kvRow(context, 'API', AppConfig.apiPrefix),
-            _kvRow(
-              context,
-              'Établissement',
-              establishmentName ?? '—',
+            ListTile(
+              leading: const Icon(Icons.light_mode_outlined),
+              title: const Text('Clair'),
+              trailing: current == ThemeMode.light ? const Icon(Icons.check) : null,
+              onTap: () {
+                ref.read(settingsProvider.notifier).setThemeMode(ThemeMode.light);
+                Navigator.pop(ctx);
+              },
             ),
-            _kvRow(
-              context,
-              'Version serveur',
-              serverVersion ?? '—',
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '© ${DateTime.now().year} GeTech-SMS. Tous droits réservés.',
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+            ListTile(
+              leading: const Icon(Icons.dark_mode_outlined),
+              title: const Text('Sombre'),
+              trailing: current == ThemeMode.dark ? const Icon(Icons.check) : null,
+              onTap: () {
+                ref.read(settingsProvider.notifier).setThemeMode(ThemeMode.dark);
+                Navigator.pop(ctx);
+              },
             ),
           ],
         ),
       ),
     );
   }
+}
 
-  Widget _kvRow(BuildContext context, String label, String value) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Row(
+class _SyncSection extends ConsumerWidget {
+  const _SyncSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final conn = ref.watch(connectionProvider);
+    final settings = ref.watch(settingsProvider);
+
+    return Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: 120,
-            child: Text(
-              label,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Text('Synchronisation & Connexion',
+                style: TextStyle(fontWeight: FontWeight.bold)),
           ),
-          Expanded(
-            child: Text(
-              value,
-              style: theme.textTheme.bodyMedium,
-            ),
+          ListTile(
+            leading: const Icon(Icons.wifi_tethering),
+            title: const Text('Serveur local'),
+            subtitle: Text(conn.serverIp ?? 'Non configuré'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => context.push('/pairing'),
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.cloud_off_outlined),
+            title: const Text('Mode hors-ligne forcé'),
+            subtitle: const Text('Désactive toute tentative de connexion.'),
+            value: settings.forceOffline,
+            onChanged: (v) {
+              ref.read(settingsProvider.notifier).setForceOffline(v);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AboutSection extends StatelessWidget {
+  const _AboutSection();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Text('À propos',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+          ListTile(
+            leading: Icon(Icons.info_outline),
+            title: Text('Version'),
+            subtitle: Text('GeTech-SMS Mobile v1.0.0'),
+          ),
+          ListTile(
+            leading: Icon(Icons.copyright_outlined),
+            title: Text('Éditeur'),
+            subtitle: Text('© 2024 GeTech-SMS'),
           ),
         ],
       ),
