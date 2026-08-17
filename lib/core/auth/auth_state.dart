@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../shared/models/auth_dto.dart' show LoginRequest, LoginResponse, MeResponse, ChangePasswordRequest, UserDto, EstablishmentDto, RoleBrief;
 import '../../features/connections/connection_state.dart';
+import '../config/app_config.dart';
 import '../network/api_endpoints.dart';
 import '../network/api_exceptions.dart';
 import '../network/dio_client.dart';
@@ -118,12 +119,52 @@ class AuthNotifier extends Notifier<AuthState> {
       );
       return true;
     } on DioException catch (e) {
-      final api = (e.error is ApiException) ? e.error as ApiException : dioErrorToApiException(e);
-      state = state.copyWith(isLoading: false, error: api.message);
+      // Message d'erreur actionnable pour les problèmes réseau courants.
+      final msg = _humanizeDioError(e, _serverUrl!);
+      state = state.copyWith(isLoading: false, error: msg);
       return false;
     } catch (e) {
       state = state.copyWith(isLoading: false, error: e.toString());
       return false;
+    }
+  }
+
+  /// Transforme une [DioException] en message d'erreur clair et actionnable,
+  /// avec détection des causes courantes (localhost sur appareil physique,
+  /// serveur injoignable, délai dépassé).
+  String _humanizeDioError(DioException e, String serverUrl) {
+    // Détecter l'usage de localhost/127.0.0.1 sur un appareil physique.
+    if (serverUrl.contains('localhost') || serverUrl.contains('127.0.0.1')) {
+      return 'L\'adresse « localhost » ou « 127.0.0.1 » désigne le mobile '
+          'lui-même, pas le serveur desktop. Utilisez l\'IP LAN du desktop '
+          '(ex: 192.168.1.10).';
+    }
+    switch (e.type) {
+      case DioExceptionType.connectionTimeout:
+      case DioExceptionType.receiveTimeout:
+      case DioExceptionType.sendTimeout:
+        return 'Délai de connexion dépassé après ${AppConfig.connectTimeout.inSeconds}s. '
+            'Causes possibles :\n'
+            '• Le serveur desktop n\'est pas démarré\n'
+            '• Le mobile et le desktop ne sont pas sur le même réseau Wi-Fi\n'
+            '• L\'IP ou le port est incorrect\n'
+            '• Le pare-feu du desktop bloque le port';
+      case DioExceptionType.connectionError:
+        return 'Connexion refusée ou serveur injoignable. Vérifiez l\'IP et '
+            'le port, et que le serveur desktop est démarré.';
+      case DioExceptionType.badResponse:
+        final code = e.response?.statusCode;
+        if (code == 401) return 'Nom d\'utilisateur ou mot de passe incorrect.';
+        if (code == 403) return 'Accès refusé. Permissions insuffisantes.';
+        if (code == 404) return 'Endpoint introuvable (404). L\'API du serveur '
+            'desktop ne correspond peut-être pas à la version attendue.';
+        return 'Erreur serveur ($code).';
+      case DioExceptionType.badCertificate:
+        return 'Problème de certificat TLS.';
+      case DioExceptionType.cancel:
+        return 'Requête annulée.';
+      case DioExceptionType.unknown:
+        return 'Erreur réseau inconnue : ${e.message}';
     }
   }
 

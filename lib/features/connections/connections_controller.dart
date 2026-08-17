@@ -108,18 +108,46 @@ class ConnectionsController {
 
       return pairResp;
     } on DioException catch (e) {
-      final api = (e.error is ApiException)
-          ? e.error as ApiException
-          : dioErrorToApiException(e);
+      // Message d'erreur actionnable pour le pairing.
+      final msg = _humanizePairingError(e, serverUrl);
       throw PairingException(
-        api.message,
-        statusCode: api.statusCode,
-        code: api.errorCode,
+        msg,
+        statusCode: e.response?.statusCode,
       );
     } on PairingException {
       rethrow;
     } catch (e) {
       throw PairingException('Échec de l\'appairage : $e');
+    }
+  }
+
+  /// Message d'erreur actionnable pour les échecs d'appairage.
+  /// Détecte localhost, les timeouts et les connexions refusées.
+  String _humanizePairingError(DioException e, String serverUrl) {
+    if (serverUrl.contains('localhost') || serverUrl.contains('127.0.0.1')) {
+      return 'L\'adresse « localhost » ou « 127.0.0.1 » désigne le mobile '
+          'lui-même, pas le serveur desktop. Utilisez l\'IP LAN du desktop '
+          '(ex: 192.168.1.10:8000).';
+    }
+    switch (e.type) {
+      case DioExceptionType.connectionTimeout:
+      case DioExceptionType.receiveTimeout:
+      case DioExceptionType.sendTimeout:
+        return 'Délai de connexion dépassé. Vérifiez que le serveur desktop '
+            'est démarré, sur le même réseau Wi-Fi, et que l\'IP:port est '
+            'correcte. Le pare-feu du desktop doit autoriser le port.';
+      case DioExceptionType.connectionError:
+        return 'Connexion refusée ou serveur injoignable. Vérifiez l\'IP et '
+            'le port. Assurez-vous que l\'endpoint /api/v1/devices/pair '
+            'existe sur le serveur desktop.';
+      case DioExceptionType.badResponse:
+        final code = e.response?.statusCode;
+        if (code == 404) return 'Endpoint /devices/pair introuvable (404). '
+            'Le serveur desktop doit implémenter cet endpoint.';
+        if (code == 400) return 'Token d\'appairage invalide ou expiré.';
+        return 'Erreur serveur lors de l\'appairage ($code).';
+      default:
+        return 'Erreur réseau lors de l\'appairage : ${e.message}';
     }
   }
 

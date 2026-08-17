@@ -67,12 +67,13 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       final auth = ref.read(authProvider);
       final loc = state.matchedLocation;
       final isPairing = loc == '/pairing' || loc.startsWith('/pairing');
+      final isQrScanner = loc == '/qr-scanner';
       final isLogin = loc == '/login';
       final isConnections = loc == '/connections';
 
-      // 1) Pas encore appairé → onboarding d'appairage.
+      // 1) Pas encore appairé → onboarding d'appairage (pairing + QR scanner).
       if (!conn.isPaired) {
-        return isPairing ? null : '/pairing';
+        return (isPairing || isQrScanner) ? null : '/pairing';
       }
       // 2) Appairé mais non authentifié → login.
       if (!auth.isAuthenticated) {

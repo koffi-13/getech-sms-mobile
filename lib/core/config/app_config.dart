@@ -31,7 +31,9 @@ class AppConfig {
   static const Duration jwtTtl = Duration(hours: 24);
 
   /// Timeouts réseau.
-  static const Duration connectTimeout = Duration(seconds: 10);
+  /// Le connectTimeout est volontairement élevé (20s) pour les réseaux LAN
+  /// lents ou les connexions vers un serveur desktop distant.
+  static const Duration connectTimeout = Duration(seconds: 20);
   static const Duration receiveTimeout = Duration(seconds: 30);
   static const Duration sendTimeout = Duration(seconds: 30);
 
@@ -39,7 +41,7 @@ class AppConfig {
   static const Duration syncInterval = Duration(minutes: 5);
 
   /// Latence considérée comme "serveur injoignable".
-  static const Duration unreachableThreshold = Duration(seconds: 5);
+  static const Duration unreachableThreshold = Duration(seconds: 10);
 
   /// Type de service mDNS/Bonjour publié par le desktop.
   static const String mdnsServiceType = '_getech-sms._tcp';

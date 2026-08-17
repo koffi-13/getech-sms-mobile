@@ -206,7 +206,10 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
                 submitting: _submitting,
                 error: _submitError,
               ),
-              _QrTab(onScan: _openQrScanner),
+              _QrTab(
+                onScan: _openQrScanner,
+                onManual: () => _tabController.animateTo(1),
+              ),
             ],
           ),
           if (_submitting)
@@ -434,8 +437,9 @@ class _ManualForm extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 class _QrTab extends StatelessWidget {
-  const _QrTab({required this.onScan});
+  const _QrTab({required this.onScan, required this.onManual});
   final VoidCallback onScan;
+  final VoidCallback onManual;
 
   @override
   Widget build(BuildContext context) {
@@ -480,7 +484,7 @@ class _QrTab extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             TextButton.icon(
-              onPressed: () => context.go('/pairing'),
+              onPressed: onManual,
               icon: const Icon(Icons.edit),
               label: const Text('Saisir manuellement'),
             ),

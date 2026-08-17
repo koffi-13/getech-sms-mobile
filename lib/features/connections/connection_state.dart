@@ -73,13 +73,22 @@ class ConnectionState {
   bool get isOnline => status == ServerStatus.online && !forceOffline;
   bool get canReachServer => isOnline && status != ServerStatus.offline;
 
+  /// URL complète du serveur, TOUJOURS avec le préfixe `/api/v1`.
+  /// - Si `serverUrlOverride` est défini (appairage manuel), il contient déjà
+  ///   `/api/v1` (via `_normalizeServerUrl`).
+  /// - Sinon (mDNS), on construit `http://<ip>:<port>/api/v1`.
   String? get serverUrl {
-    if (serverUrlOverride != null) return serverUrlOverride;
-    if (serverIp != null) return 'http://$serverIp:$serverPort';
+    if (serverUrlOverride != null) {
+      // S'assurer que l'override contient bien /api/v1.
+      final u = serverUrlOverride!;
+      return u.contains('/api/v1') ? u : '$u/api/v1';
+    }
+    if (serverIp != null) return 'http://$serverIp:$serverPort/api/v1';
     return null;
   }
 
-  String get baseUrl => serverUrl != null ? '$serverUrl/api/v1' : '';
+  /// URL de base pour Dio (même valeur que [serverUrl] — déjà avec `/api/v1`).
+  String get baseUrl => serverUrl ?? '';
   DateTime? get lastSync => lastSyncAt;
 
   ConnectionState copyWith({
@@ -206,15 +215,21 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
 
   Future<void> checkStatus() async {
     if (!state.isPaired || state.forceOffline) return;
+    final url = state.serverUrl;
+    if (url == null) return;
 
     final stopwatch = Stopwatch()..start();
     try {
+      // Dio "nu" sans interceptor d'auth, pour le ping /devices/server-info.
+      // ⚠️ On utilise buildUrl (pas baseUrl + path) pour éviter le piège Dio
+      // où un path commençant par '/' fait perdre le préfixe /api/v1.
       final dio = Dio(BaseOptions(
-        baseUrl: state.baseUrl,
-        connectTimeout: const Duration(seconds: 3),
+        connectTimeout: const Duration(seconds: 8),
+        receiveTimeout: const Duration(seconds: 10),
       ));
+      final fullUrl = buildUrl(url, ApiEndpoints.devicesServerInfo);
 
-      final response = await dio.get('/devices/server-info');
+      final response = await dio.get(fullUrl);
       stopwatch.stop();
 
       if (response.statusCode == 200) {
@@ -229,9 +244,35 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
     } catch (e) {
       state = state.copyWith(
         status: ServerStatus.offline,
-        errorMessage: e.toString(),
+        errorMessage: _humanizeTimeoutError(e),
       );
     }
+  }
+
+  /// Message d'erreur humain et actionnable pour les erreurs réseau.
+  /// Détecte les timeouts, les refus de connexion et les problèmes DNS.
+  String _humanizeTimeoutError(Object e) {
+    final msg = e.toString();
+    if (e is DioException) {
+      switch (e.type) {
+        case DioExceptionType.connectionTimeout:
+        case DioExceptionType.receiveTimeout:
+        case DioExceptionType.sendTimeout:
+          return 'Délai de connexion dépassé. Vérifiez que le serveur desktop '
+              'est démarré, sur le même réseau Wi-Fi que ce mobile, et que '
+              'l\'adresse IP:port est correcte.';
+        case DioExceptionType.connectionError:
+          return 'Connexion refusée ou injoignable. Vérifiez l\'IP du serveur '
+              'et que le pare-feu autorise le port.';
+        case DioExceptionType.badCertificate:
+          return 'Problème de certificat TLS.';
+        case DioExceptionType.badResponse:
+          return 'Réponse serveur invalide (${e.response?.statusCode}).';
+        default:
+          return 'Erreur réseau : ${e.message}';
+      }
+    }
+    return msg;
   }
 
   Future<void> toggleForceOffline() async {
