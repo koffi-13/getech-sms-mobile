@@ -52,6 +52,7 @@ class ConnectionState {
   final int? lastSyncCount;
   final String? errorMessage;
   final bool forceOffline;
+  final bool tolerateClockSkew;
   final String? discoveredServerName;
 
   const ConnectionState({
@@ -66,6 +67,7 @@ class ConnectionState {
     this.lastSyncCount,
     this.errorMessage,
     this.forceOffline = false,
+    this.tolerateClockSkew = true,
     this.discoveredServerName,
   });
 
@@ -103,6 +105,7 @@ class ConnectionState {
     int? lastSyncCount,
     String? errorMessage,
     bool? forceOffline,
+    bool? tolerateClockSkew,
     String? discoveredServerName,
     bool clearError = false,
   }) {
@@ -118,6 +121,7 @@ class ConnectionState {
       lastSyncCount: lastSyncCount ?? this.lastSyncCount,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
       forceOffline: forceOffline ?? this.forceOffline,
+      tolerateClockSkew: tolerateClockSkew ?? this.tolerateClockSkew,
       discoveredServerName: discoveredServerName ?? this.discoveredServerName,
     );
   }
@@ -154,6 +158,7 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
     final url = prefs.getString('server_url');
     final code = prefs.getString('establishment_code');
     final force = prefs.getBool('force_offline') ?? false;
+    final tolerate = prefs.getBool('tolerate_clock_skew') ?? true;
     final lastSync = prefs.getString('last_sync_at');
     final lastCount = prefs.getInt('last_sync_count');
     final token = await storage.getPairingToken();
@@ -167,6 +172,7 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
         establishmentCode: code,
         pairingToken: token,
         forceOffline: force,
+        tolerateClockSkew: tolerate,
         lastSyncAt: lastSync != null ? DateTime.tryParse(lastSync) : null,
         lastSyncCount: lastCount,
       );
@@ -180,22 +186,29 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
     required String establishmentCode,
     required String deviceToken,
     String? deviceId,
+    bool forceOffline = false,
+    bool tolerateClockSkew = true,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     final storage = _ref.read(secureStorageProvider);
 
     await prefs.setString('server_url', serverUrl);
     await prefs.setString('establishment_code', establishmentCode);
+    await prefs.setBool('force_offline', forceOffline);
+    await prefs.setBool('tolerate_clock_skew', tolerateClockSkew);
     await storage.savePairingToken(deviceToken);
     if (deviceId != null) await storage.saveDeviceId(deviceId);
 
     state = state.copyWith(
-      status: ServerStatus.checking,
+      status: forceOffline ? ServerStatus.offline : ServerStatus.checking,
       serverUrlOverride: serverUrl,
       establishmentCode: establishmentCode,
       pairingToken: deviceToken,
+      forceOffline: forceOffline,
+      tolerateClockSkew: tolerateClockSkew,
+      clearError: true,
     );
-    await checkStatus();
+    if (!forceOffline) await checkStatus();
     _startHeartbeat();
   }
 
@@ -223,10 +236,12 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
       // Dio "nu" sans interceptor d'auth, pour le ping /devices/server-info.
       // ⚠️ On utilise buildUrl (pas baseUrl + path) pour éviter le piège Dio
       // où un path commençant par '/' fait perdre le préfixe /api/v1.
-      final dio = Dio(BaseOptions(
-        connectTimeout: const Duration(seconds: 8),
-        receiveTimeout: const Duration(seconds: 10),
-      ));
+      final dio = Dio(
+        BaseOptions(
+          connectTimeout: const Duration(seconds: 8),
+          receiveTimeout: const Duration(seconds: 10),
+        ),
+      );
       final fullUrl = buildUrl(url, ApiEndpoints.devicesServerInfo);
 
       final response = await dio.get(fullUrl);
@@ -281,6 +296,13 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
     await prefs.setBool('force_offline', next);
     state = state.copyWith(forceOffline: next);
     if (!next) checkStatus();
+  }
+
+  Future<void> toggleTolerateClockSkew() async {
+    final prefs = await SharedPreferences.getInstance();
+    final next = !state.tolerateClockSkew;
+    await prefs.setBool('tolerate_clock_skew', next);
+    state = state.copyWith(tolerateClockSkew: next);
   }
 
   Future<void> recordSync({int count = 0}) async {

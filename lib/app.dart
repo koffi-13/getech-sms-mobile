@@ -131,6 +131,12 @@ final goRouterProvider = Provider<GoRouter>((ref) {
           ),
         ],
       ),
+      // --- Import Élèves (RBAC : STUDENT_CREATE) ---
+      // DOIT ÊTRE AVANT /students/:id pour éviter le conflit FormatException
+      GoRoute(
+        path: '/students/import',
+        builder: (context, state) => const StudentImportPage(),
+      ),
       // Routes plein écran (détails / formulaires / modules secondaires).
       GoRoute(
         path: '/classrooms/:id',
@@ -239,11 +245,6 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/finance/balances',
         builder: (context, state) => const BalancesPage(),
-      ),
-      // --- Import Élèves (RBAC : STUDENT_CREATE) ---
-      GoRoute(
-        path: '/students/import',
-        builder: (context, state) => const StudentImportPage(),
       ),
       // --- Établissements (multi-tenant) ---
       GoRoute(
@@ -374,36 +375,50 @@ class _MoreGridPage extends ConsumerWidget {
         padding: const EdgeInsets.all(16),
         crossAxisSpacing: 12,
         mainAxisSpacing: 12,
-        childAspectRatio: 0.95,
+        childAspectRatio: 0.78, // Encore augmenté pour éviter les overflows sur petits écrans
         children: items
-            .map((i) => Card(
-                  child: InkWell(
-                    onTap: () => context.push(i.route),
-                    borderRadius: BorderRadius.circular(16),
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: i.color.withValues(alpha: 0.12),
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                            child: Icon(i.icon, color: i.color, size: 28),
+            .map(
+              (i) => Card(
+                margin: EdgeInsets.zero,
+                child: InkWell(
+                  onTap: () => context.push(i.route),
+                  borderRadius: BorderRadius.circular(16),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 8,
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: i.color.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(14),
                           ),
-                          const SizedBox(height: 10),
-                          Text(
+                          child: Icon(i.icon, color: i.color, size: 24),
+                        ),
+                        const SizedBox(height: 8),
+                        Flexible(
+                          child: Text(
                             i.label,
                             textAlign: TextAlign.center,
-                            style: Theme.of(context).textTheme.labelLarge,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style:
+                                Theme.of(context).textTheme.labelSmall?.copyWith(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 10, // Réduit à 10 pour sécurité
+                                    ),
                           ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   ),
-                ))
+                ),
+              ),
+            )
             .toList(),
       ),
     );

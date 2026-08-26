@@ -43,21 +43,34 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
   }
 
   Future<void> refresh() async {
-    state = const AsyncValue.loading();
+    // 1. Charger immédiatement les données locales
+    final localClassrooms = await _fetchFromLocal();
+    if (localClassrooms.isNotEmpty) {
+      state = AsyncValue.data(localClassrooms);
+    }
+
     try {
       final canReach = _ref.read(connectionProvider).canReachServer;
-
-      List<ClassroomDto> classrooms;
-      if (canReach) {
-        classrooms = await _fetchFromApi();
-        await _saveToLocal(classrooms);
-      } else {
-        classrooms = await _fetchFromLocal();
+      if (!canReach) {
+        if (localClassrooms.isEmpty) {
+          state = AsyncValue.data(const []);
+        }
+        return;
       }
 
-      state = AsyncValue.data(classrooms);
+      // 2. Tenter de rafraîchir depuis l'API
+      final apiClassrooms = await _fetchFromApi();
+      await _saveToLocal(apiClassrooms);
+      
+      // 3. Re-charger depuis le local
+      final updatedLocal = await _fetchFromLocal();
+      state = AsyncValue.data(updatedLocal);
     } catch (e, st) {
-      state = AsyncValue.error(e, st);
+      if (state.hasValue && state.value!.isNotEmpty) {
+        _log.w('Erreur rafraîchissement API classes (utilisation cache) : $e');
+      } else {
+        state = AsyncValue.error(e, st);
+      }
     }
   }
 
@@ -76,8 +89,15 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
   Future<List<ClassroomDto>> _fetchFromApi() async {
     final dio = _ref.read(dioProvider);
     final response = await dio.get(ApiEndpoints.classrooms);
-    final list = response.data as List;
-    return list.map((j) => ClassroomDto.fromJson(j)).toList();
+    final data = response.data;
+    if (data is List) {
+      return data.map((j) => ClassroomDto.fromJson(j)).toList();
+    } else if (data is Map && data['items'] is List) {
+      return (data['items'] as List)
+          .map((j) => ClassroomDto.fromJson(j))
+          .toList();
+    }
+    return const [];
   }
 
   Future<List<ClassroomDto>> _fetchFromLocal() async {

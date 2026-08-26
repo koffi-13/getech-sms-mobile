@@ -216,7 +216,7 @@ class _SyncSection extends ConsumerWidget {
           ListTile(
             leading: const Icon(Icons.wifi_tethering),
             title: const Text('Serveur local'),
-            subtitle: Text(conn.serverIp ?? 'Non configuré'),
+            subtitle: Text(conn.serverIp ?? conn.serverUrlOverride ?? 'Non configuré'),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => context.push('/pairing'),
           ),
@@ -224,9 +224,9 @@ class _SyncSection extends ConsumerWidget {
             secondary: const Icon(Icons.cloud_off_outlined),
             title: const Text('Mode hors-ligne forcé'),
             subtitle: const Text('Désactive toute tentative de connexion.'),
-            value: settings.forceOffline,
+            value: conn.forceOffline,
             onChanged: (v) {
-              ref.read(settingsProvider.notifier).setForceOffline(v);
+              ref.read(connectionProvider.notifier).toggleForceOffline();
             },
           ),
         ],

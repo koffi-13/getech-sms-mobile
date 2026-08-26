@@ -1,21 +1,4 @@
 /// Moteur de synchronisation offline-first (pull / push, server-wins).
-///
-/// Flux de synchronisation :
-/// 1. **Pull** — `GET /sync/pull?since=<watermark>` : récupère les changements
-///    serveur depuis la dernière synchro et les upsert localement.
-/// 2. **Push** — `POST /sync/push` : dépile l'[Outbox] et envoie les écritures
-///    locales au serveur.
-/// 3. **Re-pull final** — récupère les changements issus du push (IDs générés
-///    côté serveur, conflits résolus).
-///
-/// Stratégie de conflit : **server-wins** (V1). Le serveur est l'autorité ;
-/// toute modification locale en conflit est écrasée par la version serveur
-/// lors du prochain pull.
-///
-/// Watermark global : le `last_sync` du SecureStorage (via
-/// [ConnectionNotifier.recordSync]) est utilisé comme paramètre `since` du
-/// pull. Les métadonnées par table (`sync_metadata`) sont également mises à
-/// jour avec le `serverTime` pour un usage futur (watermark par table).
 library;
 
 import 'package:drift/drift.dart';
@@ -72,21 +55,73 @@ DateTime? _rDt(Map<String, dynamic> r, String k) {
 }
 
 // ---------------------------------------------------------------------------
+// SyncState & Progress
+// ---------------------------------------------------------------------------
+
+enum SyncStatus { idle, pulling, pushing, processing, success, error }
+
+class SyncProgress {
+  final SyncStatus status;
+  final double progress; // 0.0 to 1.0
+  final String message;
+  final SyncResult? lastResult;
+
+  const SyncProgress({
+    this.status = SyncStatus.idle,
+    this.progress = 0.0,
+    this.message = '',
+    this.lastResult,
+  });
+
+  SyncProgress copyWith({
+    SyncStatus? status,
+    double? progress,
+    String? message,
+    SyncResult? lastResult,
+  }) {
+    return SyncProgress(
+      status: status ?? this.status,
+      progress: progress ?? this.progress,
+      message: message ?? this.message,
+      lastResult: lastResult ?? this.lastResult,
+    );
+  }
+}
+
+class SyncProgressNotifier extends StateNotifier<SyncProgress> {
+  SyncProgressNotifier() : super(const SyncProgress());
+
+  void update(SyncStatus status, double progress, String message) {
+    state = state.copyWith(status: status, progress: progress, message: message);
+  }
+
+  void complete(SyncResult result) {
+    state = state.copyWith(
+      status: result.isSuccess ? SyncStatus.success : SyncStatus.error,
+      progress: 1.0,
+      message: result.isSuccess ? 'Synchronisation réussie' : 'Erreur de synchronisation',
+      lastResult: result,
+    );
+  }
+
+  void reset() {
+    state = const SyncProgress();
+  }
+}
+
+final syncProgressProvider = StateNotifierProvider<SyncProgressNotifier, SyncProgress>((ref) {
+  return SyncProgressNotifier();
+});
+
+// ---------------------------------------------------------------------------
 // SyncResult
 // ---------------------------------------------------------------------------
 
 /// Résultat d'une opération de synchronisation.
 class SyncResult {
-  /// Nombre d'enregistrements reçus du serveur (pull).
   final int pulled;
-
-  /// Nombre d'enregistrements envoyés au serveur (push).
   final int pushed;
-
-  /// Horodatage du résultat.
   final DateTime timestamp;
-
-  /// Liste des messages d'erreur rencontrés (vide si succès).
   final List<String> errors;
 
   const SyncResult({
@@ -96,7 +131,6 @@ class SyncResult {
     this.errors = const [],
   });
 
-  /// `true` si aucune erreur n'a été rencontrée.
   bool get isSuccess => errors.isEmpty;
 
   @override
@@ -108,71 +142,63 @@ class SyncResult {
 // SyncEngine
 // ---------------------------------------------------------------------------
 
-/// Moteur de synchronisation offline-first.
-///
-/// Coordonne le pull (serveur → local) et le push (local → serveur) via
-/// [Dio], en s'appuyant sur [AppDatabase] pour le stockage local et
-/// [Outbox] pour la file d'attente des écritures.
 class SyncEngine {
   SyncEngine(this._ref) : _db = _ref.read(databaseProvider);
 
   final Ref _ref;
   final AppDatabase _db;
 
-  /// Synchronisation complète : pull → push → re-pull final.
-  ///
-  /// Si le serveur est injoignable, retourne immédiatement un résultat
-  /// d'erreur sans tenter d'appel réseau.
   Future<SyncResult> syncNow() async {
+    final notifier = _ref.read(syncProgressProvider.notifier);
     final errors = <String>[];
     var pulled = 0;
     var pushed = 0;
 
-    // Vérification préalable de la connexion.
     if (!_ref.read(connectionProvider).canReachServer) {
-      return SyncResult(
+      final res = SyncResult(
         timestamp: DateTime.now(),
         errors: ['Serveur injoignable'],
       );
+      notifier.complete(res);
+      return res;
     }
 
-    // 1. Pull initial.
+    notifier.update(SyncStatus.pulling, 0.1, 'Récupération des données...');
     final pull1 = await pull();
     pulled += pull1.pulled;
     errors.addAll(pull1.errors);
+
     if (!pull1.isSuccess) {
-      // Si le pull initial échoue (réseau), on ne tente pas le push.
-      return SyncResult(
+      final res = SyncResult(
         pulled: pulled,
         pushed: pushed,
         timestamp: DateTime.now(),
         errors: errors,
       );
+      notifier.complete(res);
+      return res;
     }
 
-    // 2. Push des écritures locales.
+    notifier.update(SyncStatus.pushing, 0.4, 'Envoi des modifications locales...');
     final pushResult = await push();
     pushed += pushResult.pushed;
     errors.addAll(pushResult.errors);
 
-    // 3. Re-pull final pour récupérer les IDs serveur et les conflits résolus.
+    notifier.update(SyncStatus.pulling, 0.7, 'Finalisation de la synchro...');
     final pull2 = await pull();
     pulled += pull2.pulled;
     errors.addAll(pull2.errors);
 
-    return SyncResult(
+    final finalResult = SyncResult(
       pulled: pulled,
       pushed: pushed,
       timestamp: DateTime.now(),
       errors: errors,
     );
+    notifier.complete(finalResult);
+    return finalResult;
   }
 
-  /// Pull incrémental : `GET /sync/pull?since=<watermark>`.
-  ///
-  /// Récupère les changements serveur depuis la dernière synchro, les upsert
-  /// localement, applique les suppressions (soft-delete), puis met à jour le
-  /// watermark global via [ConnectionNotifier.recordSync].
   Future<SyncResult> pull() async {
     final conn = _ref.read(connectionProvider);
     if (!conn.canReachServer || conn.serverUrl == null) {
@@ -204,20 +230,25 @@ class SyncEngine {
       _log.i('Pull reçu : ${pullResp.totalChanges} changements, '
           '${pullResp.deleted.length} suppressions');
 
-      // Application des changements par table.
+      final notifier = _ref.read(syncProgressProvider.notifier);
+      int processed = 0;
+      final total = pullResp.changes.length + (pullResp.deleted.isNotEmpty ? 1 : 0);
+
       for (final entry in pullResp.changes.entries) {
+        processed++;
+        notifier.update(SyncStatus.processing, 0.1 + (0.3 * (processed/total)), 'Traitement de ${entry.key}...');
         await _applyTableChanges(entry.key, entry.value, pullResp.serverTime);
       }
 
-      // Application des suppressions (soft-delete).
-      await _applyDeletes(pullResp.deleted, pullResp.serverTime);
+      if (pullResp.deleted.isNotEmpty) {
+        notifier.update(SyncStatus.processing, 0.4, 'Traitement des suppressions...');
+        await _applyDeletes(pullResp.deleted, pullResp.serverTime);
+      }
 
-      // Mise à jour du watermark global.
       await _ref
           .read(connectionProvider.notifier)
           .recordSync(count: pullResp.totalChanges);
 
-      // Mise à jour des métadonnées par table.
       await _updateSyncMetadata(pullResp.serverTime, pullResp.totalChanges);
 
       return SyncResult(
@@ -233,12 +264,6 @@ class SyncEngine {
     }
   }
 
-  /// Push des écritures locales : dépile l'[Outbox] → `POST /sync/push`.
-  ///
-  /// Regroupe les entrées pending par table, construit une [SyncPushRequest],
-  /// l'envoie au serveur, puis marque les entrées comme traitées.
-  /// En cas de conflit (server-wins), l'entrée est marquée traitée avec une
-  /// note ; la version serveur sera récupérée au prochain pull.
   Future<SyncResult> push() async {
     final conn = _ref.read(connectionProvider);
     if (!conn.canReachServer || conn.serverUrl == null) {
@@ -255,7 +280,6 @@ class SyncEngine {
       return SyncResult(timestamp: DateTime.now());
     }
 
-    // Regroupement par table → liste de payloads.
     final changes = <String, List<Map<String, dynamic>>>{};
     for (final entry in pending) {
       changes.putIfAbsent(entry.tableNameColumn, () => []).add(entry.payloadMap);
@@ -285,7 +309,6 @@ class SyncEngine {
       _log.i('Push terminé : $appliedCount appliqués, '
           '${pushResp.conflicts.length} conflits');
 
-      // Marquage des entrées comme traitées.
       for (final entry in pending) {
         final conflictKey = entry.recordId != null
             ? '${entry.tableNameColumn}:${entry.recordId}'
@@ -294,15 +317,12 @@ class SyncEngine {
             pushResp.conflicts.contains(conflictKey);
 
         if (isConflict) {
-          // Server-wins : l'entrée est marquée traitée avec une note.
-          // La version serveur sera récupérée au prochain pull.
           await outbox.markProcessed(
             entry.id,
             error: 'Conflit (server-wins) — ignoré par le serveur',
           );
         } else {
           await outbox.markProcessed(entry.id);
-          // Marque l'enregistrement local comme synchronisé.
           if (entry.recordId != null) {
             final isDelete =
                 entry.operation.toUpperCase() == 'DELETE';
@@ -316,7 +336,6 @@ class SyncEngine {
         }
       }
 
-      // Nettoyage des entrées traitées.
       await outbox.clearProcessed();
 
       final errors = pushResp.conflicts.isEmpty
@@ -340,15 +359,6 @@ class SyncEngine {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Application des changements (upsert par table).
-  // -------------------------------------------------------------------------
-
-  /// Applique un lot de changements pour une table donnée (upsert en batch).
-  ///
-  /// Utilise un `switch` explicite sur le nom de la table pour appeler le
-  /// companion Drift typé correspondant. Les tables non gérées loguent un
-  /// avertissement et sont ignorées.
   Future<void> _applyTableChanges(
     String table,
     List<Map<String, dynamic>> rows,
@@ -862,14 +872,6 @@ class SyncEngine {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Application des suppressions (soft-delete).
-  // -------------------------------------------------------------------------
-
-  /// Applique les suppressions serveur (soft-delete local).
-  ///
-  /// Chaque entrée de [deleted] est au format `tableName:recordId`.
-  /// L'enregistrement local correspondant voit son `is_deleted` mis à `true`.
   Future<void> _applyDeletes(List<String> deleted, DateTime syncedAt) async {
     if (deleted.isEmpty) return;
 
@@ -889,15 +891,6 @@ class SyncEngine {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Mise à jour des flags de synchro (synced_at, is_dirty, is_deleted).
-  // -------------------------------------------------------------------------
-
-  /// Met à jour les flags de synchro d'un enregistrement local après un push
-  /// réussi ou une suppression serveur.
-  ///
-  /// [deleted] : si `true`, marque l'enregistrement comme supprimé
-  /// (soft-delete). Si `false`, marque comme synchronisé et non dirty.
   Future<void> _updateRowSyncState(
     String table,
     int recordId,
@@ -1140,12 +1133,6 @@ class SyncEngine {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Métadonnées de synchro.
-  // ---------------------------------------------------------------------------
-
-  /// Met à jour `sync_metadata.last_synced_at` pour toutes les tables
-  /// répliquées avec le `serverTime` du dernier pull.
   Future<void> _updateSyncMetadata(DateTime serverTime, int totalChanges) async {
     try {
       await _db.batch((b) {
@@ -1168,5 +1155,4 @@ class SyncEngine {
   }
 }
 
-/// Provider Riverpod du moteur de synchronisation (singleton).
 final syncEngineProvider = Provider<SyncEngine>((ref) => SyncEngine(ref));

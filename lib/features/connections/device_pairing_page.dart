@@ -17,6 +17,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/auth/auth_state.dart';
@@ -46,6 +47,7 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
   final _pairingTokenCtrl = TextEditingController();
 
   bool _submitting = false;
+  bool _tolerateClockSkew = true;
   String? _submitError;
 
   @override
@@ -107,6 +109,7 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
             serverUrl: serverUrl,
             establishmentCode: establishmentCode,
             pairingToken: pairingToken,
+            tolerateClockSkew: _tolerateClockSkew,
           );
       if (!mounted) return;
       _navigateAfterPairSuccess();
@@ -138,7 +141,7 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
     try {
       await ref
           .read(connectionsControllerProvider)
-          .pairWithPayload(payload);
+          .pairWithPayload(payload, tolerateClockSkew: _tolerateClockSkew);
       if (!mounted) return;
       _navigateAfterPairSuccess();
     } on PairingException catch (e) {
@@ -170,15 +173,16 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text(msg),
-        behavior: SnackBarBehavior.floating,
-      ));
+      ..showSnackBar(
+        SnackBar(
+          content: Text(msg),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(
         title: const Text('Appairage du terminal'),
@@ -204,6 +208,8 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
                 pairingTokenCtrl: _pairingTokenCtrl,
                 onSubmit: _submitManual,
                 submitting: _submitting,
+                tolerateClockSkew: _tolerateClockSkew,
+                onTolerateChanged: (v) => setState(() => _tolerateClockSkew = v),
                 error: _submitError,
               ),
               _QrTab(
@@ -216,12 +222,12 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
             Container(
               color: Colors.black.withValues(alpha: 0.35),
               alignment: Alignment.center,
-              child: Card(
+              child: const Card(
                 child: Padding(
-                  padding: const EdgeInsets.all(20),
+                  padding: EdgeInsets.all(20),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
-                    children: const [
+                    children: [
                       CircularProgressIndicator(),
                       SizedBox(height: 16),
                       Text('Appairage en cours…'),
@@ -325,6 +331,8 @@ class _ManualForm extends StatelessWidget {
     required this.pairingTokenCtrl,
     required this.onSubmit,
     required this.submitting,
+    required this.tolerateClockSkew,
+    required this.onTolerateChanged,
     required this.error,
   });
 
@@ -334,6 +342,8 @@ class _ManualForm extends StatelessWidget {
   final TextEditingController pairingTokenCtrl;
   final VoidCallback onSubmit;
   final bool submitting;
+  final bool tolerateClockSkew;
+  final ValueChanged<bool> onTolerateChanged;
   final String? error;
 
   @override
@@ -390,17 +400,37 @@ class _ManualForm extends StatelessWidget {
           const SizedBox(height: 12),
           TextFormField(
             controller: pairingTokenCtrl,
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               labelText: 'Token d\'appairage',
               hintText: 'Code à usage unique (ex : 8f3c…)',
-              prefixIcon: Icon(Icons.key),
-              border: OutlineInputBorder(),
+              prefixIcon: const Icon(Icons.key),
+              suffixIcon: IconButton(
+                icon: const Icon(Icons.content_paste),
+                tooltip: 'Coller depuis le presse-papier',
+                onPressed: () async {
+                  final data = await Clipboard.getData(Clipboard.kTextPlain);
+                  if (data?.text != null) {
+                    pairingTokenCtrl.text = data!.text!.trim();
+                  }
+                },
+              ),
+              border: const OutlineInputBorder(),
             ),
             autocorrect: false,
             obscureText: true,
             textInputAction: TextInputAction.done,
             validator: (v) =>
                 (v == null || v.trim().isEmpty) ? 'Champ requis' : null,
+          ),
+          const SizedBox(height: 12),
+          CheckboxListTile(
+            value: tolerateClockSkew,
+            onChanged: (v) => onTolerateChanged(v ?? true),
+            title: const Text('Tolérer les décalages d\'horloge'),
+            subtitle: const Text('Évite les erreurs d\'expiration prématurée (Mode Local Forcé)'),
+            controlAffinity: ListTileControlAffinity.leading,
+            contentPadding: EdgeInsets.zero,
+            dense: true,
           ),
           if (error != null) ...[
             const SizedBox(height: 12),

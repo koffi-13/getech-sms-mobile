@@ -32,15 +32,16 @@ class DashboardStatsDto {
   /// Alias de compatibilité : outstandingBalance = totalBalanceDue.
   double get outstandingBalance => totalBalanceDue;
 
-  factory DashboardStatsDto.fromJson(Map<String, dynamic> j) =>
-      DashboardStatsDto(
+  factory DashboardStatsDto.fromJson(Map<String, dynamic> j) {
+    try {
+      return DashboardStatsDto(
         totalStudents: (j['total_students'] as num?)?.toInt() ?? 0,
         totalClassrooms: (j['total_classrooms'] as num?)?.toInt() ?? 0,
         totalTeachers: (j['total_teachers'] as num?)?.toInt() ?? 0,
         totalPayments: (j['total_payments'] as num?)?.toInt() ?? 0,
         totalBalanceDue: (j['total_balance_due'] as num?)?.toDouble() ??
             (j['outstanding_balance'] as num?)?.toDouble() ??
-            0,
+            0.0,
         totalUsers: (j['total_users'] as num?)?.toInt() ?? 0,
         recentPayments: (j['recent_payments'] as List?)
                 ?.map((e) => DashboardRecentPaymentDto.fromJson(
@@ -53,6 +54,12 @@ class DashboardStatsDto {
                 .toList() ??
             const [],
       );
+    } catch (e) {
+      // Si le format change ou est invalide, on renvoie un objet vide 
+      // pour éviter de crasher le dashboard.
+      return const DashboardStatsDto();
+    }
+  }
 }
 
 /// Paiement récent (DashboardRecentPayment côté serveur).

@@ -10,7 +10,7 @@
 /// est proposé en repli.
 library;
 
-import 'dart:convert' show jsonDecode;
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -26,6 +26,136 @@ class QrScannerPage extends ConsumerStatefulWidget {
 
   @override
   ConsumerState<QrScannerPage> createState() => _QrScannerPageState();
+
+  /// Tente de parser le payload. Supporte :
+  /// 1. URI : getech://pair?ip=...&port=8000&token=...&code=...
+  /// 2. JSON : {"ip": "...", "port": 8000, "token": "...", "establishment_code": "..."}
+  /// 3. JWT : décodage des claims pour extraire IP/port/code
+  /// 4. Base64 : JSON encodé
+  /// 5. Délimité : ip:port|code|token
+  /// 6. Token brut : fallback si format non reconnu
+  static PairingPayload? tryParsePayload(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+
+    // 1. URI (getech://pair ou http://.../pair)
+    if (trimmed.startsWith('getech://') || trimmed.startsWith('http')) {
+      try {
+        // Normalisation pour Uri.parse si c'est getech://
+        final uri = Uri.parse(
+          trimmed.startsWith('getech://')
+              ? trimmed.replaceFirst('getech://pair', 'http://getech-app/pair')
+              : trimmed,
+        );
+
+        final ip = uri.queryParameters['ip'] ??
+            uri.queryParameters['host'] ??
+            (uri.host == 'getech-app' ? '' : uri.host);
+        final port =
+            int.tryParse(uri.queryParameters['port'] ?? uri.port.toString()) ??
+                8000;
+        final code = uri.queryParameters['code'] ??
+            uri.queryParameters['establishment_code'] ??
+            uri.queryParameters['est_code'] ??
+            '';
+        final token = uri.queryParameters['token'] ??
+            uri.queryParameters['pairing_token'] ??
+            '';
+
+        if (token.isNotEmpty) {
+          return PairingPayload(
+            ip: ip,
+            port: port,
+            establishmentCode: code,
+            pairingToken: token,
+          );
+        }
+      } catch (_) {}
+    }
+
+    // 2. JSON ou Base64 JSON
+    try {
+      String jsonStr = trimmed;
+      if (!trimmed.startsWith('{') && !trimmed.contains(' ')) {
+        // Tentative Base64
+        try {
+          jsonStr = utf8.decode(base64.decode(base64.normalize(trimmed)));
+        } catch (_) {}
+      }
+
+      if (jsonStr.startsWith('{')) {
+        final decoded = jsonDecode(jsonStr);
+        if (decoded is Map) {
+          final data =
+              decoded['pairing'] is Map ? decoded['pairing'] as Map : decoded;
+          return PairingPayload(
+            ip: data['ip']?.toString() ?? data['host']?.toString() ?? '',
+            port: int.tryParse(data['port']?.toString() ?? '8000') ?? 8000,
+            establishmentCode: data['establishment_code']?.toString() ??
+                data['code']?.toString() ??
+                '',
+            pairingToken: data['pairing_token']?.toString() ??
+                data['token']?.toString() ??
+                '',
+          );
+        }
+      }
+    } catch (_) {}
+
+    // 3. JWT (3 segments)
+    if (trimmed.contains('.') && trimmed.split('.').length == 3) {
+      try {
+        final payloadPart = trimmed.split('.')[1];
+        final normalized = base64.normalize(payloadPart);
+        final payloadJson = utf8.decode(base64.decode(normalized));
+        final payload = jsonDecode(payloadJson);
+        if (payload is Map) {
+          return PairingPayload(
+            ip: payload['ip']?.toString() ?? payload['host']?.toString() ?? '',
+            port: int.tryParse(payload['port']?.toString() ?? '8000') ?? 8000,
+            establishmentCode: payload['establishment_code']?.toString() ??
+                payload['code']?.toString() ??
+                '',
+            pairingToken: trimmed,
+          );
+        }
+      } catch (_) {}
+    }
+
+    // 4. Délimité (ip:port|code|token)
+    if (trimmed.contains('|')) {
+      final parts = trimmed.split('|');
+      if (parts.length >= 2) {
+        String ip = '';
+        int port = 8000;
+        if (parts[0].contains(':')) {
+          final hostParts = parts[0].split(':');
+          ip = hostParts[0];
+          port = int.tryParse(hostParts[1]) ?? 8000;
+        } else {
+          ip = parts[0];
+        }
+        return PairingPayload(
+          ip: ip,
+          port: port,
+          establishmentCode: parts.length > 2 ? parts[1] : '',
+          pairingToken: parts.last,
+        );
+      }
+    }
+
+    // 5. Token brut (dernier recours)
+    if (trimmed.length >= 6 && !trimmed.contains(' ')) {
+      return PairingPayload(
+        ip: '',
+        port: 8000,
+        establishmentCode: '',
+        pairingToken: trimmed,
+      );
+    }
+
+    return null;
+  }
 }
 
 class _QrScannerPageState extends ConsumerState<QrScannerPage> {
@@ -68,7 +198,7 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
       _toast('QR code vide ou illisible');
       return;
     }
-    final payload = _tryParse(raw);
+    final payload = QrScannerPage.tryParsePayload(raw);
     if (payload == null) {
       _toast('QR code invalide');
       return;
@@ -78,43 +208,121 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
     Navigator.of(context).pop<PairingPayload>(payload);
   }
 
-  /// Tente de parser le payload. Accepte soit un JSON objet direct, soit un
-  /// JSON enveloppé `{ "pairing": { ... } }` pour robustesse.
-  static PairingPayload? _tryParse(String raw) {
+  /// Tente de parser le payload. Supporte :
+  /// 1. URI : getech://pair?ip=...&port=8000&token=...&code=...
+  /// 2. JSON : {"ip": "...", "port": 8000, "token": "...", "establishment_code": "..."}
+  /// 3. JWT : décodage des claims pour extraire IP/port/code
+  /// 4. Base64 : JSON encodé
+  /// 5. Délimité : ip:port|code|token
+  static PairingPayload? tryParsePayload(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+
+    // 1. URI (getech://pair ou http://.../pair)
+    if (trimmed.startsWith('getech://') || trimmed.startsWith('http')) {
+      try {
+        // Normalisation pour Uri.parse si c'est getech://
+        final uri = Uri.parse(
+          trimmed.startsWith('getech://')
+              ? trimmed.replaceFirst('getech://pair', 'http://getech-app/pair')
+              : trimmed,
+        );
+        
+        final ip = uri.queryParameters['ip'] ?? uri.queryParameters['host'] ?? 
+                  (uri.host == 'getech-app' ? '' : uri.host);
+        final port = int.tryParse(uri.queryParameters['port'] ?? uri.port.toString()) ?? 8000;
+        final code = uri.queryParameters['code'] ?? uri.queryParameters['establishment_code'] ?? uri.queryParameters['est_code'] ?? '';
+        final token = uri.queryParameters['token'] ?? uri.queryParameters['pairing_token'] ?? '';
+
+        if (token.isNotEmpty) {
+          return PairingPayload(
+            ip: ip,
+            port: port,
+            establishmentCode: code,
+            pairingToken: token,
+          );
+        }
+      } catch (_) {}
+    }
+
+    // 2. JSON ou Base64 JSON
     try {
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) return null;
-      Map<String, dynamic> data;
-      if (decoded['pairing'] is Map) {
-        data = Map<String, dynamic>.from(decoded['pairing'] as Map);
-      } else {
-        data = Map<String, dynamic>.from(decoded);
+      String jsonStr = trimmed;
+      if (!trimmed.startsWith('{') && !trimmed.contains(' ')) {
+        // Tentative Base64
+        try {
+          jsonStr = utf8.decode(base64.decode(base64.normalize(trimmed)));
+        } catch (_) {}
       }
-      final payload = PairingPayload.fromJson(data);
-      if (payload.ip.isEmpty ||
-          payload.establishmentCode.isEmpty ||
-          payload.pairingToken.isEmpty) {
-        return null;
+
+      if (jsonStr.startsWith('{')) {
+        final decoded = jsonDecode(jsonStr);
+        if (decoded is Map) {
+          final data = decoded['pairing'] is Map ? decoded['pairing'] as Map : decoded;
+          return PairingPayload(
+            ip: data['ip']?.toString() ?? data['host']?.toString() ?? '',
+            port: int.tryParse(data['port']?.toString() ?? '8000') ?? 8000,
+            establishmentCode: data['establishment_code']?.toString() ?? data['code']?.toString() ?? '',
+            pairingToken: data['pairing_token']?.toString() ?? data['token']?.toString() ?? '',
+          );
+        }
       }
-      return payload;
-    } catch (_) {
-      return null;
+    } catch (_) {}
+
+    // 3. JWT (3 segments)
+    if (trimmed.contains('.') && trimmed.split('.').length == 3) {
+      try {
+        final payloadPart = trimmed.split('.')[1];
+        final normalized = base64.normalize(payloadPart);
+        final payloadJson = utf8.decode(base64.decode(normalized));
+        final payload = jsonDecode(payloadJson);
+        if (payload is Map) {
+          return PairingPayload(
+            ip: payload['ip']?.toString() ?? payload['host']?.toString() ?? '',
+            port: int.tryParse(payload['port']?.toString() ?? '8000') ?? 8000,
+            establishmentCode: payload['establishment_code']?.toString() ?? payload['code']?.toString() ?? '',
+            pairingToken: trimmed,
+          );
+        }
+      } catch (_) {}
     }
-  }
 
-  void _onPermissionSet(bool granted) {
-    if (!granted) {
-      setState(() => _permissionDenied = true);
-    } else if (_permissionDenied) {
-      setState(() => _permissionDenied = false);
+    // 4. Délimité (ip:port|code|token)
+    if (trimmed.contains('|')) {
+      final parts = trimmed.split('|');
+      if (parts.length >= 2) {
+        String ip = '';
+        int port = 8000;
+        if (parts[0].contains(':')) {
+          final hostParts = parts[0].split(':');
+          ip = hostParts[0];
+          port = int.tryParse(hostParts[1]) ?? 8000;
+        } else {
+          ip = parts[0];
+        }
+        return PairingPayload(
+          ip: ip,
+          port: port,
+          establishmentCode: parts.length > 2 ? parts[1] : '',
+          pairingToken: parts.last,
+        );
+      }
     }
+
+    // 5. Token brut (dernier recours)
+    if (trimmed.length >= 6 && !trimmed.contains(' ')) {
+      return PairingPayload(
+        ip: '',
+        port: 8000,
+        establishmentCode: '',
+        pairingToken: trimmed,
+      );
+    }
+
+    return null;
   }
 
-  void _onError(Object error) {
-    setState(() => _startError = 'Erreur caméra : $error');
-  }
-
-  Future<void> _toggleTorch() async {
+  void _toggleTorch() async {
     try {
       await _controller.toggleTorch();
       if (!mounted) return;
@@ -209,10 +417,6 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
         MobileScanner(
           controller: _controller,
           onDetect: _onDetect,
-          errorBuilder: (context, error, child) => _CameraError(
-            message: error.toString(),
-            onManual: _enterManually,
-          ),
         ),
         // Viseur carré centré
         _ScannerOverlay(colorScheme: theme.colorScheme),

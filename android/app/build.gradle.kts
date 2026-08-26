@@ -7,8 +7,8 @@ plugins {
 
 android {
     namespace = "com.getech.getech_sms_mobile"
-    compileSdk = 35
-    ndkVersion = "26.3.11579264"
+    compileSdk = 36
+    ndkVersion = "27.0.12077973"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11

@@ -114,38 +114,62 @@ class StudentController extends StateNotifier<AsyncValue<List<StudentDto>>> {
   }
 
   Future<void> refresh() async {
-    state = const AsyncValue.loading();
+    // 1. Charger immédiatement les données locales
+    final localStudents = await _fetchFromLocal();
+    if (localStudents.isNotEmpty) {
+      state = AsyncValue.data(localStudents);
+    }
+
     try {
       final canReach = _ref.read(connectionProvider).canReachServer;
-
-      List<StudentDto> students;
-      if (canReach) {
-        students = await _fetchFromApi();
-        await _saveToLocal(students);
-      } else {
-        students = await _fetchFromLocal();
+      if (!canReach) {
+        if (localStudents.isEmpty) {
+          state = AsyncValue.data(const []);
+        }
+        return;
       }
 
-      state = AsyncValue.data(students);
+      // 2. Tenter de rafraîchir depuis l'API
+      final apiStudents = await _fetchFromApi();
+      await _saveToLocal(apiStudents);
+      
+      // 3. Re-charger depuis le local (pour inclure les relations décodées proprement)
+      final updatedLocal = await _fetchFromLocal();
+      state = AsyncValue.data(updatedLocal);
     } catch (e, st) {
-      state = AsyncValue.error(e, st);
+      // En cas d'erreur API, si on a déjà des données locales, on reste dessus.
+      // Sinon on affiche l'erreur.
+      if (state.hasValue && state.value!.isNotEmpty) {
+        _log.w('Erreur rafraîchissement API (utilisation cache) : $e');
+      } else {
+        state = AsyncValue.error(e, st);
+      }
     }
   }
 
   Future<List<StudentDto>> _fetchFromApi() async {
     final dio = _ref.read(dioProvider);
     final response = await dio.get(ApiEndpoints.students);
-    final list = response.data as List;
-    return list.map((j) => StudentDto.fromJson(j)).toList();
+    final data = response.data;
+    if (data is List) {
+      return data.map((j) => StudentDto.fromJson(j)).toList();
+    } else if (data is Map && data['items'] is List) {
+      return (data['items'] as List).map((j) => StudentDto.fromJson(j)).toList();
+    }
+    return const [];
   }
 
   Future<List<StudentDto>> _fetchFromLocal() async {
     final db = _ref.read(databaseProvider);
     final query = db.select(db.students).join([
-      d.leftOuterJoin(db.studentClassAssignments,
-          db.studentClassAssignments.studentId.equalsExp(db.students.id)),
-      d.leftOuterJoin(db.classrooms,
-          db.classrooms.id.equalsExp(db.studentClassAssignments.classroomId)),
+      d.leftOuterJoin(
+        db.studentClassAssignments,
+        db.studentClassAssignments.studentId.equalsExp(db.students.id),
+      ),
+      d.leftOuterJoin(
+        db.classrooms,
+        db.classrooms.id.equalsExp(db.studentClassAssignments.classroomId),
+      ),
     ]);
 
     final rows = await query.get();
@@ -190,6 +214,20 @@ class StudentController extends StateNotifier<AsyncValue<List<StudentDto>>> {
           ),
           mode: d.InsertMode.insertOrReplace,
         );
+
+        // SAUVEGARDER L'ASSIGNATION À LA CLASSE
+        if (s.classroomId != null) {
+          batch.insert(
+            db.studentClassAssignments,
+            StudentClassAssignmentsCompanion.insert(
+              studentId: s.id,
+              classroomId: s.classroomId!,
+              status: d.Value(s.studentStatusLabel),
+              inscriptionType: d.Value(s.inscriptionTypeLabel),
+            ),
+            mode: d.InsertMode.insertOrReplace,
+          );
+        }
       }
     });
   }

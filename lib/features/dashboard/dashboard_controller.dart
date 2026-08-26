@@ -15,13 +15,17 @@
 /// sont plus exposés par [DashboardStatsDto].
 library;
 
+import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
 import '../connections/connection_state.dart';
 import '../../shared/models/sync_dto.dart';
+
+const String _keyDashboardCache = 'getech.cache.dashboard';
 
 /// Exception levée quand le serveur n'est pas joignable (hors-ligne forcé,
 /// serveur down, ou appareil non appairé). L'UI l'interprète comme un mode
@@ -35,18 +39,26 @@ class OfflineDashboardException implements Exception {
 }
 
 /// Statistiques du tableau de bord : `GET /dashboard/stats`.
-///
-/// Auto-dispose : se recalcule à chaque fois que le widget est monté, ce qui
-/// permet de rafraîchir les données après une synchro manuelle ou un
-/// changement d'établissement. Dépend de [connectionProvider] : si le serveur
-/// devient injoignable, le provider lève [OfflineDashboardException].
 final dashboardStatsProvider =
     FutureProvider.autoDispose<DashboardStatsDto>((ref) async {
   final conn = ref.watch(connectionProvider);
+  final prefs = await SharedPreferences.getInstance();
+
+  // Tenter de récupérer le cache
+  DashboardStatsDto? cachedStats;
+  final cachedStr = prefs.getString(_keyDashboardCache);
+  if (cachedStr != null) {
+    try {
+      cachedStats = DashboardStatsDto.fromJson(jsonDecode(cachedStr));
+    } catch (_) {}
+  }
+
   if (!conn.canReachServer || conn.serverUrl == null) {
+    if (cachedStats != null) return cachedStats;
     throw const OfflineDashboardException(
         'Mode hors-ligne — données non disponibles.');
   }
+
   final dio = ref.watch(dioProvider);
   try {
     final resp = await dio.getJson(
@@ -56,11 +68,17 @@ final dashboardStatsProvider =
     if (data is! Map) {
       throw const ApiException('Réponse inattendue du serveur (dashboard).');
     }
-    return DashboardStatsDto.fromJson(Map<String, dynamic>.from(data));
+    
+    final stats = DashboardStatsDto.fromJson(Map<String, dynamic>.from(data));
+    // Mettre à jour le cache
+    await prefs.setString(_keyDashboardCache, jsonEncode(data));
+    
+    return stats;
   } catch (e) {
+    if (cachedStats != null) return cachedStats;
+    
     if (e is OfflineDashboardException) rethrow;
     if (e is ApiException) rethrow;
-    // Erreur réseau (timeout, DNS, etc.) → on l'enveloppe.
     throw ApiException(
       'Impossible de charger le tableau de bord.',
       details: e.toString(),

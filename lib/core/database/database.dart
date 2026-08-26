@@ -86,12 +86,12 @@ const List<String> replicatedTables = [
   SyncMetadata,
   OutboxEntries,
   PairedDevices,
-])
+],)
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
   /// Pour tests : permettre d'injecter une connexion in-memory.
-  AppDatabase.forTesting(QueryExecutor e) : super(e);
+  AppDatabase.forTesting(super.e);
 
   @override
   int get schemaVersion => 1;
@@ -116,6 +116,20 @@ class AppDatabase extends _$AppDatabase {
           await customStatement('PRAGMA journal_mode = WAL;');
         },
       );
+
+  /// Efface TOUTES les données des tables répliquées (Reset).
+  Future<void> clearAllData() async {
+    await transaction(() async {
+      for (final table in allTables) {
+        // On ne vide pas les tables système comme paired_devices ou outbox_entries
+        // sauf si explicitement demandé. Ici on se concentre sur les données métier.
+        if (table.actualTableName != 'sync_metadata' && 
+            table.actualTableName != 'paired_devices') {
+          await delete(table).go();
+        }
+      }
+    });
+  }
 }
 
 LazyDatabase _openConnection() {

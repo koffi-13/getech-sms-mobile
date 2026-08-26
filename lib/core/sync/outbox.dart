@@ -78,16 +78,23 @@ class Outbox {
   /// traitée pour éviter les re-tentatives infinies.
   Future<void> markProcessed(int id, {String? error}) async {
     await (_db.update(_db.outboxEntries)..where((t) => t.id.equals(id)))
-        .write(OutboxEntriesCompanion(
-      processed: const Value(true),
-      lastError: Value(error),
-    ));
+        .write(
+      OutboxEntriesCompanion(
+        processed: const Value(true),
+        lastError: Value(error),
+      ),
+    );
   }
 
   /// Supprime toutes les entrées marquées comme traitées (nettoyage).
   Future<void> clearProcessed() async {
     await (_db.delete(_db.outboxEntries)..where((t) => t.processed.equals(true)))
         .go();
+  }
+
+  /// Supprime TOUTES les entrées (pending et processed).
+  Future<void> clearAll() async {
+    await _db.delete(_db.outboxEntries).go();
   }
 
   /// Retourne le nombre d'entrées en attente de push.
@@ -103,4 +110,9 @@ class Outbox {
 /// Provider Riverpod de l'outbox (singleton lié à la base de données).
 final outboxProvider = Provider<Outbox>((ref) {
   return Outbox(ref.read(databaseProvider));
+});
+
+/// Provider exposant les entrées en attente de l'outbox.
+final pendingOutboxProvider = FutureProvider.autoDispose<List<OutboxEntry>>((ref) {
+  return ref.watch(outboxProvider).pending();
 });

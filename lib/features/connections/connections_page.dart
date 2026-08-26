@@ -15,6 +15,9 @@ import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/database/backup_service.dart';
+import '../../core/database/database.dart';
+import '../../core/sync/outbox.dart';
 import '../../core/sync/sync_engine.dart';
 import '../../core/sync/sync_scheduler.dart';
 import '../../core/utils/formatters.dart';
@@ -51,7 +54,13 @@ class ConnectionsPage extends ConsumerWidget {
             const SizedBox(height: 12),
             _OfflineModeCard(conn: conn),
             const SizedBox(height: 12),
+            const _OutboxCard(),
+            const SizedBox(height: 12),
             const _PairedDevicesCard(),
+            const SizedBox(height: 12),
+            const _BackupRestoreCard(),
+            const SizedBox(height: 12),
+            const _ResetDataCard(),
             const SizedBox(height: 16),
             const _DangerZoneCard(),
           ],
@@ -231,13 +240,11 @@ class _SyncCard extends ConsumerStatefulWidget {
 }
 
 class _SyncCardState extends ConsumerState<_SyncCard> {
-  bool _isSyncing = false;
   String? _error;
   String? _lastResultLabel;
 
   Future<void> _syncNow() async {
     setState(() {
-      _isSyncing = true;
       _error = null;
       _lastResultLabel = null;
     });
@@ -261,11 +268,6 @@ class _SyncCardState extends ConsumerState<_SyncCard> {
         return;
       }
 
-      // Enregistre la dernière synchro côté état de connexion.
-      await ref
-          .read(connectionProvider.notifier)
-          .recordSync(count: pulled + pushed);
-
       // Reprogramme le scheduler (rafraîchit l'intervalle de fond).
       try {
         await ref.read(syncSchedulerProvider).scheduleNow();
@@ -280,14 +282,17 @@ class _SyncCardState extends ConsumerState<_SyncCard> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = 'Erreur de synchro : $e');
-    } finally {
-      if (mounted) setState(() => _isSyncing = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final conn = ref.watch(connectionProvider);
+    final sync = ref.watch(syncProgressProvider);
+    final isSyncing = sync.status != SyncStatus.idle &&
+        sync.status != SyncStatus.success &&
+        sync.status != SyncStatus.error;
+
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
     final canSync = conn.isPaired && !conn.forceOffline;
@@ -303,8 +308,8 @@ class _SyncCardState extends ConsumerState<_SyncCard> {
             SectionHeader(
               title: 'Synchronisation',
               icon: Icons.sync,
-              actionLabel: _isSyncing ? null : 'Sync maintenant',
-              onAction: _isSyncing ? null : _syncNow,
+              actionLabel: isSyncing ? null : 'Sync maintenant',
+              onAction: isSyncing ? null : _syncNow,
             ),
             const Divider(height: 16),
             _InfoRow(
@@ -328,30 +333,48 @@ class _SyncCardState extends ConsumerState<_SyncCard> {
                 value: _lastResultLabel!,
               ),
             ],
-            if (_error != null) ...[
+            if (_error != null || sync.status == SyncStatus.error) ...[
               const SizedBox(height: 12),
-              AppErrorWidget(message: _error!, compact: true),
+              AppErrorWidget(
+                message: _error ?? sync.message,
+                compact: true,
+              ),
             ],
-            if (_isSyncing) ...[
-              const SizedBox(height: 12),
+            if (isSyncing) ...[
+              const SizedBox(height: 16),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: LinearProgressIndicator(
+                  value: sync.progress,
+                  minHeight: 8,
+                  backgroundColor: cs.primaryContainer.withValues(alpha: 0.3),
+                ),
+              ),
+              const SizedBox(height: 8),
               Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                  Expanded(
+                    child: Text(
+                      sync.message,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
-                  const SizedBox(width: 12),
                   Text(
-                    'Synchronisation en cours…',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: cs.onSurfaceVariant,
+                    '${(sync.progress * 100).toInt()}%',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: cs.primary,
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
                 ],
               ),
             ],
-            if (!canSync && !_isSyncing) ...[
+            if (!canSync && !isSyncing) ...[
               const SizedBox(height: 8),
               Text(
                 conn.forceOffline
@@ -389,7 +412,7 @@ class _OfflineModeCard extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            SectionHeader(
+            const SectionHeader(
               title: 'Mode hors-ligne',
               icon: Icons.cloud_off,
             ),
@@ -408,9 +431,11 @@ class _OfflineModeCard extends ConsumerWidget {
               value: conn.forceOffline,
               onChanged: (_) =>
                   ref.read(connectionProvider.notifier).toggleForceOffline(),
-              title: Text(conn.forceOffline
-                  ? 'Mode hors-ligne activé'
-                  : 'Mode hors-ligne désactivé'),
+              title: Text(
+                conn.forceOffline
+                    ? 'Mode hors-ligne activé'
+                    : 'Mode hors-ligne désactivé',
+              ),
               secondary: Icon(
                 conn.forceOffline ? Icons.cloud_off : Icons.cloud_done,
                 color: conn.forceOffline ? Colors.orange : Colors.green,
@@ -421,6 +446,132 @@ class _OfflineModeCard extends ConsumerWidget {
         ),
       ),
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Carte : Outbox (file d'attente)
+// ---------------------------------------------------------------------------
+
+class _OutboxCard extends ConsumerWidget {
+  const _OutboxCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final outboxAsync = ref.watch(pendingOutboxProvider);
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SectionHeader(
+              title: 'File d\'attente Outbox',
+              icon: Icons.send_rounded,
+              subtitle: 'Modifications locales en attente d\'envoi.',
+              actionLabel: 'Vider',
+              onAction: () => _confirmClearOutbox(context, ref),
+            ),
+            const Divider(height: 16),
+            outboxAsync.when(
+              data: (entries) {
+                if (entries.isEmpty) {
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    child: Text(
+                      'Toutes les données locales sont synchronisées.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                      ),
+                    ),
+                  );
+                }
+                return Column(
+                  children: [
+                    for (final e in entries.take(5))
+                      ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: _operationIcon(e.operation, cs),
+                        title: Text('${e.tableNameColumn} (${e.operation})'),
+                        subtitle: Text(
+                          'ID: ${e.recordId ?? "nouveau"} • '
+                          '${DateFormatter.relative(e.createdAt)}',
+                        ),
+                        trailing: e.lastError != null
+                            ? const Icon(
+                                Icons.error_outline,
+                                color: Colors.red,
+                                size: 18,
+                              )
+                            : null,
+                      ),
+                    if (entries.length > 5)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          '+ ${entries.length - 5} autres modifications...',
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: cs.primary,
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+              },
+              loading: () => const Center(
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              error: (e, _) => Text('Erreur: $e'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _operationIcon(String op, ColorScheme cs) {
+    switch (op.toUpperCase()) {
+      case 'INSERT':
+        return Icon(Icons.add_circle_outline, color: cs.primary, size: 20);
+      case 'UPDATE':
+        return Icon(Icons.edit_outlined, color: Colors.blue, size: 20);
+      case 'DELETE':
+        return Icon(Icons.delete_outline, color: Colors.red, size: 20);
+      default:
+        return const Icon(Icons.help_outline, size: 20);
+    }
+  }
+
+  Future<void> _confirmClearOutbox(BuildContext context, WidgetRef ref) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Vider l\'outbox ?'),
+        content: const Text(
+          'Cela supprimera toutes les modifications locales non encore envoyées au serveur. Cette action est irréversible.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annuler')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Vider', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      await ref.read(outboxProvider).clearAll();
+      ref.invalidate(pendingOutboxProvider);
+    }
   }
 }
 
@@ -508,6 +659,199 @@ class _PairedDevicesCard extends ConsumerWidget {
         ),
       ),
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Carte : Sauvegarde & Restauration
+// ---------------------------------------------------------------------------
+
+class _BackupRestoreCard extends ConsumerWidget {
+  const _BackupRestoreCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SectionHeader(
+              title: 'Sauvegarde & Restauration',
+              icon: Icons.storage_rounded,
+              subtitle: 'Gestion de la base de données locale (JSON).',
+            ),
+            const Divider(height: 16),
+            Text(
+              'Exportez vos données scolaires (élèves, notes, appels) pour les sauvegarder ou les transférer.',
+              style: theme.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: () => _handleExport(context, ref),
+                    icon: const Icon(Icons.download, size: 18),
+                    label: const Text('Exporter'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: cs.secondary,
+                      foregroundColor: cs.onSecondary,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _handleImport(context, ref),
+                    icon: const Icon(Icons.upload, size: 18),
+                    label: const Text('Importer'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _handleExport(BuildContext context, WidgetRef ref) async {
+    try {
+      await ref.read(backupServiceProvider).exportBackup();
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Sauvegarde exportée avec succès.')),
+      );
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Échec de l\'export : $e')),
+      );
+    }
+  }
+
+  Future<void> _handleImport(BuildContext context, WidgetRef ref) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Importer une sauvegarde ?'),
+        content: const Text(
+          'Attention : les données existantes seront écrasées ou fusionnées avec celles du fichier JSON.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Importer'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    try {
+      final success = await ref.read(backupServiceProvider).importBackup();
+      if (!context.mounted) return;
+      if (success) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Données restaurées avec succès.')),
+        );
+        // On pourrait vouloir invalider certains providers ici
+      }
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Échec de l\'import : $e')),
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Carte : Réinitialisation
+// ---------------------------------------------------------------------------
+
+class _ResetDataCard extends ConsumerWidget {
+  const _ResetDataCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    return Card(
+      elevation: 0,
+      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.refresh_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Text('Données locales', style: theme.textTheme.titleMedium),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Réinitialise la base de données locale. Utile en cas de corruption ou pour repartir de zéro.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () => _confirmReset(context, ref),
+                icon: const Icon(Icons.cleaning_services_rounded),
+                label: const Text('Réinitialiser la base locale'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmReset(BuildContext context, WidgetRef ref) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Tout réinitialiser ?'),
+        content: const Text(
+          'Cette action va effacer TOUTES les données stockées localement (élèves, notes, appels, outbox). Les informations de connexion seront conservées.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annuler')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Réinitialiser', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      await ref.read(databaseProvider).clearAllData();
+      ref.invalidate(pendingOutboxProvider);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Base locale réinitialisée avec succès.')),
+      );
+    }
   }
 }
 

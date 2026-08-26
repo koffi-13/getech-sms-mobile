@@ -355,12 +355,14 @@ class PairDeviceRequest {
   final String deviceName;
   final String deviceType;
   final String deviceUuid;
+  final String? establishmentCode;
 
   const PairDeviceRequest({
     required this.pairingToken,
     required this.deviceName,
     this.deviceType = 'MOBILE',
     required this.deviceUuid,
+    this.establishmentCode,
   });
 
   Map<String, dynamic> toJson() => {
@@ -368,6 +370,7 @@ class PairDeviceRequest {
         'device_name': deviceName,
         'device_type': deviceType,
         'device_uuid': deviceUuid,
+        if (establishmentCode != null) 'establishment_code': establishmentCode,
       };
 }
 

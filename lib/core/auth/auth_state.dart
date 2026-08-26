@@ -164,6 +164,7 @@ class AuthNotifier extends Notifier<AuthState> {
       case DioExceptionType.cancel:
         return 'Requête annulée.';
       case DioExceptionType.unknown:
+      default:
         return 'Erreur réseau inconnue : ${e.message}';
     }
   }
@@ -182,9 +183,14 @@ class AuthNotifier extends Notifier<AuthState> {
         establishmentId: me.establishment?.id,
         clearError: true,
       );
+    } on DioException catch (e) {
+      // On ne déconnecte QUE si c'est une erreur 401 (token invalide/expiré).
+      // Les erreurs réseau (503, timeout, etc.) ne doivent pas forcer le logout.
+      if (e.response?.statusCode == 401) {
+        await logoutLocal();
+      }
     } catch (_) {
-      // Token peut être expiré → on déconnecte.
-      await logoutLocal();
+      // Erreur inattendue → on reste sur l'état actuel (cache).
     }
   }
 

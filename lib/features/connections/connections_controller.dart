@@ -10,13 +10,19 @@ import 'dart:math' show Random;
 
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:logger/logger.dart' as log_pkg;
 
 import '../../core/auth/secure_storage.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
+import '../../core/sync/sync_engine.dart';
 import '../../shared/models/auth_dto.dart';
 import 'connection_state.dart';
+
+final log_pkg.Logger _log = log_pkg.Logger(
+  printer: log_pkg.PrettyPrinter(noBoxingByDefault: true),
+);
 
 /// Erreur métier renvoyée par [ConnectionsController] en cas d'échec d'appairage.
 class PairingException implements Exception {
@@ -46,11 +52,12 @@ class ConnectionsController {
   /// Appairage à partir d'un payload QR code (`{ip, port, establishment_code, pairing_token}`).
   ///
   /// Construit l'URL serveur `http://<ip>:<port>/api/v1` et délègue à [_doPair].
-  Future<PairDeviceResponse> pairWithPayload(PairingPayload payload) {
+  Future<PairDeviceResponse> pairWithPayload(PairingPayload payload, {bool tolerateClockSkew = true}) {
     return _doPair(
       serverUrl: payload.serverUrl,
       establishmentCode: payload.establishmentCode,
       pairingToken: payload.pairingToken,
+      tolerateClockSkew: tolerateClockSkew,
     );
   }
 
@@ -60,11 +67,13 @@ class ConnectionsController {
     required String serverUrl,
     required String establishmentCode,
     required String pairingToken,
+    bool tolerateClockSkew = true,
   }) {
     return _doPair(
       serverUrl: serverUrl,
       establishmentCode: establishmentCode,
       pairingToken: pairingToken,
+      tolerateClockSkew: tolerateClockSkew,
     );
   }
 
@@ -73,6 +82,7 @@ class ConnectionsController {
     required String serverUrl,
     required String establishmentCode,
     required String pairingToken,
+    bool tolerateClockSkew = true,
   }) async {
     if (pairingToken.trim().isEmpty) {
       throw const PairingException('Token d\'appairage requis.');
@@ -88,32 +98,61 @@ class ConnectionsController {
           pairingToken: pairingToken.trim(),
           deviceName: deviceName,
           deviceUuid: deviceUuid,
+          establishmentCode: establishmentCode.trim(),
         ).toJson(),
       );
 
       final data = resp.data is Map ? resp.data as Map<String, dynamic> : <String, dynamic>{};
       final pairResp = PairDeviceResponse.fromJson(data);
 
-      // Persiste l'état de connexion (serverUrl, code, token, deviceId).
+      // Succès immédiat : Persiste l'état de connexion normal.
       await _ref.read(connectionProvider.notifier).configure(
             serverUrl: serverUrl,
             establishmentCode: establishmentCode,
             deviceToken: pairResp.deviceToken,
             deviceId: pairResp.deviceId.toString(),
+            tolerateClockSkew: tolerateClockSkew,
           );
 
       // Invalide les caches dépendant de l'appairage.
       _ref.invalidate(serverInfoProvider);
       _ref.invalidate(pairedDevicesProvider);
 
+      // DÉCLENCHER UNE SYNCHRO INITIALE (PULL)
+      // On ne l'attend pas pour ne pas bloquer l'UI, mais on la lance.
+      _ref.read(syncEngineProvider).pull().catchError((e) {
+        _log.w('Échec synchro initiale post-appairage : $e');
+        return SyncResult(timestamp: DateTime.now()); // Dummy result
+      });
+
       return pairResp;
     } on DioException catch (e) {
-      // Message d'erreur actionnable pour le pairing.
+      // MODE RÉSILIENT : Si le serveur est injoignable ou renvoie une erreur de token
+      // potentiellement due à un décalage d'horloge (400), on sauve quand même localement.
+      final isNetworkError = e.type != DioExceptionType.badResponse;
+      final isClockSkewSuspect = e.response?.statusCode == 400;
+
+      if (isNetworkError || isClockSkewSuspect) {
+        // On configure en mode "Force Offline" pour permettre l'accès à l'app
+        // en attendant la synchro.
+        await _ref.read(connectionProvider.notifier).configure(
+              serverUrl: serverUrl,
+              establishmentCode: establishmentCode,
+              deviceToken: pairingToken.trim(), // On utilise le pairing token comme token temporaire
+              deviceId: 'pending',
+              forceOffline: true,
+              tolerateClockSkew: tolerateClockSkew,
+            );
+
+        return PairDeviceResponse(
+          deviceToken: pairingToken.trim(),
+          deviceId: 0,
+          pairedAt: DateTime.now(),
+        );
+      }
+
       final msg = _humanizePairingError(e, serverUrl);
-      throw PairingException(
-        msg,
-        statusCode: e.response?.statusCode,
-      );
+      throw PairingException(msg, statusCode: e.response?.statusCode);
     } on PairingException {
       rethrow;
     } catch (e) {
@@ -142,12 +181,18 @@ class ConnectionsController {
             'existe sur le serveur desktop.';
       case DioExceptionType.badResponse:
         final code = e.response?.statusCode;
-        if (code == 404) return 'Endpoint /devices/pair introuvable (404). '
-            'Le serveur desktop doit implémenter cet endpoint.';
+        if (code == 404) {
+          return 'Endpoint /devices/pair introuvable (404). '
+              'Le serveur desktop doit implémenter cet endpoint.';
+        }
         if (code == 400) return 'Token d\'appairage invalide ou expiré.';
+        if (code == 422) {
+          final detail = e.response?.data?['detail'];
+          return 'Erreur de validation (422) : ${detail ?? "Format de requête incorrect"}';
+        }
         return 'Erreur serveur lors de l\'appairage ($code).';
       default:
-        return 'Erreur réseau lors de l\'appairage : ${e.message}';
+        return 'Erreur réseau lors de l\'appairage : ${e.message ?? e.type.name}';
     }
   }
 
@@ -240,9 +285,12 @@ final pairedDevicesProvider =
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
-    if (api.statusCode == 403) return const []; // Non-admin : liste masquée.
+    // En cas d'erreur serveur (500) ou autre, on renvoie une liste vide 
+    // plutôt que de bloquer l'UI de la page Connexions.
+    _log.w('Erreur récupération appareils : ${api.message}');
     return const [];
-  } catch (_) {
+  } catch (e) {
+    _log.w('Erreur inattendue récupération appareils : $e');
     return const [];
   }
 });
