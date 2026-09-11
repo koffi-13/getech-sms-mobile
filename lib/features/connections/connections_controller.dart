@@ -6,11 +6,11 @@
 library;
 
 import 'dart:io' show Platform;
-import 'dart:math' show Random;
 
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart' as log_pkg;
+import 'package:uuid/uuid.dart';
 
 import '../../core/auth/secure_storage.dart';
 import '../../core/network/api_endpoints.dart';
@@ -199,17 +199,45 @@ class ConnectionsController {
   /// Récupère ou génère un UUID d'appareil persistant (Keystore/Keychain).
   Future<String> _ensureDeviceUuid() async {
     final existing = await _storage.getDeviceId();
-    if (existing != null && existing.isNotEmpty) return existing;
+    if (existing != null && existing.isNotEmpty) {
+      // [Fix-SYNC-IDEMPOTENCE] Migration : les anciens device_uuid au format
+      // 'mobile-<ms>-<randhex>' sont remplacés par un UUID v4 standard
+      // pour assurer la compatibilité avec le serveur (qui attend un UUID
+      // canonique pour les contraintes d'unicité).
+      if (_isLegacyDeviceUuid(existing)) {
+        final newUuid = _generateDeviceUuid();
+        await _storage.saveDeviceId(newUuid);
+        _log.i('device_uuid migré : $existing → $newUuid');
+        return newUuid;
+      }
+      return existing;
+    }
     final uuid = _generateDeviceUuid();
     await _storage.saveDeviceId(uuid);
     return uuid;
   }
 
-  /// Génère un UUID pseudo-aléatoire : `mobile-<ms>-<randhex>`.
+  /// Détecte les anciens device_uuid au format pseudo-UUID.
+  /// Format legacy : 'mobile-<ms>-<randhex>' (ex: 'mobile-1725900000000-a3f2c1d0').
+  /// Format UUID v4 canonique : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.
+  static bool _isLegacyDeviceUuid(String uuid) {
+    if (uuid.startsWith('mobile-')) return true;
+    // Vérifier le format UUID v4 canonique (8-4-4-4-12 hex digits).
+    final uuidV4Regex = RegExp(
+      r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+      caseSensitive: false,
+    );
+    return !uuidV4Regex.hasMatch(uuid);
+  }
+
+  /// Génère un UUID v4 standard via le package `uuid`.
+  ///
+  /// [Fix-SYNC-IDEMPOTENCE] Avant : format pseudo-UUID 'mobile-<ms>-<randhex>'
+  /// qui n'était pas canonique et pouvait causer des problèmes de tri/unicité
+  /// côté serveur. Maintenant : UUID v4 RFC 4122 standard, universellement
+  /// reconnu par toutes les plateformes et bases de données.
   static String _generateDeviceUuid() {
-    final ms = DateTime.now().millisecondsSinceEpoch;
-    final rand = Random.secure().nextInt(1 << 32).toRadixString(16).padLeft(8, '0');
-    return 'mobile-$ms-$rand';
+    return const Uuid().v4();
   }
 
   /// Nom d'appareil affiché côté serveur.

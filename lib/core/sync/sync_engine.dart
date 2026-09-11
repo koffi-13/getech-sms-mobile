@@ -4,6 +4,7 @@ library;
 import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart' as log_pkg;
+import 'package:uuid/uuid.dart';
 
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/sync_dto.dart';
@@ -291,9 +292,34 @@ class SyncEngine {
     try {
       _log.i('Push vers $url : ${pending.length} entrées '
           '(${changes.keys.length} tables)');
+
+      // [Fix-SYNC-IDEMPOTENCE] Enrichir le payload avec idempotency_key
+      // et device_uuid pour permettre au serveur de détecter les doublons
+      // en cas de retry réseau. Le device_uuid est récupéré depuis le
+      // secure storage (généré au pairing).
+      String? deviceUuid;
+      try {
+        deviceUuid = await _ref.read(secureStorageProvider).getDeviceId();
+      } catch (e) {
+        _log.w('device_uuid indisponible — push sans idempotence : $e');
+      }
+
+      final SyncPushRequest pushRequest;
+      if (deviceUuid != null && deviceUuid.isNotEmpty) {
+        pushRequest = SyncPushRequest.withIdempotency(
+          changes: changes,
+          deviceUuid: deviceUuid,
+          generateIdempotencyKey: _generateIdempotencyKey,
+        );
+      } else {
+        // Fallback : push sans idempotence (rétrocompatible avec l'ancien
+        // comportement — le serveur applique LWW classique).
+        pushRequest = SyncPushRequest(changes: changes);
+      }
+
       final resp = await dio.postJson<Map<String, dynamic>>(
         url,
-        data: SyncPushRequest(changes: changes).toJson(),
+        data: pushRequest.toJson(),
       );
       final data = resp.data;
       if (data == null) {
@@ -563,6 +589,11 @@ class SyncEngine {
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
                   isDeleted: const Value(false),
+                  // [Fix-SYNC-IDEMPOTENCE] Lecture des champs de sync
+                  // depuis le serveur ( nullable pour rétrocompatibilité).
+                  idempotencyKey: Value(_rStrN(row, 'idempotency_key')),
+                  deviceUuid: Value(_rStrN(row, 'device_uuid')),
+                  syncVersion: Value(_rInt(row, 'sync_version')),
                 ),
                 mode: InsertMode.insertOrReplace,
               );
@@ -817,6 +848,10 @@ class SyncEngine {
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
                   isDeleted: const Value(false),
+                  // [Fix-SYNC-IDEMPOTENCE] Lecture des champs de sync.
+                  idempotencyKey: Value(_rStrN(row, 'idempotency_key')),
+                  deviceUuid: Value(_rStrN(row, 'device_uuid')),
+                  syncVersion: Value(_rInt(row, 'sync_version')),
                 ),
                 mode: InsertMode.insertOrReplace,
               );
@@ -1153,6 +1188,17 @@ class SyncEngine {
       _log.w('Échec mise à jour sync_metadata : $e');
     }
   }
+}
+
+/// [Fix-SYNC-IDEMPOTENCE] Génère une clé d'idempotence UUID v4 standard.
+///
+/// Utilisée par [SyncEngine.push] pour enrichir chaque ligne du payload
+/// avec une `idempotency_key` unique, permettant au serveur de détecter
+/// les doublons en cas de retry réseau (coupure, timeout).
+///
+/// Probabilité de collision : 1 sur 5,3 × 10^36 — négligeable.
+String _generateIdempotencyKey() {
+  return const Uuid().v4();
 }
 
 final syncEngineProvider = Provider<SyncEngine>((ref) => SyncEngine(ref));

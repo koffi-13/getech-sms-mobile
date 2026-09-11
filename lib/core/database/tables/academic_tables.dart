@@ -67,4 +67,13 @@ class Grades extends Table {
   DateTimeColumn get syncedAt => dateTime().nullable()();
   BoolColumn get isDirty => boolean().withDefault(const Constant(false))();
   BoolColumn get isDeleted => boolean().withDefault(const Constant(false))();
+
+  // [Fix-SYNC-IDEMPOTENCE] Champs pour la synchronisation offline-first.
+  // idempotency_key : UUID v4 unique par écriture — permet au serveur de
+  //   détecter les doublons en cas de retry réseau (coupure, timeout).
+  // device_uuid : identifie l'appareil ayant créé/modifié l'enregistrement.
+  // sync_version : horloge logique incrémentée à chaque modification locale.
+  TextColumn get idempotencyKey => text().nullable()();
+  TextColumn get deviceUuid => text().nullable()();
+  IntColumn get syncVersion => integer().withDefault(const Constant(0))();
 }

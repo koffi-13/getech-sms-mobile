@@ -228,12 +228,43 @@ class SyncPullResponse {
 }
 
 /// Requête de push : `POST /sync/push`.
+///
+/// [Fix-SYNC-IDEMPOTENCE] Chaque ligne du payload `changes` peut inclure
+/// `idempotency_key` et `device_uuid` pour permettre au serveur de
+/// détecter les doublons en cas de retry réseau (coupure, timeout).
+/// Le serveur reste rétrocompatible : si ces champs sont absents, il
+/// applique le LWW classique (server-wins).
 class SyncPushRequest {
   final Map<String, List<Map<String, dynamic>>> changes;
 
   const SyncPushRequest({required this.changes});
 
   Map<String, dynamic> toJson() => {'changes': changes};
+
+  /// [Fix-SYNC-IDEMPOTENCE] Construit une requête de push avec les clés
+  /// d'idempotence injectées dans chaque ligne.
+  ///
+  /// [deviceUuid] : UUID v4 de l'appareil courant (généré au pairing).
+  /// Pour chaque ligne qui n'a pas déjà une `idempotency_key`, on en génère
+  /// une nouvelle (UUID v4) et on l'associe au device_uuid.
+  factory SyncPushRequest.withIdempotency({
+    required Map<String, List<Map<String, dynamic>>> changes,
+    required String deviceUuid,
+    String Function() generateIdempotencyKey,
+  }) {
+    final enriched = <String, List<Map<String, dynamic>>>{};
+    changes.forEach((table, rows) {
+      enriched[table] = rows.map((row) {
+        final copy = Map<String, dynamic>.from(row);
+        // Injecter device_uuid si absent
+        copy.putIfAbsent('device_uuid', () => deviceUuid);
+        // Injecter idempotency_key si absent (UUID v4 généré)
+        copy.putIfAbsent('idempotency_key', generateIdempotencyKey);
+        return copy;
+      }).toList();
+    });
+    return SyncPushRequest(changes: enriched);
+  }
 }
 
 /// Réponse du push (résultat par table + conflits éventuels).

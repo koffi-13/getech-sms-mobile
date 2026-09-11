@@ -94,7 +94,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.e);
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -110,6 +110,21 @@ class AppDatabase extends _$AppDatabase {
               mode: InsertMode.insertOrIgnore,
             );
           });
+        },
+        onUpgrade: (m, from, to) async {
+          // [Fix-SYNC-IDEMPOTENCE] Migration v1 → v2 : ajout des colonnes
+          // idempotency_key, device_uuid, sync_version sur grades et
+          // student_absences. Toutes nullable avec default, donc ajout
+          // non-destructif pour les lignes existantes.
+          if (from < 2) {
+            await m.addColumn(grades, grades.idempotencyKey);
+            await m.addColumn(grades, grades.deviceUuid);
+            await m.addColumn(grades, grades.syncVersion);
+
+            await m.addColumn(studentAbsences, studentAbsences.idempotencyKey);
+            await m.addColumn(studentAbsences, studentAbsences.deviceUuid);
+            await m.addColumn(studentAbsences, studentAbsences.syncVersion);
+          }
         },
         beforeOpen: (details) async {
           await customStatement('PRAGMA foreign_keys = ON;');
