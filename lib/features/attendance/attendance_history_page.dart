@@ -223,7 +223,7 @@ class _StatTile extends StatelessWidget {
         Container(
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
-            color: color.withValues(alpha: 0.12),
+            color: color.withOpacity(0.12),
             borderRadius: BorderRadius.circular(10),
           ),
           child: Icon(icon, size: 18, color: color),
@@ -262,7 +262,7 @@ class _AbsenceCard extends StatelessWidget {
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
                 color: (entry.isJustified ? Colors.green : Colors.red.shade400)
-                    .withValues(alpha: 0.12),
+                    .withOpacity(0.12),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Icon(

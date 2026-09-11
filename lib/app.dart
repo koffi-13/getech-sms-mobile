@@ -394,7 +394,7 @@ class _MoreGridPage extends ConsumerWidget {
                         Container(
                           padding: const EdgeInsets.all(10),
                           decoration: BoxDecoration(
-                            color: i.color.withValues(alpha: 0.12),
+                            color: i.color.withOpacity(0.12),
                             borderRadius: BorderRadius.circular(14),
                           ),
                           child: Icon(i.icon, color: i.color, size: 24),

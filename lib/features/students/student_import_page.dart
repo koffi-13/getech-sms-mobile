@@ -476,11 +476,11 @@ class _ImportSection extends StatelessWidget {
                           vertical: 20, horizontal: 16),
                       decoration: BoxDecoration(
                         border: Border.all(
-                          color: theme.colorScheme.outline.withValues(alpha: 0.5),
+                          color: theme.colorScheme.outline.withOpacity(0.5),
                         ),
                         borderRadius: BorderRadius.circular(12),
                         color: theme.colorScheme.surfaceContainerHighest
-                            .withValues(alpha: 0.4),
+                            .withOpacity(0.4),
                       ),
                       child: Column(
                         children: [
@@ -591,9 +591,9 @@ class _ImportResultCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.08),
+        color: color.withOpacity(0.08),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withValues(alpha: 0.3)),
+        border: Border.all(color: color.withOpacity(0.3)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -634,7 +634,7 @@ class _ImportResultCard extends StatelessWidget {
               constraints: const BoxConstraints(maxHeight: 220),
               decoration: BoxDecoration(
                 color: theme.colorScheme.surfaceContainerHighest
-                    .withValues(alpha: 0.5),
+                    .withOpacity(0.5),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: ListView.separated(
@@ -643,7 +643,7 @@ class _ImportResultCard extends StatelessWidget {
                 itemCount: result.errors.length,
                 separatorBuilder: (_, __) => Divider(
                   height: 1,
-                  color: theme.dividerColor.withValues(alpha: 0.4),
+                  color: theme.dividerColor.withOpacity(0.4),
                 ),
                 itemBuilder: (context, i) {
                   final e = result.errors[i];
@@ -651,7 +651,7 @@ class _ImportResultCard extends StatelessWidget {
                     dense: true,
                     leading: CircleAvatar(
                       radius: 12,
-                      backgroundColor: color.withValues(alpha: 0.15),
+                      backgroundColor: color.withOpacity(0.15),
                       child: Text(
                         '${i + 1}',
                         style: TextStyle(
@@ -735,10 +735,10 @@ class _FileSavedCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: theme.colorScheme.primaryContainer.withValues(alpha: 0.3),
+        color: theme.colorScheme.primaryContainer.withOpacity(0.3),
         borderRadius: BorderRadius.circular(10),
         border: Border.all(
-          color: theme.colorScheme.primary.withValues(alpha: 0.3),
+          color: theme.colorScheme.primary.withOpacity(0.3),
         ),
       ),
       child: Row(

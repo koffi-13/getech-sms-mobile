@@ -220,7 +220,7 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
           ),
           if (_submitting)
             Container(
-              color: Colors.black.withValues(alpha: 0.35),
+              color: Colors.black.withOpacity(0.35),
               alignment: Alignment.center,
               child: const Card(
                 child: Padding(
@@ -285,7 +285,7 @@ class _DiscoveryTab extends ConsumerWidget {
                       child: ListTile(
                         leading: CircleAvatar(
                           backgroundColor:
-                              theme.colorScheme.primaryContainer.withValues(alpha: 0.6),
+                              theme.colorScheme.primaryContainer.withOpacity(0.6),
                           child: Icon(Icons.dns,
                               color: theme.colorScheme.onPrimaryContainer),
                         ),
@@ -484,7 +484,7 @@ class _QrTab extends StatelessWidget {
               width: 96,
               height: 96,
               decoration: BoxDecoration(
-                color: theme.colorScheme.primaryContainer.withValues(alpha: 0.4),
+                color: theme.colorScheme.primaryContainer.withOpacity(0.4),
                 shape: BoxShape.circle,
               ),
               child: Icon(Icons.qr_code_scanner,

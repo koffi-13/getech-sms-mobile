@@ -457,8 +457,8 @@ class _BulletinHeader extends StatelessWidget {
     final avatarColor = bulletin.sexe == null
         ? theme.colorScheme.primaryContainer
         : (isMale
-            ? const Color(0xFF3B82F6).withValues(alpha: 0.18)
-            : const Color(0xFFEC4899).withValues(alpha: 0.18));
+            ? const Color(0xFF3B82F6).withOpacity(0.18)
+            : const Color(0xFFEC4899).withOpacity(0.18));
     final avatarFg = bulletin.sexe == null
         ? theme.colorScheme.onPrimaryContainer
         : (isMale ? const Color(0xFF3B82F6) : const Color(0xFFEC4899));
@@ -560,7 +560,7 @@ class _HeaderChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: fg.withValues(alpha: 0.12),
+        color: fg.withOpacity(0.12),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Row(
@@ -593,7 +593,7 @@ class _SexeChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.14),
+        color: color.withOpacity(0.14),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Text(
@@ -661,7 +661,7 @@ class _KpiTile extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: color.withValues(alpha: 0.12),
+                color: color.withOpacity(0.12),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Icon(icon, size: 18, color: color),
@@ -720,7 +720,7 @@ class _HonorsCard extends StatelessWidget {
     final label = honors.primaryLabel ?? 'Distinction';
     final color = _color;
     return Card(
-      color: color.withValues(alpha: 0.08),
+      color: color.withOpacity(0.08),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Row(
@@ -728,7 +728,7 @@ class _HonorsCard extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: color.withValues(alpha: 0.18),
+                color: color.withOpacity(0.18),
                 shape: BoxShape.circle,
               ),
               child: Icon(_icon, size: 22, color: color),
@@ -838,7 +838,7 @@ class _ConductCard extends StatelessWidget {
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: theme.colorScheme.surfaceContainerHighest
-                      .withValues(alpha: 0.5),
+                      .withOpacity(0.5),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
@@ -875,7 +875,7 @@ class _AttendanceStat extends StatelessWidget {
         Container(
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
-            color: color.withValues(alpha: 0.14),
+            color: color.withOpacity(0.14),
             borderRadius: BorderRadius.circular(8),
           ),
           child: Icon(icon, size: 16, color: color),
@@ -1014,7 +1014,7 @@ class _SubjectRowState extends State<_SubjectRow> {
                           horizontal: 8, vertical: 2),
                       decoration: BoxDecoration(
                         color:
-                            theme.colorScheme.primary.withValues(alpha: 0.12),
+                            theme.colorScheme.primary.withOpacity(0.12),
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Text(
@@ -1085,7 +1085,7 @@ class _SubjectRowState extends State<_SubjectRow> {
             child: Container(
               decoration: BoxDecoration(
                 color: theme.colorScheme.surfaceContainerHighest
-                    .withValues(alpha: 0.4),
+                    .withOpacity(0.4),
                 borderRadius: BorderRadius.circular(8),
               ),
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -1116,9 +1116,9 @@ class _MiniBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.16),
+        color: color.withOpacity(0.16),
         borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: color.withValues(alpha: 0.4), width: 1),
+        border: Border.all(color: color.withOpacity(0.4), width: 1),
       ),
       child: Text(
         label,

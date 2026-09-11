@@ -347,7 +347,7 @@ class _SyncCardState extends ConsumerState<_SyncCard> {
                 child: LinearProgressIndicator(
                   value: sync.progress,
                   minHeight: 8,
-                  backgroundColor: cs.primaryContainer.withValues(alpha: 0.3),
+                  backgroundColor: cs.primaryContainer.withOpacity(0.3),
                 ),
               ),
               const SizedBox(height: 8),
@@ -790,7 +790,7 @@ class _ResetDataCard extends ConsumerWidget {
     final theme = Theme.of(context);
     return Card(
       elevation: 0,
-      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+      color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.3),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -866,7 +866,7 @@ class _DangerZoneCard extends ConsumerWidget {
     final theme = Theme.of(context);
     return Card(
       elevation: 0,
-      color: theme.colorScheme.errorContainer.withValues(alpha: 0.3),
+      color: theme.colorScheme.errorContainer.withOpacity(0.3),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: Padding(
         padding: const EdgeInsets.all(16),

@@ -263,9 +263,9 @@ class _UnreachableBanner extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: Colors.orange.withValues(alpha: 0.14),
+        color: Colors.orange.withOpacity(0.14),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.orange.withValues(alpha: 0.4)),
+        border: Border.all(color: Colors.orange.withOpacity(0.4)),
       ),
       child: Row(
         children: [
@@ -298,7 +298,7 @@ class _ErrorBanner extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: theme.colorScheme.errorContainer.withValues(alpha: 0.5),
+        color: theme.colorScheme.errorContainer.withOpacity(0.5),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Row(

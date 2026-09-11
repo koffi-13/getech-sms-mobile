@@ -480,7 +480,7 @@ class _ScannerOverlay extends StatelessWidget {
               // Voile sombre autour du viseur
               ColorFiltered(
                 colorFilter: ColorFilter.mode(
-                  Colors.black.withValues(alpha: 0.45),
+                  Colors.black.withOpacity(0.45),
                   BlendMode.srcOut,
                 ),
                 child: Stack(
@@ -515,7 +515,7 @@ class _ScannerOverlay extends StatelessWidget {
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(16),
                     border: Border.all(
-                      color: colorScheme.primary.withValues(alpha: 0.9),
+                      color: colorScheme.primary.withOpacity(0.9),
                       width: 3,
                     ),
                   ),

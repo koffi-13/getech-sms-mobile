@@ -439,7 +439,7 @@ class _ColumnsSelector extends StatelessWidget {
         Container(
           decoration: BoxDecoration(
             border: Border.all(
-              color: theme.colorScheme.outline.withValues(alpha: 0.4),
+              color: theme.colorScheme.outline.withOpacity(0.4),
             ),
             borderRadius: BorderRadius.circular(8),
           ),
@@ -477,7 +477,7 @@ class _ColumnsSelector extends StatelessWidget {
                   Divider(
                     height: 1,
                     indent: 12,
-                    color: theme.dividerColor.withValues(alpha: 0.4),
+                    color: theme.dividerColor.withOpacity(0.4),
                   ),
               ],
             ],
@@ -556,10 +556,10 @@ class _ExportSuccessCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: theme.colorScheme.primaryContainer.withValues(alpha: 0.3),
+        color: theme.colorScheme.primaryContainer.withOpacity(0.3),
         borderRadius: BorderRadius.circular(10),
         border: Border.all(
-          color: theme.colorScheme.primary.withValues(alpha: 0.3),
+          color: theme.colorScheme.primary.withOpacity(0.3),
         ),
       ),
       child: Row(

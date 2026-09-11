@@ -180,9 +180,9 @@ class _OfflineBanner extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: Colors.orange.withValues(alpha: 0.14),
+        color: Colors.orange.withOpacity(0.14),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.orange.withValues(alpha: 0.4)),
+        border: Border.all(color: Colors.orange.withOpacity(0.4)),
       ),
       child: Row(
         children: [
@@ -311,7 +311,7 @@ class _PaymentTile extends StatelessWidget {
       dense: true,
       contentPadding: const EdgeInsets.symmetric(vertical: 4),
       leading: CircleAvatar(
-        backgroundColor: Colors.green.withValues(alpha: 0.14),
+        backgroundColor: Colors.green.withOpacity(0.14),
         child: const Icon(Icons.payments, color: Colors.green, size: 20),
       ),
       title: Row(

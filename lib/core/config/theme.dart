@@ -37,7 +37,7 @@ class AppTheme {
         centerTitle: false,
         systemOverlayStyle: SystemUiOverlayStyle.dark,
       ),
-      cardTheme: const CardThemeData(
+      cardTheme: const CardTheme(
         color: Colors.white,
         elevation: 0,
         margin: EdgeInsets.zero,
@@ -65,13 +65,13 @@ class AppTheme {
         centerTitle: false,
         systemOverlayStyle: SystemUiOverlayStyle.light,
       ),
-      cardTheme: CardThemeData(
+      cardTheme: CardTheme(
         color: _cardDark,
         elevation: 0,
         margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(
           borderRadius: const BorderRadius.all(Radius.circular(16)),
-          side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+          side: BorderSide(color: Colors.white.withOpacity(0.08)),
         ),
       ),
     );
@@ -130,7 +130,7 @@ class AppTheme {
       ),
       dividerTheme: DividerThemeData(
         color: isDark
-            ? Colors.white.withValues(alpha: 0.08)
+            ? Colors.white.withOpacity(0.08)
             : const Color(0xFFE2E8F0),
         space: 1,
       ),
@@ -181,7 +181,7 @@ class AppTheme {
     return InputDecorationTheme(
       filled: true,
       fillColor: isDark
-          ? Colors.white.withValues(alpha: 0.05)
+          ? Colors.white.withOpacity(0.05)
           : const Color(0xFFF1F5F9),
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       border: border,

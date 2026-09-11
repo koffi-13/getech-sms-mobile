@@ -41,7 +41,7 @@ class MentionHelper {
   }
 
   /// Retourne la couleur de fond (clair) pour un badge de mention.
-  static Color backgroundColor(double? average) => color(average).withValues(alpha: 0.12);
+  static Color backgroundColor(double? average) => color(average).withOpacity(0.12);
 
   /// Indique si la moyenne est de réussite (≥ 10).
   static bool isPassing(double? average) => average != null && average >= 10;

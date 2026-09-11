@@ -134,7 +134,7 @@ class _SubjectsListPageState extends ConsumerState<SubjectsListPage> {
                           color: Theme.of(context)
                               .colorScheme
                               .onPrimaryContainer
-                              .withValues(alpha: 0.85),
+                              .withOpacity(0.85),
                         ),
                       ),
                       trailing: Icon(Icons.chevron_right,

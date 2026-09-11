@@ -210,7 +210,7 @@ class _RankingSummary extends StatelessWidget {
             Container(
                 width: 1,
                 height: 40,
-                color: theme.dividerColor.withValues(alpha: 0.5)),
+                color: theme.dividerColor.withOpacity(0.5)),
             Expanded(
               child: _SummaryStat(
                 icon: Icons.insights,
@@ -223,7 +223,7 @@ class _RankingSummary extends StatelessWidget {
             Container(
                 width: 1,
                 height: 40,
-                color: theme.dividerColor.withValues(alpha: 0.5)),
+                color: theme.dividerColor.withOpacity(0.5)),
             Expanded(
               child: _SummaryStat(
                 icon: Icons.check_circle_outline,
@@ -540,9 +540,9 @@ class _RankingRowState extends State<_RankingRow> {
                     width: 40,
                     height: 40,
                     decoration: BoxDecoration(
-                      color: rankColor?.withValues(alpha: 0.18) ??
+                      color: rankColor?.withOpacity(0.18) ??
                           theme.colorScheme.surfaceContainerHighest
-                              .withValues(alpha: 0.4),
+                              .withOpacity(0.4),
                       shape: BoxShape.circle,
                       border: rankColor != null
                           ? Border.all(color: rankColor, width: 1.5)
@@ -724,7 +724,7 @@ class _SexeBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.14),
+        color: color.withOpacity(0.14),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Text(
@@ -778,7 +778,7 @@ class _PreviousPeriodsList extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
+        color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.4),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Column(

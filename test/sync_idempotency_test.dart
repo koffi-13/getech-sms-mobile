@@ -12,6 +12,7 @@
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:getech_sms_mobile/shared/models/sync_dto.dart';
+import 'package:uuid/uuid.dart';
 
 void main() {
   group('SyncPushRequest.withIdempotency', () {
@@ -29,7 +30,7 @@ void main() {
       final request = SyncPushRequest.withIdempotency(
         changes: changes,
         deviceUuid: 'a3f2c1d0-4e5b-4f6a-8c7d-9e0f1a2b3c4d',
-        generateIdempotencyKey: _fakeIdempotencyKey,
+        generateIdempotencyKey: _realIdempotencyKey,
       );
 
       // Vérifier que chaque ligne a reçu idempotency_key + device_uuid
@@ -82,7 +83,7 @@ void main() {
       final request = SyncPushRequest.withIdempotency(
         changes: changes,
         deviceUuid: 'a3f2c1d0-4e5b-4f6a-8c7d-9e0f1a2b3c4d',
-        generateIdempotencyKey: _fakeIdempotencyKey,
+        generateIdempotencyKey: _realIdempotencyKey,
       );
 
       final row = request.changes['grades']!.first;
@@ -100,7 +101,7 @@ void main() {
       final request = SyncPushRequest.withIdempotency(
         changes: changes,
         deviceUuid: 'test-device-uuid-v4',
-        generateIdempotencyKey: _fakeIdempotencyKey,
+        generateIdempotencyKey: _realIdempotencyKey,
       );
 
       for (final table in changes.keys) {
@@ -128,7 +129,7 @@ void main() {
       final request = SyncPushRequest.withIdempotency(
         changes: changes,
         deviceUuid: 'dev-uuid',
-        generateIdempotencyKey: _fakeIdempotencyKey,
+        generateIdempotencyKey: _realIdempotencyKey,
       );
 
       final row = request.changes['grades']!.first;
@@ -172,17 +173,7 @@ void main() {
   });
 }
 
-/// Fake idempotency key generator pour les tests (déterministe).
-String _fakeIdempotencyKey() {
-  return 'fake-key-${DateTime.now().microsecondsSinceEpoch}';
-}
-
-/// Real UUID v4 generator — utilise le même package que la production.
+/// Génère un vrai UUID v4 via le package uuid (même que la production).
 String _realIdempotencyKey() {
-  // On importe ici pour éviter les dépendances au niveau du fichier de test.
-  // En production, c'est le package `uuid` qui est utilisé.
-  // Pour ce test, on génère un UUID v4 manuellement pour valider le format.
-  final now = DateTime.now().microsecondsSinceEpoch;
-  final hex = now.toRadixString(16).padLeft(12, '0');
-  return '00000000-0000-4000-8000-$hex';
+  return const Uuid().v4();
 }

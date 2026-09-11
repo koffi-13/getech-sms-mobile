@@ -291,7 +291,7 @@ class _SessionCard extends StatelessWidget {
                         color: Theme.of(context)
                             .colorScheme
                             .secondaryContainer
-                            .withValues(alpha: 0.6),
+                            .withOpacity(0.6),
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(

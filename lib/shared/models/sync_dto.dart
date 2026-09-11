@@ -250,7 +250,7 @@ class SyncPushRequest {
   factory SyncPushRequest.withIdempotency({
     required Map<String, List<Map<String, dynamic>>> changes,
     required String deviceUuid,
-    String Function() generateIdempotencyKey,
+    required String Function() generateIdempotencyKey,
   }) {
     final enriched = <String, List<Map<String, dynamic>>>{};
     changes.forEach((table, rows) {
