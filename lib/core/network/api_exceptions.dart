@@ -88,9 +88,31 @@ ApiException dioErrorToApiException(Object error) {
     String msg = message;
     String? code;
     if (data is Map) {
-      msg = (data['detail'] as String?) ??
-          (data['message'] as String?) ??
-          message;
+      // [Fix-AUTH-2] FastAPI retourne 'detail' soit comme un String (erreur
+      // simple ex: "Invalid credentials") soit comme une List d'objets de
+      // validation (erreur 422 ex: [{type, loc, msg, input}]).
+      // Ne pas faire 'as String?' directement — sinon crash type cast.
+      final detail = data['detail'];
+      if (detail is String) {
+        msg = detail;
+      } else if (detail is List) {
+        // Erreur de validation FastAPI 422 — extraire les messages.
+        final errors = <String>[];
+        for (final e in detail) {
+          if (e is Map) {
+            final field = (e['loc'] as List?)?.last?.toString() ?? '';
+            final errMsg = e['msg'] as String? ?? '';
+            if (field.isNotEmpty && errMsg.isNotEmpty) {
+              errors.add('$field: $errMsg');
+            } else if (errMsg.isNotEmpty) {
+              errors.add(errMsg);
+            }
+          }
+        }
+        msg = errors.isNotEmpty ? errors.join('; ') : message;
+      } else if (data['message'] is String) {
+        msg = data['message'] as String;
+      }
       code = data['error_code'] as String?;
     }
     switch (status) {
