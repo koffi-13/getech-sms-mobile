@@ -164,6 +164,10 @@ class AuthNotifier extends Notifier<AuthState> {
         if (code == 403) return 'Accès refusé. Permissions insuffisantes.';
         if (code == 404) return 'Endpoint introuvable (404). L\'API du serveur '
             'desktop ne correspond peut-être pas à la version attendue.';
+        if (code == 422) {
+          final apiError = dioErrorToApiException(e);
+          return 'Requête de connexion invalide : ${apiError.message}';
+        }
         return 'Erreur serveur ($code).';
       case DioExceptionType.badCertificate:
         return 'Problème de certificat TLS.';
