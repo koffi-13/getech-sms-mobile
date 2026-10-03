@@ -70,9 +70,18 @@ ApiException dioErrorToApiException(Object error) {
   // DioException
   if (type == 'DioException' || type.contains('DioException')) {
     final response = e.response;
-    final message = e.message as String? ?? 'Erreur réseau';
+    // [Fix-AUTH] Capturer l'erreur sous-jacente (SocketException, etc.)
+    // pour donner un message utile au lieu de "Erreur réseau" générique.
+    final underlyingError = e.error?.toString() ?? '';
+    final message = e.message as String? ?? 
+        (underlyingError.isNotEmpty ? underlyingError : 'Erreur réseau');
     if (response == null) {
-      return NetworkException(message, details: e.type?.toString());
+      // Pas de réponse serveur → erreur réseau pure.
+      // Inclure le détail de l'erreur socket si disponible.
+      final detail = underlyingError.isNotEmpty 
+          ? underlyingError 
+          : e.type?.toString() ?? 'unknown';
+      return NetworkException(message, details: detail);
     }
     final status = response.statusCode as int?;
     final data = response.data;

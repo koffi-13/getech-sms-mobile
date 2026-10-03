@@ -5,6 +5,7 @@
 library;
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../shared/models/auth_dto.dart' show LoginRequest, LoginResponse, MeResponse, ChangePasswordRequest, UserDto, EstablishmentDto, RoleBrief;
@@ -119,11 +120,16 @@ class AuthNotifier extends Notifier<AuthState> {
       );
       return true;
     } on DioException catch (e) {
+      // [Fix-AUTH] Logger l'erreur complète pour diagnostic.
+      debugPrint('[AUTH] Login DioException: type=${e.type}, message=${e.message}, '
+          'error=${e.error}, statusCode=${e.response?.statusCode}, '
+          'response=${e.response?.data}');
       // Message d'erreur actionnable pour les problèmes réseau courants.
       final msg = _humanizeDioError(e, _serverUrl!);
       state = state.copyWith(isLoading: false, error: msg);
       return false;
     } catch (e) {
+      debugPrint('[AUTH] Login unexpected error: $e');
       state = state.copyWith(isLoading: false, error: e.toString());
       return false;
     }
@@ -165,7 +171,19 @@ class AuthNotifier extends Notifier<AuthState> {
         return 'Requête annulée.';
       case DioExceptionType.unknown:
       default:
-        return 'Erreur réseau inconnue : ${e.message}';
+        // [Fix-AUTH] Inclure e.error (l'exception sous-jacente) car e.message
+        // est souvent null pour les erreurs socket (connection refused, reset,
+        // server crash). Sans cela, l'utilisateur voit "null" sans info utile.
+        final underlying = e.error?.toString() ?? e.message ?? 'Aucun détail';
+        // Si l'erreur sous-jacente est une ApiException, extraire son message.
+        if (e.error is ApiException) {
+          return (e.error as ApiException).message;
+        }
+        // Tronquer les erreurs trop longues (stack traces de socket).
+        final short = underlying.length > 200
+            ? '${underlying.substring(0, 200)}...'
+            : underlying;
+        return 'Erreur réseau : $short';
     }
   }
 
