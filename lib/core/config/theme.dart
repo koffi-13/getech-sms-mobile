@@ -37,7 +37,7 @@ class AppTheme {
         centerTitle: false,
         systemOverlayStyle: SystemUiOverlayStyle.dark,
       ),
-      cardTheme: const CardTheme(
+      cardTheme: const CardThemeData(
         color: Colors.white,
         elevation: 0,
         margin: EdgeInsets.zero,
@@ -65,7 +65,7 @@ class AppTheme {
         centerTitle: false,
         systemOverlayStyle: SystemUiOverlayStyle.light,
       ),
-      cardTheme: CardTheme(
+      cardTheme: CardThemeData(
         color: _cardDark,
         elevation: 0,
         margin: EdgeInsets.zero,
