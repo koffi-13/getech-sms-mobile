@@ -97,6 +97,26 @@ final weeklyScheduleProvider = FutureProvider.autoDispose
   }
 });
 
+/// [Fix-SCHEDULE] Emploi du temps de l'enseignant courant :
+/// `GET /schedule/my` → `List<WeeklyScheduleDto>`.
+final myScheduleProvider = FutureProvider.autoDispose<List<WeeklyScheduleDto>>((ref) async {
+  final conn = ref.watch(connectionProvider);
+  if (!conn.isPaired || conn.serverUrl == null) return const [];
+  final dio = ref.watch(dioProvider);
+  try {
+    final resp = await dio.get(
+      buildUrl(conn.serverUrl!, ApiEndpoints.scheduleMy),
+    );
+    return _parseWeeklyScheduleList(resp.data);
+  } on DioException catch (e) {
+    final api = (e.error is ApiException)
+        ? e.error as ApiException
+        : dioErrorToApiException(e);
+    if (api.statusCode == 403 || api.statusCode == 404) return const [];
+    rethrow;
+  }
+});
+
 List<WeeklyScheduleDto> _parseWeeklyScheduleList(dynamic data) {
   if (data is List) {
     return data

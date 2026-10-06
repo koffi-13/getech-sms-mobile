@@ -8,7 +8,9 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/auth/auth_state.dart';
 import '../../core/config/constants.dart';
+import '../../core/utils/permissions.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/attendance_dto.dart';
 import '../../shared/widgets/widgets.dart';
@@ -24,11 +26,16 @@ class SchedulePage extends ConsumerStatefulWidget {
 class _SchedulePageState extends ConsumerState<SchedulePage> {
   int? _classroomId;
   WeekType _weekType = WeekType.a;
+  // [Fix-SCHEDULE] Mode de vue : 'class' (toutes classes) ou 'my' (mon EDT enseignant)
+  String _viewMode = 'class';
 
   @override
   Widget build(BuildContext context) {
     final conn = ref.watch(connectionProvider);
     final classrooms = ref.watch(classroomsForScheduleProvider);
+    final auth = ref.watch(authProvider);
+    // [Fix-SCHEDULE] Un enseignant (GRADE_READ) peut voir "Mon EDT"
+    final isTeacher = hasPermission(auth.permissions, RbacPermissions.gradeRead);
 
     return Scaffold(
       appBar: AppBar(
@@ -44,97 +51,133 @@ class _SchedulePageState extends ConsumerState<SchedulePage> {
       body: Column(
         children: [
           if (!conn.canReachServer) _offlineBanner(context),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-            child: Row(
-              children: [
-                Expanded(
-                  child: classrooms.when(
-                    data: (list) {
-                      if (list.isEmpty) {
-                        return const Text('Aucune classe disponible.');
-                      }
-                      // Auto-sélection de la première classe.
-                      if (_classroomId == null ||
-                          !list.any((c) => c.id == _classroomId)) {
-                        _classroomId = list.first.id;
-                      }
-                      return DropdownButtonFormField<int>(
-                        value: _classroomId,
-                        decoration: const InputDecoration(
-                          labelText: 'Classe',
-                          border: OutlineInputBorder(),
-                          isDense: true,
-                        ),
-                        items: list
-                            .map((c) => DropdownMenuItem(
-                                  value: c.id,
-                                  child: Text(c.name),
-                                ))
-                            .toList(),
-                        onChanged: (v) => setState(() => _classroomId = v),
-                      );
-                    },
-                    loading: () => const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 16),
-                      child: LinearProgressIndicator(),
+          // [Fix-SCHEDULE] Bascule "Mon EDT" / "Toutes les classes"
+          if (isTeacher)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              child: SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'my', label: Text('Mon EDT')),
+                  ButtonSegment(value: 'class', label: Text('Par classe')),
+                ],
+                selected: {_viewMode},
+                onSelectionChanged: (s) => setState(() => _viewMode = s.first),
+              ),
+            ),
+          // Mode "Mon EDT" (enseignant)
+          if (_viewMode == 'my' && isTeacher)
+            Expanded(
+              child: !conn.canReachServer
+                  ? const EmptyState(
+                      title: 'Hors-ligne',
+                      message: 'Connectez-vous au serveur pour charger l\'EDT.',
+                      icon: Icons.cloud_off,
+                    )
+                  : ref.watch(myScheduleProvider).when(
+                      data: (list) => list.isEmpty
+                          ? const EmptyState(
+                              title: 'Aucun cours',
+                              message: 'Vous n\'avez aucun cours programmé.',
+                              icon: Icons.event_busy,
+                            )
+                          : _ScheduleGrid(schedule: list),
+                      loading: () => const AppLoading(label: 'Chargement…'),
+                      error: (e, _) => AppErrorWidget(message: e.toString()),
                     ),
-                    error: (e, _) => Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      child: Text(
-                        'Erreur : $e',
-                        style: TextStyle(
-                            color: Theme.of(context).colorScheme.error),
+            )
+          // Mode "Par classe" (existant)
+          else ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: classrooms.when(
+                      data: (list) {
+                        if (list.isEmpty) {
+                          return const Text('Aucune classe disponible.');
+                        }
+                        if (_classroomId == null ||
+                            !list.any((c) => c.id == _classroomId)) {
+                          _classroomId = list.first.id;
+                        }
+                        return DropdownButtonFormField<int>(
+                          value: _classroomId,
+                          decoration: const InputDecoration(
+                            labelText: 'Classe',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          items: list
+                              .map((c) => DropdownMenuItem(
+                                    value: c.id,
+                                    child: Text(c.name),
+                                  ))
+                              .toList(),
+                          onChanged: (v) => setState(() => _classroomId = v),
+                        );
+                      },
+                      loading: () => const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 16),
+                        child: LinearProgressIndicator(),
+                      ),
+                      error: (e, _) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Text(
+                          'Erreur : $e',
+                          style: TextStyle(
+                              color: Theme.of(context).colorScheme.error),
+                        ),
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                _weekToggle(context),
-              ],
+                  const SizedBox(width: 12),
+                  _weekToggle(context),
+                ],
+              ),
             ),
-          ),
-          const SizedBox(height: 4),
-          Expanded(
-            child: _classroomId == null
-                ? const EmptyState(
-                    title: 'Sélectionnez une classe',
-                    message: 'Choisissez une classe pour afficher son emploi du temps.',
-                    icon: Icons.school_outlined,
-                  )
-                : (!conn.canReachServer
-                    ? const EmptyState(
-                        title: 'Hors-ligne',
-                        message:
-                            'Connectez-vous au serveur pour charger l\'emploi du temps.',
-                        icon: Icons.cloud_off,
-                      )
-                    : ref
-                        .watch(weeklyScheduleProvider(ScheduleQuery(
-                          classroomId: _classroomId!,
-                          weekType: _weekType,
-                        )))
-                        .when(
-                          data: (list) => list.isEmpty
-                              ? EmptyState(
-                                  title: 'Aucun cours programmé',
-                                  message:
-                                      'L\'emploi du temps de cette classe est vide pour la semaine ${_weekType == WeekType.a ? 'A' : 'B'}.',
-                                  icon: Icons.event_busy,
-                                )
-                              : _ScheduleGrid(schedule: list),
-                          loading: () => const AppLoading(
-                              label: 'Chargement de l\'emploi du temps…'),
-                          error: (e, _) => AppErrorWidget(
-                            message: e.toString(),
-                            onRetry: () => ref.invalidate(
-                                weeklyScheduleProvider(ScheduleQuery(
-                                  classroomId: _classroomId!,
-                                  weekType: _weekType,
-                                ))),
-                          ),
-                        )),
-          ),
+            const SizedBox(height: 4),
+            Expanded(
+              child: _classroomId == null
+                  ? const EmptyState(
+                      title: 'Sélectionnez une classe',
+                      message: 'Choisissez une classe pour afficher son emploi du temps.',
+                      icon: Icons.school_outlined,
+                    )
+                  : (!conn.canReachServer
+                      ? const EmptyState(
+                          title: 'Hors-ligne',
+                          message:
+                              'Connectez-vous au serveur pour charger l\'emploi du temps.',
+                          icon: Icons.cloud_off,
+                        )
+                      : ref
+                          .watch(weeklyScheduleProvider(ScheduleQuery(
+                            classroomId: _classroomId!,
+                            weekType: _weekType,
+                          )))
+                          .when(
+                            data: (list) => list.isEmpty
+                                ? EmptyState(
+                                    title: 'Aucun cours programmé',
+                                    message:
+                                        'L\'emploi du temps de cette classe est vide pour la semaine ${_weekType == WeekType.a ? 'A' : 'B'}.',
+                                    icon: Icons.event_busy,
+                                  )
+                                : _ScheduleGrid(schedule: list),
+                            loading: () => const AppLoading(
+                                label: 'Chargement de l\'emploi du temps…'),
+                            error: (e, _) => AppErrorWidget(
+                              message: e.toString(),
+                              onRetry: () => ref.invalidate(
+                                  weeklyScheduleProvider(ScheduleQuery(
+                                    classroomId: _classroomId!,
+                                    weekType: _weekType,
+                                  ))),
+                            ),
+                          )),
+            ),
+          ],
         ],
       ),
     );

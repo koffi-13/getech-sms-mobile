@@ -78,8 +78,9 @@ class ApiEndpoints {
   // --- Paramètres ---
   static const String settingsPeriods = '/settings/periods';
 
-  // --- Emploi du temps (À CRÉER côté serveur) ---
+  // --- Emploi du temps ---
   static const String schedule = '/schedule';
+  static const String scheduleMy = '/schedule/my';
 
   // --- Présence (À CRÉER côté serveur) ---
   static const String attendanceSession = '/attendance/session';
