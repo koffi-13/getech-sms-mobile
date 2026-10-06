@@ -20,6 +20,8 @@ class ClassroomDto {
   final String? headTeacherName;
   final String? levelName;
   final String? cycleName;
+  // [Fix-PERIOD-CYCLE] cycle_id pour filtrer les périodes par cycle
+  final int? cycleId;
   final int? currentStudentsCount;
   final String? seriesName;
 
@@ -33,6 +35,7 @@ class ClassroomDto {
     this.headTeacherName,
     this.levelName,
     this.cycleName,
+    this.cycleId,
     this.currentStudentsCount,
     this.seriesName,
   });
@@ -58,8 +61,9 @@ class ClassroomDto {
         isActive: (j['is_active'] as bool?) ?? true,
         headTeacherId: (j['head_teacher_id'] as num?)?.toInt(),
         headTeacherName: j['head_teacher_name'] as String?,
-        levelName: j['level_name'] as String?,
-        cycleName: j['cycle_name'] as String?,
+        levelName: _safeString(j['level_name']),
+        cycleName: _safeString(j['cycle_name']),
+        cycleId: (j['cycle_id'] as num?)?.toInt(),
         currentStudentsCount: (j['current_students_count'] as num?)?.toInt(),
         seriesName: j['series_name'] as String?,
       );
@@ -271,6 +275,9 @@ class PeriodDto {
   // Champs de compatibilité (non dans la réponse serveur de base)
   final int? schoolYearId;
   final double weight;
+  // [Fix-PERIOD-CYCLE] cycle_id + cycle_name pour filtrer par cycle
+  final int? cycleId;
+  final String? cycleName;
 
   const PeriodDto({
     required this.id,
@@ -280,16 +287,20 @@ class PeriodDto {
     this.isActive = false,
     this.schoolYearId,
     this.weight = 1.0,
+    this.cycleId,
+    this.cycleName,
   });
 
   factory PeriodDto.fromJson(Map<String, dynamic> j) => PeriodDto(
         id: (j['id'] as num).toInt(),
-        name: j['name'] as String? ?? '',
-        startDate: j['start_date'] as String?,
-        endDate: j['end_date'] as String?,
+        name: _safeString(j['name']) ?? '',
+        startDate: _safeString(j['start_date']),
+        endDate: _safeString(j['end_date']),
         isActive: (j['is_active'] as bool?) ?? false,
         schoolYearId: (j['school_year_id'] as num?)?.toInt(),
         weight: (j['weight'] as num?)?.toDouble() ?? 1.0,
+        cycleId: (j['cycle_id'] as num?)?.toInt(),
+        cycleName: _safeString(j['cycle_name']),
       );
 
   Map<String, dynamic> toJson() => {

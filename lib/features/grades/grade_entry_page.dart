@@ -145,13 +145,16 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
           _DropdownField<PeriodDto>(
             label: 'Période',
             value: periods.maybeWhen(
-              data: (list) =>
-                  list.where((p) => p.id == _periodId).firstOrNull ??
-                  (list.isEmpty ? null : list.first),
+              data: (list) {
+                // [Fix-PERIOD-CYCLE] Filtrer les périodes par cycle de la classe sélectionnée.
+                final filtered = _filterPeriodsByCycle(list, _classroomId, classroomsAsync);
+                return filtered.where((p) => p.id == _periodId).firstOrNull ??
+                    (filtered.isEmpty ? null : filtered.first);
+              },
               orElse: () => null,
             ),
             items: periods.maybeWhen(
-              data: (list) => list,
+              data: (list) => _filterPeriodsByCycle(list, _classroomId, classroomsAsync),
               orElse: () => const [],
             ),
             enabled: periods is AsyncData,
@@ -217,8 +220,46 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
     );
   }
 
+  /// [Fix-PERIOD-CYCLE] Filtre les périodes par cycle de la classe sélectionnée.
+  /// Si la classe a un cycleId, on ne garde que les périodes du même cycle.
+  /// Si pas de classe sélectionnée ou pas de cycleId, on garde tout.
+  List<PeriodDto> _filterPeriodsByCycle(
+    List<PeriodDto> allPeriods,
+    int? classroomId,
+    AsyncValue<List<ClassroomDto>> classroomsAsync,
+  ) {
+    if (classroomId == null) return allPeriods;
+    final classrooms = classroomsAsync.valueOrNull ?? [];
+    final classroom = classrooms.where((c) => c.id == classroomId).firstOrNull;
+    if (classroom == null) return allPeriods;
+
+    // Le ClassroomDto a cycleName (ex: "Collège", "Lycée").
+    // Le PeriodDto a maintenant cycleId et cycleName.
+    // Si les périodes n'ont pas de cycleId (ancien serveur), on ne filtre pas.
+    final hasCycleInfo = allPeriods.any((p) => p.cycleId != null);
+    if (!hasCycleInfo) return allPeriods;
+
+    // Filtrer par cycleId si disponible, sinon par cycleName.
+    final filtered = allPeriods.where((p) {
+      // Si la période n'a pas de cycleId, on la garde (rétrocompatible).
+      if (p.cycleId == null) return true;
+      // Si la classroom a un cycleId et la période aussi, on compare.
+      if (classroom.cycleId != null) {
+        return p.cycleId == classroom.cycleId;
+      }
+      // Sinon, comparer par nom.
+      if (p.cycleName != null && classroom.cycleName != null) {
+        return p.cycleName!.toLowerCase() == classroom.cycleName!.toLowerCase();
+      }
+      return true;
+    }).toList();
+
+    return filtered;
+  }
+
   void _showCreateAssessmentSheet() {
     if (_classSubjectId == null || _periodId == null) return;
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
