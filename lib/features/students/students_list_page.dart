@@ -181,7 +181,28 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
       return slivers;
     }
 
-    final students = studentsAsync.value ?? [];
+    final allStudents = studentsAsync.value ?? [];
+    // [Fix-FILTER] Appliquer le filtre côté client (recherche + classe + sexe + statut).
+    final students = allStudents.where((s) {
+      if (_filter.search.isNotEmpty) {
+        final q = _filter.search.toLowerCase();
+        final fullName = s.fullName.toLowerCase();
+        final matricule = (s.matricule ?? '').toLowerCase();
+        if (!fullName.contains(q) && !matricule.contains(q)) {
+          return false;
+        }
+      }
+      if (_filter.classroomId != null && s.classroomId != _filter.classroomId) {
+        return false;
+      }
+      if (_filter.sexe != null && s.sexe != _filter.sexe) {
+        return false;
+      }
+      if (_filter.status != null && s.status != _filter.status) {
+        return false;
+      }
+      return true;
+    }).toList();
     if (students.isEmpty) {
       slivers.add(const SliverFillRemaining(
         hasScrollBody: false,
