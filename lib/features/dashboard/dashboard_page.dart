@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/auth/auth_state.dart';
 import '../../core/config/constants.dart';
 import '../../core/sync/sync_engine.dart';
 import '../../core/utils/formatters.dart';
@@ -203,13 +204,80 @@ class _OfflineBanner extends StatelessWidget {
   }
 }
 
-/// Grille 2 colonnes de KPI cards (6 tuiles).
-class _KpiGrid extends StatelessWidget {
+/// Grille 2 colonnes de KPI cards (adapte aux permissions de l'utilisateur).
+class _KpiGrid extends ConsumerWidget {
   const _KpiGrid({required this.stats});
   final DashboardStatsDto stats;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final auth = ref.watch(authProvider);
+    final perms = auth.permissions;
+    final isSuperuser = perms.contains(RbacPermissions.wildcard);
+
+    // [Fix-DASHBOARD-1] Les KPIs affichés dépendent des permissions :
+    // - Élèves + Classes : visible si STUDENT_READ
+    // - Enseignants : visible si GRADE_READ (enseignants voient les collègues)
+    // - Paiements + Solde dû : visible si PAYMENT_READ
+    // - Utilisateurs : visible si USER_READ
+    final canSeeStudents = isSuperuser ||
+        perms.contains(RbacPermissions.studentRead);
+    final canSeePayments = isSuperuser ||
+        perms.contains(RbacPermissions.paymentRead);
+    final canSeeUsers = isSuperuser ||
+        perms.contains(RbacPermissions.userRead);
+
+    final kpiCards = <Widget>[];
+
+    if (canSeeStudents) {
+      kpiCards.add(KpiCard(
+        label: 'Effectif élèves',
+        value: '${stats.totalStudents}',
+        icon: Icons.people,
+        color: Theme.of(context).colorScheme.primary,
+        onTap: () => context.push('/students'),
+      ));
+      kpiCards.add(KpiCard(
+        label: 'Classes',
+        value: '${stats.totalClassrooms}',
+        icon: Icons.school,
+        color: Colors.teal,
+        onTap: () => context.push('/classrooms'),
+      ));
+    }
+
+    // Enseignants : toujours visible (pour les admins et les enseignants)
+    kpiCards.add(KpiCard(
+      label: 'Enseignants',
+      value: '${stats.totalTeachers}',
+      icon: Icons.badge,
+      color: Colors.indigo,
+    ));
+
+    if (canSeeUsers) {
+      kpiCards.add(KpiCard(
+        label: 'Utilisateurs',
+        value: '${stats.totalUsers}',
+        icon: Icons.manage_accounts,
+        color: Colors.deepPurple,
+      ));
+    }
+
+    if (canSeePayments) {
+      kpiCards.add(KpiCard(
+        label: 'Paiements',
+        value: '${stats.totalPayments}',
+        icon: Icons.payments,
+        color: Colors.green,
+      ));
+      kpiCards.add(KpiCard(
+        label: 'Solde dû',
+        value: MoneyFormatter.compact(stats.totalBalanceDue),
+        icon: Icons.account_balance_wallet,
+        color: Colors.red.shade700,
+      ));
+    }
+
     return GridView.count(
       crossAxisCount: 2,
       shrinkWrap: true,
@@ -217,49 +285,12 @@ class _KpiGrid extends StatelessWidget {
       crossAxisSpacing: 12,
       mainAxisSpacing: 12,
       childAspectRatio: 1.25,
-      children: [
-        KpiCard(
-          label: 'Effectif élèves',
-          value: '${stats.totalStudents}',
-          icon: Icons.people,
-          color: Theme.of(context).colorScheme.primary,
-          onTap: () => context.push('/students'),
-        ),
-        KpiCard(
-          label: 'Classes',
-          value: '${stats.totalClassrooms}',
-          icon: Icons.school,
-          color: Colors.teal,
-          onTap: () => context.push('/classrooms'),
-        ),
-        KpiCard(
-          label: 'Enseignants',
-          value: '${stats.totalTeachers}',
-          icon: Icons.badge,
-          color: Colors.indigo,
-        ),
-        KpiCard(
-          label: 'Utilisateurs',
-          value: '${stats.totalUsers}',
-          icon: Icons.manage_accounts,
-          color: Colors.deepPurple,
-        ),
-        KpiCard(
-          label: 'Paiements',
-          value: '${stats.totalPayments}',
-          icon: Icons.payments,
-          color: Colors.green,
-        ),
-        KpiCard(
-          label: 'Solde dû',
-          value: MoneyFormatter.compact(stats.totalBalanceDue),
-          icon: Icons.account_balance_wallet,
-          color: Colors.red.shade700,
-        ),
-      ],
+      children: kpiCards,
     );
   }
+
 }
+
 
 /// Carte "Paiements récents" : liste des derniers paiements enregistrés.
 class _RecentPaymentsCard extends StatelessWidget {

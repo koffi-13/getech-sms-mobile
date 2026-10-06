@@ -72,8 +72,9 @@ class StudentDto {
     this.guardians = const [],
   });
 
+  /// [Fix-NAME] Affiche Nom puis Prénoms (et non Prénoms puis Nom).
   String get fullName =>
-      [prenoms, nom].whereType<String>().where((s) => s.isNotEmpty).join(' ');
+      [nom, prenoms].whereType<String>().where((s) => s.isNotEmpty).join(' ');
 
   String get displayInitials {
     final p = prenoms?.isNotEmpty == true ? prenoms![0] : '';
@@ -264,8 +265,9 @@ class StudentParentDto {
     this.profession,
   });
 
+  /// [Fix-NAME] Affiche Nom puis Prénoms (et non Prénoms puis Nom).
   String get fullName =>
-      [prenoms, nom].whereType<String>().where((s) => s.isNotEmpty).join(' ');
+      [nom, prenoms].whereType<String>().where((s) => s.isNotEmpty).join(' ');
 
   factory StudentParentDto.fromJson(Map<String, dynamic> j) => StudentParentDto(
         id: (j['id'] as num?)?.toInt(),
@@ -303,8 +305,9 @@ class GuardianDto {
     this.relation,
   });
 
+  /// [Fix-NAME] Affiche Nom puis Prénoms (et non Prénoms puis Nom).
   String get fullName =>
-      [prenoms, nom].whereType<String>().where((s) => s.isNotEmpty).join(' ');
+      [nom, prenoms].whereType<String>().where((s) => s.isNotEmpty).join(' ');
 
   factory GuardianDto.fromJson(Map<String, dynamic> j) => GuardianDto(
         id: (j['id'] as num?)?.toInt(),
