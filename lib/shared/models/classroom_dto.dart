@@ -5,6 +5,16 @@ library;
 import '../../core/config/constants.dart';
 import '../../core/utils/formatters.dart';
 
+/// Utilitaire de conversion sécurisée en String.
+/// Si la valeur est null, retourne null.
+/// Si c'est déjà une String, la retourne.
+/// Sinon, retourne toString().
+String? _safeString(dynamic v) {
+  if (v == null) return null;
+  if (v is String) return v;
+  return v.toString();
+}
+
 /// Classe (ClassroomResponse côté serveur).
 ///
 /// Champs serveur : {id, name, establishment_id, max_students, is_active,

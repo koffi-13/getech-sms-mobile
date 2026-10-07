@@ -147,14 +147,14 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
             value: periods.maybeWhen(
               data: (list) {
                 // [Fix-PERIOD-CYCLE] Filtrer les périodes par cycle de la classe sélectionnée.
-                final filtered = _filterPeriodsByCycle(list, _classroomId, classroomsAsync);
+                final filtered = _filterPeriodsByCycle(list, _classroomId, classrooms);
                 return filtered.where((p) => p.id == _periodId).firstOrNull ??
                     (filtered.isEmpty ? null : filtered.first);
               },
               orElse: () => null,
             ),
             items: periods.maybeWhen(
-              data: (list) => _filterPeriodsByCycle(list, _classroomId, classroomsAsync),
+              data: (list) => _filterPeriodsByCycle(list, _classroomId, classrooms),
               orElse: () => const [],
             ),
             enabled: periods is AsyncData,
