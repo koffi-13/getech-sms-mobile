@@ -63,6 +63,7 @@ class ApiEndpoints {
   static const String gradesRanking = '/grades/ranking';
   static const String gradesClassSubjects = '/grades/class-subjects';
   static const String gradesAssessments = '/grades/assessments';
+  static const String gradesAssessmentTypes = '/grades/assessment-types';
   static String assessment(int id) => '/grades/assessments/$id';
   static String assessmentGrades(int id) => '/grades/assessments/$id/grades';
   static String bulletin(int studentId) => '/grades/bulletin/$studentId';
@@ -78,8 +79,15 @@ class ApiEndpoints {
   // --- Paramètres ---
   static const String settingsPeriods = '/settings/periods';
 
-  // --- Emploi du temps (À CRÉER côté serveur) ---
+  // --- Emploi du temps ---
+  // GET /schedule?classroom_id=&teacher_id=&week_type= (lecture — existe côté
+  // serveur, commit e7a3096). GET /schedule/my = cours de l'enseignant connecté.
   static const String schedule = '/schedule';
+  static const String scheduleMy = '/schedule/my';
+  static const String scheduleTimeSlots = '/schedule/time-slots';
+  // Écriture (nécessite le patch serveur GeTech-SMS — voir docs/) :
+  static const String scheduleEntries = '/schedule/entries';
+  static String scheduleEntry(int id) => '/schedule/entries/$id';
 
   // --- Présence (À CRÉER côté serveur) ---
   static const String attendanceSession = '/attendance/session';

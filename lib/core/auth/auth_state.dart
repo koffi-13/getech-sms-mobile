@@ -7,9 +7,11 @@ library;
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../shared/models/auth_dto.dart' show LoginRequest, LoginResponse, MeResponse, ChangePasswordRequest, UserDto, EstablishmentDto, RoleBrief;
+import '../../shared/models/auth_dto.dart'
+    show ChangePasswordRequest, LoginRequest, LoginResponse, MeResponse, UserDto;
 import '../../features/connections/connection_state.dart';
 import '../config/app_config.dart';
+import '../config/constants.dart';
 import '../network/api_endpoints.dart';
 import '../network/api_exceptions.dart';
 import '../network/dio_client.dart';
@@ -37,6 +39,29 @@ class AuthState {
 
   bool get isAuthenticated => token != null && token!.isNotEmpty && user != null;
   bool get isSuperuser => permissions.contains('*');
+
+  /// Vrai si l'utilisateur possède le rôle [role] (code MAJUSCULES, ex. `TEACHER`).
+  bool hasRole(String role) => roles.contains(role);
+
+  /// Administrateur au sens large : superuser, `ADMIN` ou `HEADMASTER`.
+  ///
+  /// Miroir de `_user_is_admin_or_headmaster` du desktop : accès à toutes les
+  /// classes/matières, suppression d'évaluations, modification des notes
+  /// existantes (non verrouillées pour un enseignant).
+  bool get isAdminOrHeadmaster =>
+      isSuperuser || roles.any(RoleCodes.adminLike.contains);
+
+  /// Le rôle « enseignant » est déclaré sur le compte (rôle `TEACHER` ou
+  /// `UserDto.role` contenant teacher/enseignant).
+  bool get hasDeclaredTeacherRole {
+    if (roles.contains(RoleCodes.teacher)) return true;
+    final r = user?.role?.toLowerCase();
+    return r != null && (r.contains('teacher') || r.contains('enseignant'));
+  }
+
+  /// Enseignant « pur » : rôle enseignant déclaré SANS droits admin élargis.
+  /// (Un admin qui enseigne aussi garde son statut admin.)
+  bool get isTeacherOnly => !isAdminOrHeadmaster && hasDeclaredTeacherRole;
 
   AuthState copyWith({
     UserDto? user,

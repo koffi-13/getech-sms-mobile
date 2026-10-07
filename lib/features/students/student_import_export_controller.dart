@@ -41,10 +41,7 @@ final log_pkg.Logger _log = log_pkg.Logger(
 /// Groupe logique d'une colonne d'export (pour l'UI multi-select groupée).
 enum StudentColumnGroup {
   identite('Identité'),
-  contact('Contact'),
-  medical('Médical'),
-  scolarite('Scolarité'),
-  parents('Parents & Tuteur');
+  scolarite('Scolarité');
 
   final String label;
   const StudentColumnGroup(this.label);
@@ -66,10 +63,13 @@ class StudentColumn {
   String toString() => '$key ($label)';
 }
 
-/// Catalogue des colonnes exportables (référentiel GeTech-SMS).
+/// Catalogue des colonnes exportables.
 ///
-/// L'ordre est preserved tel quel côté serveur (la liste `columns` envoyée
-/// dans la query string contrôle l'ordre des colonnes dans le fichier généré).
+/// ⚠️ Aligné sur le contrat réel du serveur (`GET /students/export`, commit
+/// `[Fix-EXPORT]` — `DEFAULT_COLUMNS` de `students.py`) : seules les clés
+/// ci-dessous sont acceptées ; les autres seraient silencieusement ignorées
+/// (ou rejetées en 422 sur un serveur plus strict). L'ordre est préservé
+/// côté serveur.
 class StudentColumns {
   StudentColumns._();
 
@@ -77,31 +77,26 @@ class StudentColumns {
     StudentColumn(key: 'matricule', label: 'Matricule', group: StudentColumnGroup.identite),
     StudentColumn(key: 'nom', label: 'Nom', group: StudentColumnGroup.identite),
     StudentColumn(key: 'prenoms', label: 'Prénoms', group: StudentColumnGroup.identite),
-    StudentColumn(key: 'dob', label: 'Date de naissance', group: StudentColumnGroup.identite),
     StudentColumn(key: 'sexe', label: 'Sexe', group: StudentColumnGroup.identite),
-    StudentColumn(key: 'birth_place', label: 'Lieu de naissance', group: StudentColumnGroup.identite),
-    StudentColumn(key: 'birth_prefecture', label: 'Préfecture', group: StudentColumnGroup.identite),
-    StudentColumn(key: 'birth_region', label: 'Région', group: StudentColumnGroup.identite),
-    StudentColumn(key: 'birth_country', label: 'Pays', group: StudentColumnGroup.identite),
-    StudentColumn(key: 'phone', label: 'Téléphone', group: StudentColumnGroup.contact),
-    StudentColumn(key: 'email', label: 'Email', group: StudentColumnGroup.contact),
-    StudentColumn(key: 'address', label: 'Adresse', group: StudentColumnGroup.contact),
-    StudentColumn(key: 'city', label: 'Ville', group: StudentColumnGroup.contact),
-    StudentColumn(key: 'blood_type', label: 'Groupe sanguin', group: StudentColumnGroup.medical),
-    StudentColumn(key: 'allergies', label: 'Allergies', group: StudentColumnGroup.medical),
-    StudentColumn(key: 'doctor', label: 'Médecin', group: StudentColumnGroup.medical),
-    StudentColumn(key: 'previous_school', label: 'École précédente', group: StudentColumnGroup.scolarite),
-    StudentColumn(key: 'transport', label: 'Transport', group: StudentColumnGroup.scolarite),
+    StudentColumn(key: 'dob', label: 'Date de naissance', group: StudentColumnGroup.identite),
+    StudentColumn(key: 'age', label: 'Âge', group: StudentColumnGroup.identite),
     StudentColumn(key: 'classroom', label: 'Classe', group: StudentColumnGroup.scolarite),
-    StudentColumn(key: 'status', label: 'Statut', group: StudentColumnGroup.scolarite),
     StudentColumn(key: 'inscription_type', label: 'Type d\'inscription', group: StudentColumnGroup.scolarite),
-    StudentColumn(key: 'parent_pere', label: 'Père', group: StudentColumnGroup.parents),
-    StudentColumn(key: 'parent_mere', label: 'Mère', group: StudentColumnGroup.parents),
-    StudentColumn(key: 'guardian', label: 'Tuteur', group: StudentColumnGroup.parents),
+    StudentColumn(key: 'student_status', label: 'Statut', group: StudentColumnGroup.scolarite),
   ];
+
+  /// Colonne photo — acceptée uniquement avec `include_photos=true`.
+  static const StudentColumn photo = StudentColumn(
+      key: 'photo_path', label: 'Photo', group: StudentColumnGroup.identite);
 
   /// Clés par défaut (toutes) — utilisées si l'utilisateur ne filtre pas.
   static List<String> get defaultKeys => all.map((c) => c.key).toList();
+
+  /// Clés réellement acceptées par le serveur (DEFAULT_COLUMNS de students.py).
+  static const Set<String> supportedKeys = {
+    'matricule', 'nom', 'prenoms', 'sexe', 'dob', 'classroom',
+    'inscription_type', 'student_status', 'age', 'photo_path',
+  };
 
   /// Regroupement pour l'affichage.
   static Map<StudentColumnGroup, List<StudentColumn>> get grouped {
@@ -306,6 +301,13 @@ class StudentImportExportController {
 
   /// Exporte les élèves selon [config] (`GET /students/export?format=...&columns=...`).
   ///
+  /// Le paramètre `columns` est une **chaîne séparée par des virgules**
+  /// (contrat serveur : `columns: str | None = Query(None)`), filtrée sur les
+  /// clés supportées par `DEFAULT_COLUMNS` serveur. En cas de 422 (serveur
+  /// plus strict ou contrat divergent), un second essai est fait **sans**
+  /// `columns` ni `include_photos` (export par défaut serveur) — comportement
+  /// défensif qui garantit qu'un export aboutit toujours.
+  ///
   /// Retourne le chemin absolu du fichier généré côté mobile.
   Future<String> exportStudents(
     StudentExportConfig config, {
@@ -313,13 +315,24 @@ class StudentImportExportController {
   }) async {
     _ensureReachable();
     final url = buildUrl(_serverUrl!, ApiEndpoints.studentsExport);
-    final query = <String, dynamic>{
-      'format': config.format,
-      if (config.columns.isNotEmpty) 'columns': config.columns.join(','),
-      if (config.classroomId != null) 'classroom_id': config.classroomId,
-      if (config.includePhotos) 'include_photos': 'true',
-    };
+
+    // 1. Tentative avec les colonnes sélectionnées (clés validées).
+    // Si les photos sont demandées, la colonne photo_path doit faire partie
+    // de la sélection (le serveur l'ajoute à DEFAULT_COLUMNS seulement quand
+    // include_photos=true).
+    final selectedKeys = config.columns
+        .where(StudentColumns.supportedKeys.contains)
+        .toList();
+    if (config.includePhotos && !selectedKeys.contains('photo_path')) {
+      selectedKeys.add('photo_path');
+    }
     try {
+      final query = <String, dynamic>{
+        'format': config.format,
+        if (selectedKeys.isNotEmpty) 'columns': selectedKeys.join(','),
+        if (config.classroomId != null) 'classroom_id': config.classroomId,
+        if (config.includePhotos) 'include_photos': 'true',
+      };
       final resp = await _dio.get<List<int>>(
         url,
         queryParameters: query,
@@ -334,6 +347,36 @@ class StudentImportExportController {
         ),
       );
     } on DioException catch (e) {
+      final api = (e.error is ApiException)
+          ? e.error as ApiException
+          : dioErrorToApiException(e);
+      // 2. 422 (validation) → retry minimal : format seul, sans filtres.
+      if (api.statusCode == 422) {
+        _log.w('exportStudents 422 — retry sans columns/include_photos');
+        try {
+          final resp = await _dio.get<List<int>>(
+            url,
+            queryParameters: {
+              'format': config.format,
+              if (config.classroomId != null)
+                'classroom_id': config.classroomId,
+            },
+            options: Options(responseType: ResponseType.bytes),
+            onReceiveProgress: onProgress,
+          );
+          return await _persistBytes(
+            bytes: resp.data ?? const [],
+            filename: _timestampedFilename(
+              prefix: 'getech_export_eleves',
+              ext: config.fileExtension,
+            ),
+          );
+        } on DioException catch (e2) {
+          throw _wrapDioError(e2);
+        } catch (e2) {
+          throw ImportExportException('Échec de l\'export : $e2');
+        }
+      }
       throw _wrapDioError(e);
     } catch (e) {
       _log.w('exportStudents: $e');

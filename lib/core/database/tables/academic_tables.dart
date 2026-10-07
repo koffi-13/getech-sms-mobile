@@ -4,6 +4,11 @@ library;
 import 'package:drift/drift.dart';
 
 /// Classe.
+///
+/// Colonnes dénormalisées (headTeacherName, levelName, cycleName, cycleId,
+/// seriesName, currentStudentsCount) persistées depuis `ClassroomResponse`
+/// afin que le titulaire, le niveau et l'effectif restent affichables
+/// hors-ligne (le cache Drift est la source de repli de la liste Classes).
 class Classrooms extends Table {
   IntColumn get id => integer().autoIncrement()();
   TextColumn get name => text().withLength(min: 1, max: 128)();
@@ -14,6 +19,14 @@ class Classrooms extends Table {
   IntColumn get teacherId => integer().nullable()();
   IntColumn get capacity => integer().withDefault(const Constant(0))();
   IntColumn get schoolYearId => integer().nullable()();
+  IntColumn get establishmentId => integer().nullable()();
+  TextColumn get headTeacherName => text().nullable()();
+  TextColumn get levelName => text().nullable()();
+  TextColumn get cycleName => text().nullable()();
+  IntColumn get cycleId => integer().nullable()();
+  TextColumn get seriesName => text().nullable()();
+  IntColumn get currentStudentsCount => integer().nullable()();
+  BoolColumn get isActive => boolean().withDefault(const Constant(true))();
   DateTimeColumn get syncedAt => dateTime().nullable()();
   BoolColumn get isDirty => boolean().withDefault(const Constant(false))();
   BoolColumn get isDeleted => boolean().withDefault(const Constant(false))();

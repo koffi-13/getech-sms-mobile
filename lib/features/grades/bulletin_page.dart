@@ -79,7 +79,11 @@ class _BulletinScopeState extends ConsumerState<_BulletinScope> {
     }
 
     final classrooms = ref.watch(classroomsForGradesProvider);
-    final periods = ref.watch(periodsProvider);
+    // Périodes filtrées par le cycle de la classe sélectionnée (corrige le
+    // mélange collège/lycée — miroir du desktop).
+    final periods = _classroomId == null
+        ? const AsyncValue<List<PeriodDto>>.data(const [])
+        : ref.watch(periodsForClassroomProvider(_classroomId!));
 
     // Auto-sélection de la première classe/période si non fournie.
     classrooms.whenData((list) {
@@ -137,8 +141,12 @@ class _BulletinScopeState extends ConsumerState<_BulletinScope> {
               periods: periods,
               classroomId: _classroomId,
               periodId: _periodId,
-              onClassroomChanged: (id) =>
-                  setState(() => _classroomId = id),
+              onClassroomChanged: (id) => setState(() {
+                _classroomId = id;
+                // La période sera re-filtrée par le cycle de la nouvelle
+                // classe puis auto-sélectionnée (période active).
+                _periodId = null;
+              }),
               onPeriodChanged: (id) => setState(() => _periodId = id),
             ),
             const SizedBox(height: 16),

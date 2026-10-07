@@ -91,9 +91,42 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
   Widget build(BuildContext context) {
     final auth = ref.watch(authProvider);
     final canEdit = hasPermission(auth.permissions, RbacPermissions.gradeEdit);
+    // Les admins (superuser / ADMIN / HEADMASTER) ne sont PAS soumis au
+    // verrouillage des notes déjà saisies (is_locked) — ils peuvent corriger
+    // une note existante (miroir de l'upsert admin du desktop).
+    final isAdmin = auth.isAdminOrHeadmaster;
 
     final classrooms = ref.watch(classroomsForGradesProvider);
-    final periods = ref.watch(periodsProvider);
+
+    // Auto-sélection de la première classe (miroir Ranking/Bulletin).
+    final classroomList = classrooms.valueOrNull ?? const <ClassroomDto>[];
+    if (_classroomId == null && classroomList.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _classroomId == null) {
+          setState(() => _classroomId = classroomList.first.id);
+        }
+      });
+    }
+
+    // Périodes filtrées par le CYCLE de la classe sélectionnée — corrige le
+    // mélange lycée/collège dans le champ « Période ».
+    final periods = _classroomId == null
+        ? const AsyncValue<List<PeriodDto>>.data(const [])
+        : ref.watch(periodsForClassroomProvider(_classroomId!));
+
+    // Auto-sélection de la période ACTIVE du jour (miroir
+    // GradeService.get_active_period), sinon la première.
+    final periodList = periods.valueOrNull ?? const <PeriodDto>[];
+    if (_classroomId != null &&
+        _periodId == null &&
+        periodList.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _periodId == null) {
+          final active = activePeriodOf(periodList);
+          if (active != null) setState(() => _periodId = active.id);
+        }
+      });
+    }
 
     final query = (_classSubjectId != null && _periodId != null)
         ? AssessmentsQuery(
@@ -137,6 +170,9 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
               setState(() {
                 _classroomId = c?.id;
                 _classSubjectId = null;
+                // Reset de la période : elle sera re-filtrée par le cycle de
+                // la nouvelle classe puis auto-sélectionnée (période active).
+                _periodId = null;
               });
             },
             labelOf: (c) => c.name,
@@ -154,9 +190,14 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
               data: (list) => list,
               orElse: () => const [],
             ),
-            enabled: periods is AsyncData,
+            enabled: periods is AsyncData && _classroomId != null,
             onChanged: (p) => setState(() => _periodId = p?.id),
-            labelOf: (p) => p.name,
+            labelOf: (p) => p.cycleName == null
+                ? p.name
+                : '${p.name} (${p.cycleName})',
+            hint: _classroomId == null
+                ? 'Sélectionnez une classe d\'abord'
+                : null,
           ),
           const SizedBox(height: 12),
           _ClassSubjectField(
@@ -197,7 +238,8 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
                           .map((a) => _AssessmentCard(
                                 assessment: a,
                                 canEdit: canEdit,
-                                onTap: () => _openGradeEntry(a, canEdit),
+                                onTap: () =>
+                                    _openGradeEntry(a, canEdit, isAdmin),
                                 onDelete: canEdit
                                     ? () => _confirmDelete(a)
                                     : null,
@@ -230,7 +272,7 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
     );
   }
 
-  void _openGradeEntry(AssessmentDto assessment, bool canEdit) {
+  void _openGradeEntry(AssessmentDto assessment, bool canEdit, bool isAdmin) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -238,6 +280,8 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
       builder: (_) => _GradeEntrySheet(
         assessment: assessment,
         canEdit: canEdit,
+        // Admin : le verrouillage is_locked est ignoré (notes modifiables).
+        isAdmin: isAdmin,
       ),
     );
   }
@@ -297,6 +341,7 @@ class _DropdownField<T> extends StatelessWidget {
     required this.onChanged,
     required this.labelOf,
     this.enabled = true,
+    this.hint,
   });
 
   final String label;
@@ -305,6 +350,7 @@ class _DropdownField<T> extends StatelessWidget {
   final ValueChanged<T?> onChanged;
   final String Function(T) labelOf;
   final bool enabled;
+  final String? hint;
 
   @override
   Widget build(BuildContext context) {
@@ -315,6 +361,7 @@ class _DropdownField<T> extends StatelessWidget {
       value: effectiveValue,
       decoration: InputDecoration(
         labelText: label,
+        hintText: hint,
         border: const OutlineInputBorder(),
         isDense: true,
       ),
@@ -553,9 +600,9 @@ class _CreateAssessmentSheet extends ConsumerStatefulWidget {
 class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> {
   final _formKey = GlobalKey<FormState>();
   final _nameCtrl = TextEditingController();
-  AssessmentTypeInfo? _type = CommonAssessmentTypes.defaults.first;
+  AssessmentTypeInfo? _type;
   DateTime? _date = DateTime.now();
-  double _maxScore = CommonAssessmentTypes.defaults.first.defaultMaxScore.toDouble();
+  double _maxScore = 20;
   bool _saving = false;
 
   @override
@@ -576,6 +623,48 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
 
   @override
   Widget build(BuildContext context) {
+    // Types d'évaluation : endpoint dédié (patch serveur) avec replis —
+    // 1) GET /grades/assessment-types ; 2) types déduits des évaluations
+    // existantes de la matière (assessment_type_id/name dénormalisés) ;
+    // 3) valeurs par défaut.
+    final typesAsync = ref.watch(assessmentTypesProvider);
+    final existingAsync = ref.watch(assessmentsProvider(AssessmentsQuery(
+      classSubjectId: widget.classSubjectId,
+      periodId: widget.periodId,
+    )));
+
+    final serverTypes = typesAsync.value ?? CommonAssessmentTypes.defaults;
+    var types = serverTypes;
+    if (identical(types, CommonAssessmentTypes.defaults)) {
+      final derived = <int, AssessmentTypeInfo>{};
+      for (final a in existingAsync.valueOrNull ?? const <AssessmentDto>[]) {
+        if (a.assessmentTypeId > 0 && a.assessmentTypeName.isNotEmpty) {
+          derived.putIfAbsent(
+              a.assessmentTypeId,
+              () => AssessmentTypeInfo(
+                    id: a.assessmentTypeId,
+                    name: a.assessmentTypeName,
+                    code: a.assessmentTypeName.toUpperCase(),
+                    category: a.assessmentTypeCategory.toUpperCase() == 'EXAM'
+                        ? AssessmentCategory.examen
+                        : AssessmentCategory.classe,
+                  ));
+        }
+      }
+      if (derived.isNotEmpty) types = derived.values.toList();
+    }
+
+    // Auto-sélection du premier type.
+    if (_type == null || !types.any((t) => t.id == _type!.id)) {
+      if (types.isNotEmpty) {
+        _type = types.first;
+        _maxScore = types.first.defaultMaxScore.toDouble();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) setState(() {});
+        });
+      }
+    }
+
     return Padding(
       padding: EdgeInsets.fromLTRB(
         16,
@@ -611,40 +700,49 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
                     (v == null || v.trim().isEmpty) ? 'Nom requis' : null,
               ),
               const SizedBox(height: 12),
-              DropdownButtonFormField<AssessmentTypeInfo>(
-                value: _type,
-                decoration: const InputDecoration(
-                  labelText: 'Type d\'évaluation *',
-                  border: OutlineInputBorder(),
-                  isDense: true,
+              if (types.isEmpty)
+                const Text(
+                  'Aucun type d\'évaluation connu pour ce serveur. Créez-en '
+                  'un côté desktop ou appliquez le patch serveur '
+                  '(assessment-types).',
+                  style: TextStyle(fontStyle: FontStyle.italic),
+                )
+              else
+                DropdownButtonFormField<AssessmentTypeInfo>(
+                  value: _type,
+                  decoration: const InputDecoration(
+                    labelText: 'Type d\'évaluation *',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  items: types
+                      .map((t) => DropdownMenuItem(
+                            value: t,
+                            child: Text(
+                              '${t.name} (${t.category.label})',
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ))
+                      .toList(),
+                  onChanged: _onTypeChanged,
                 ),
-                items: CommonAssessmentTypes.defaults
-                    .map((t) => DropdownMenuItem(
-                          value: t,
-                          child: Text(
-                            '${t.name} (${t.category.label})',
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ))
-                    .toList(),
-                onChanged: _onTypeChanged,
-              ),
               const SizedBox(height: 8),
-              Text(
-                'Astuce : les types d\'évaluation sont gérés côté desktop. '
-                'Si l\'ID attendu par le serveur diffère, la création renverra une erreur.',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-              ),
+              if (identical(types, CommonAssessmentTypes.defaults))
+                Text(
+                  'Astuce : les types sont chargés depuis le serveur si le patch '
+                  'GeTech-SMS est appliqué ; sinon ce sont les évaluations '
+                  'existantes de la matière qui servent de référence.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                ),
               const SizedBox(height: 12),
               InkWell(
                 onTap: () async {
                   final picked = await showDatePicker(
                     context: context,
                     initialDate: _date ?? DateTime.now(),
-                    firstDate:
-                        DateTime(DateTime.now().year - 2, 1, 1),
+                    firstDate: DateTime(DateTime.now().year - 2, 1, 1),
                     lastDate: DateTime(DateTime.now().year + 2, 12, 31),
                   );
                   if (picked != null) setState(() => _date = picked);
@@ -796,10 +894,20 @@ class _NumberStepper extends StatelessWidget {
 /// {student_id, student_name, student_matricule, grade_id, value, is_absent,
 /// comment, is_locked}.
 class _GradeEntrySheet extends ConsumerStatefulWidget {
-  const _GradeEntrySheet({required this.assessment, required this.canEdit});
+  const _GradeEntrySheet({
+    required this.assessment,
+    required this.canEdit,
+    this.isAdmin = false,
+  });
 
   final AssessmentDto assessment;
   final bool canEdit;
+
+  /// Vrai pour les admins (superuser / ADMIN / HEADMASTER) : le verrouillage
+  /// `is_locked` est ignoré — les notes déjà saisies restent modifiables
+  /// (miroir de l'upsert admin du desktop ; nécessite le patch serveur pour
+  /// persister côté API, sinon le serveur compte les existantes en `skipped`).
+  final bool isAdmin;
 
   @override
   ConsumerState<_GradeEntrySheet> createState() => _GradeEntrySheetState();
@@ -904,6 +1012,7 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
                         grade: draft,
                         maxScore: widget.assessment.maxScore,
                         editable: widget.canEdit,
+                        isAdmin: widget.isAdmin,
                         onChanged: (g) =>
                             setState(() => _drafts[original.studentId] = g),
                       );
@@ -948,15 +1057,20 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
           .saveGrades(widget.assessment.id, grades);
       if (mounted) {
         Navigator.of(context).pop();
+        // Admin : les notes existantes modifiées peuvent être ignorées par un
+        // serveur non patché (insert-only) — message explicite au lieu d'un
+        // échec silencieux.
+        final msg = resp.skippedCount > 0
+            ? (widget.isAdmin
+                ? '${resp.savedCount} note(s) enregistrée(s), '
+                    '${resp.skippedCount} existante(s) non mise(s) à jour — '
+                    'appliquez le patch serveur GeTech-SMS (grades-admin-edit) '
+                    'pour permettre la correction des notes existantes.'
+                : '${resp.savedCount} note(s) enregistrée(s), '
+                    '${resp.skippedCount} ignorée(s) (verrouillées).')
+            : '${resp.savedCount} note(s) enregistrée(s).';
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              resp.skippedCount > 0
-                  ? '${resp.savedCount} note(s) enregistrée(s), '
-                      '${resp.skippedCount} ignorée(s) (verrouillées).'
-                  : '${resp.savedCount} note(s) enregistrée(s).',
-            ),
-          ),
+          SnackBar(content: Text(msg), duration: const Duration(seconds: 4)),
         );
       }
     } on ApiException catch (e) {
@@ -991,11 +1105,15 @@ class _GradeRow extends StatefulWidget {
     required this.maxScore,
     required this.editable,
     required this.onChanged,
+    this.isAdmin = false,
   });
 
   final GradeEntryDto grade;
   final double maxScore;
   final bool editable;
+
+  /// Admin : le verrou `is_locked` n'est pas appliqué (notes modifiables).
+  final bool isAdmin;
   final ValueChanged<GradeEntryDto> onChanged;
 
   @override
@@ -1076,7 +1194,10 @@ class _GradeRowState extends State<_GradeRow> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final locked = widget.grade.isLocked;
+    // Verrou appliqué uniquement aux NON-admins : un admin peut corriger une
+    // note déjà saisie (« Pour les administrateurs, ne verrouillez pas la
+    // modification des notes »).
+    final locked = widget.grade.isLocked && !widget.isAdmin;
     final readOnly = !widget.editable;
     final disabled = locked || readOnly;
     return Card(

@@ -72,13 +72,15 @@ class StudentDto {
     this.guardians = const [],
   });
 
+  /// Nom complet au format « NOM Prénoms » (convention scolaire : le nom de
+  /// famille d'abord, comme dans la version desktop).
   String get fullName =>
-      [prenoms, nom].whereType<String>().where((s) => s.isNotEmpty).join(' ');
+      [nom, prenoms].whereType<String>().where((s) => s.isNotEmpty).join(' ');
 
   String get displayInitials {
-    final p = prenoms?.isNotEmpty == true ? prenoms![0] : '';
     final n = (nom?.isNotEmpty == true) ? nom![0] : '';
-    return '$p$n'.toUpperCase();
+    final p = prenoms?.isNotEmpty == true ? prenoms![0] : '';
+    return '$n$p'.toUpperCase();
   }
 
   factory StudentDto.fromJson(Map<String, dynamic> j) => StudentDto(
@@ -102,9 +104,17 @@ class StudentDto {
         birthCountry: j['birth_country'] as String?,
         groupe: j['groupe'] as String?,
         classroomId: (j['classroom_id'] as num?)?.toInt(),
-        status: StudentStatus.fromCode(j['status'] as String?),
-        inscriptionType:
-            InscriptionType.fromCode(j['inscription_type'] as String?),
+        // Le serveur ne renvoie que les labels (« Nouveau », « Ancien »…).
+        // On tente d'abord les codes (patch serveur / détail enrichi), puis
+        // on résout par label — enfin on retombe sur student_status_label /
+        // inscription_type_label si présents.
+        status: StudentStatus.fromCode(j['status'] as String?) ??
+            StudentStatus.fromCode(j['student_status'] as String?) ??
+            StudentStatus.fromLabel(j['student_status_label'] as String?),
+        inscriptionType: InscriptionType.fromCode(
+                j['inscription_type'] as String?) ??
+            InscriptionType.fromLabel(
+                j['inscription_type_label'] as String?),
         contact: j['contact'] == null
             ? null
             : StudentContactDto.fromJson(j['contact'] as Map<String, dynamic>),
@@ -265,7 +275,7 @@ class StudentParentDto {
   });
 
   String get fullName =>
-      [prenoms, nom].whereType<String>().where((s) => s.isNotEmpty).join(' ');
+      [nom, prenoms].whereType<String>().where((s) => s.isNotEmpty).join(' ');
 
   factory StudentParentDto.fromJson(Map<String, dynamic> j) => StudentParentDto(
         id: (j['id'] as num?)?.toInt(),
@@ -304,7 +314,7 @@ class GuardianDto {
   });
 
   String get fullName =>
-      [prenoms, nom].whereType<String>().where((s) => s.isNotEmpty).join(' ');
+      [nom, prenoms].whereType<String>().where((s) => s.isNotEmpty).join(' ');
 
   factory GuardianDto.fromJson(Map<String, dynamic> j) => GuardianDto(
         id: (j['id'] as num?)?.toInt(),

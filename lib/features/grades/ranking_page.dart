@@ -18,7 +18,6 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/auth/auth_state.dart';
 import '../../core/config/constants.dart';
-import '../../core/utils/formatters.dart';
 import '../../core/utils/permissions.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
@@ -64,12 +63,16 @@ class _RankingBodyState extends ConsumerState<_RankingBody> {
   Widget build(BuildContext context) {
     final conn = ref.watch(connectionProvider);
     final classrooms = ref.watch(classroomsForGradesProvider);
-    final periods = ref.watch(periodsProvider);
+    // Périodes filtrées par le cycle de la classe sélectionnée (corrige le
+    // mélange collège/lycée — miroir du desktop).
+    final periods = _classroomId == null
+        ? const AsyncValue<List<PeriodDto>>.data(const [])
+        : ref.watch(periodsForClassroomProvider(_classroomId!));
     final subjects = _classroomId == null
         ? null
         : ref.watch(classSubjectsProvider(_classroomId!));
 
-    // Auto-sélection de la première classe/période si non choisie.
+    // Auto-sélection de la première classe, puis de la période active.
     classrooms.whenData((list) {
       if (_classroomId == null && list.isNotEmpty) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -118,6 +121,9 @@ class _RankingBodyState extends ConsumerState<_RankingBody> {
                   onClassroomChanged: (id) => setState(() {
                     _classroomId = id;
                     _subjectId = null;
+                    // La période sera re-filtrée par le cycle de la nouvelle
+                    // classe puis auto-sélectionnée (période active).
+                    _periodId = null;
                   }),
                   onPeriodChanged: (id) => setState(() => _periodId = id),
                   onModeChanged: (m) => setState(() => _mode = m),

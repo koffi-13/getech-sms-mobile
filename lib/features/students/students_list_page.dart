@@ -1,5 +1,9 @@
-/// Page "Élèves" : liste filtrée (recherche + classe + sexe + statut) avec
-/// pull-to-refresh, support offline-first et FAB d'ajout (RBAC).
+/// Page "Élèves" : liste filtrée (recherche + classe + sexe + statut + type
+/// d'inscription) avec pull-to-refresh, support offline-first et FAB d'ajout
+/// (RBAC). Les noms sont affichés au format « NOM Prénoms ».
+///
+/// La liste rendue consomme [studentsListProvider] avec le filtre courant —
+/// la recherche et tous les chips filtrent réellement les données.
 library;
 
 import 'package:flutter/material.dart';
@@ -28,11 +32,9 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
   StudentFilter _filter = StudentFilter.empty;
 
   // Recherche debouncée (léger délai pour limiter les requêtes).
-  String _searchText = '';
   DateTime? _lastSearchAt;
 
   void _onSearchChanged(String value) {
-    setState(() => _searchText = value);
     final now = DateTime.now();
     _lastSearchAt = now;
     Future.delayed(const Duration(milliseconds: 350), () {
@@ -45,8 +47,6 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
   Future<void> _refresh() async {
     ref.invalidate(studentControllerProvider);
     ref.invalidate(classroomsProvider);
-    // On force un rafraîchissement manuel
-    setState(() => _filter = _filter.copyWith());
   }
 
   @override
@@ -67,7 +67,9 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
     }
 
     final classroomsAsync = ref.watch(classroomsProvider);
-    final studentsAsync = ref.watch(studentControllerProvider);
+    // ⚠️ La liste est FILTRÉE via studentsListProvider (le bug historique
+    // était de consommer la liste brute — recherche et filtres no-ops).
+    final studentsAsync = ref.watch(studentsListProvider(_filter));
 
     return Scaffold(
       appBar: AppBar(
@@ -112,7 +114,7 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
           child: AppSearchBar(
-            hint: 'Nom ou matricule…',
+            hint: 'Nom, prénoms ou matricule…',
             onChanged: _onSearchChanged,
           ),
         ),
@@ -144,7 +146,14 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
                 selected: _filter.status != null,
                 onTap: () => _openStatusPicker(context),
               ),
-              if (_filter != StudentFilter.empty) ...[
+              const SizedBox(width: 8),
+              _FilterChip(
+                label: _filter.inscriptionType?.label ?? 'Inscription',
+                icon: Icons.how_to_reg_outlined,
+                selected: _filter.inscriptionType != null,
+                onTap: () => _openInscriptionPicker(context),
+              ),
+              if (_filter != StudentFilter.empty && _filter.search.isEmpty) ...[
                 const SizedBox(width: 8),
                 TextButton.icon(
                   onPressed: () => setState(() => _filter = StudentFilter.empty),
@@ -183,12 +192,14 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
 
     final students = studentsAsync.value ?? [];
     if (students.isEmpty) {
-      slivers.add(const SliverFillRemaining(
+      slivers.add(SliverFillRemaining(
         hasScrollBody: false,
         child: EmptyState(
           icon: Icons.person_search,
           title: 'Aucun élève trouvé',
-          message: 'Essayez d\'ajuster vos filtres ou effectuez une synchro.',
+          message: _filter == StudentFilter.empty
+              ? 'Aucun élève synchronisé. Tirez pour rafraîchir.'
+              : 'Essayez d\'ajuster vos filtres ou votre recherche.',
         ),
       ));
       return slivers;
@@ -210,7 +221,8 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
   String _classroomLabel(AsyncValue<List<ClassroomDto>> async) {
     if (_filter.classroomId == null) return 'Classe';
     return async.maybeWhen(
-      data: (list) => list.firstWhere((c) => c.id == _filter.classroomId).name,
+      data: (list) =>
+          list.where((c) => c.id == _filter.classroomId).firstOrNullName,
       orElse: () => 'Classe #${_filter.classroomId}',
     );
   }
@@ -233,6 +245,7 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
             ),
             ...list.map((c) => ListTile(
                   title: Text(c.name),
+                  subtitle: c.levelLabel.isEmpty ? null : Text(c.levelLabel),
                   trailing: _filter.classroomId == c.id ? const Icon(Icons.check) : null,
                   onTap: () {
                     setState(() => _filter = _filter.copyWith(classroomId: c.id));
@@ -256,7 +269,7 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
             ListTile(
               title: const Text('Tous les sexes'),
               onTap: () {
-                setState(() => _filter = _filter.copyWith(sexe: null));
+                setState(() => _filter = _filter.copyWith(clearSexe: true));
                 Navigator.pop(ctx);
               },
             ),
@@ -284,7 +297,7 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
             ListTile(
               title: const Text('Tous les statuts'),
               onTap: () {
-                setState(() => _filter = _filter.copyWith(status: null));
+                setState(() => _filter = _filter.copyWith(clearStatus: true));
                 Navigator.pop(ctx);
               },
             ),
@@ -301,12 +314,46 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
     );
   }
 
+  void _openInscriptionPicker(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: const Text('Tous les types d\'inscription'),
+              onTap: () {
+                setState(() =>
+                    _filter = _filter.copyWith(clearInscriptionType: true));
+                Navigator.pop(ctx);
+              },
+            ),
+            ...InscriptionType.values.map((v) => ListTile(
+                  title: Text(v.label),
+                  onTap: () {
+                    setState(() =>
+                        _filter = _filter.copyWith(inscriptionType: v));
+                    Navigator.pop(ctx);
+                  },
+                )),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _openImportExport(BuildContext context) {
     showDialog(
       context: context,
       builder: (ctx) => const StudentExportDialog(),
     );
   }
+}
+
+extension on Iterable<ClassroomDto> {
+  String get firstOrNullName => isEmpty ? '' : first.name;
 }
 
 // ---------------------------------------------------------------------------
@@ -377,12 +424,19 @@ class _StudentTile extends StatelessWidget {
         leading: CircleAvatar(
           child: Text(student.displayInitials),
         ),
-        title: Text(student.fullName),
+        title: Text(
+          student.fullName,
+          // NOM en majuscules + prénoms — convention scolaire.
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
         subtitle: Text(
           [
             if (student.matricule.isNotEmpty) student.matricule,
-            student.classroomName,
+            if (student.classroomName != null) student.classroomName!,
+            if (student.status != null) student.status!.label,
           ].join(' • '),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
         ),
         trailing: const Icon(Icons.chevron_right),
         onTap: () => context.push('/students/${student.id}'),

@@ -94,7 +94,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forTesting(super.e);
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -110,6 +110,20 @@ class AppDatabase extends _$AppDatabase {
               mode: InsertMode.insertOrIgnore,
             );
           });
+        },
+        onUpgrade: (m, from, to) async {
+          // v1 → v2 : colonnes dénormalisées de `classrooms` (titulaire,
+          // niveau, cycle, série, effectif, statut) pour l'affichage hors-ligne.
+          if (from < 2) {
+            await m.addColumn(classrooms, classrooms.establishmentId);
+            await m.addColumn(classrooms, classrooms.headTeacherName);
+            await m.addColumn(classrooms, classrooms.levelName);
+            await m.addColumn(classrooms, classrooms.cycleName);
+            await m.addColumn(classrooms, classrooms.cycleId);
+            await m.addColumn(classrooms, classrooms.seriesName);
+            await m.addColumn(classrooms, classrooms.currentStudentsCount);
+            await m.addColumn(classrooms, classrooms.isActive);
+          }
         },
         beforeOpen: (details) async {
           await customStatement('PRAGMA foreign_keys = ON;');

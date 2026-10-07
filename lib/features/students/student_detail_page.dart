@@ -334,6 +334,9 @@ class _IdentiteCard extends StatelessWidget {
       children: [
         _InfoRow('Date de naissance', DateFormatter.date(student.dob),
             icon: Icons.cake_outlined),
+        _InfoRow('Âge',
+            student.age != null ? '${student.age} ans' : _computeAge(student.dob),
+            icon: Icons.cake_outlined),
         if (birthParts.isNotEmpty)
           _InfoRow('Lieu de naissance', birthParts.join(', '),
               icon: Icons.place_outlined),
@@ -341,6 +344,18 @@ class _IdentiteCard extends StatelessWidget {
             icon: Icons.group_outlined),
       ],
     );
+  }
+
+  /// Âge calculé localement si le serveur ne le renvoie pas.
+  String? _computeAge(DateTime? dob) {
+    if (dob == null) return null;
+    final today = DateTime.now();
+    var age = today.year - dob.year;
+    final hadBirthday = today.month > dob.month ||
+        (today.month == dob.month && today.day >= dob.day);
+    if (!hadBirthday) age--;
+    if (age < 0 || age > 130) return null;
+    return '$age ans';
   }
 }
 
