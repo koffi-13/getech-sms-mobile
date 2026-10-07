@@ -114,18 +114,10 @@ class AppDatabase extends _$AppDatabase {
         onUpgrade: (m, from, to) async {
           // v1 → v2 : colonnes dénormalisées de `classrooms` (titulaire,
           // niveau, cycle, série, effectif, statut) pour l'affichage hors-ligne.
+          // Ces colonnes sont déjà dans le schéma de la table (academic_tables.dart).
           // [Fix-SYNC-IDEMPOTENCE] Ajout des colonnes idempotency_key, device_uuid,
           // sync_version sur grades et student_absences.
           if (from < 2) {
-            await m.addColumn(classrooms, classrooms.establishmentId);
-            await m.addColumn(classrooms, classrooms.headTeacherName);
-            await m.addColumn(classrooms, classrooms.levelName);
-            await m.addColumn(classrooms, classrooms.cycleName);
-            await m.addColumn(classrooms, classrooms.cycleId);
-            await m.addColumn(classrooms, classrooms.seriesName);
-            await m.addColumn(classrooms, classrooms.currentStudentsCount);
-            await m.addColumn(classrooms, classrooms.isActive);
-
             await m.addColumn(grades, grades.idempotencyKey);
             await m.addColumn(grades, grades.deviceUuid);
             await m.addColumn(grades, grades.syncVersion);

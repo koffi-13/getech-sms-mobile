@@ -240,67 +240,6 @@ class _ScheduleTab extends ConsumerWidget {
               ref.invalidate(classroomScheduleProvider(classroom.id)),
         ),
       ),
->>>>>>> b523205ed75264487450e0a94d7a77b0fb3c1a4f
-    );
-  }
-}
-
-class _ScheduleTab extends ConsumerWidget {
-  final int classroomId;
-  final WeekType weekType;
-  final ValueChanged<WeekType> onWeekChanged;
-
-  const _ScheduleTab({
-    required this.classroomId,
-    required this.weekType,
-    required this.onWeekChanged,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final query = ScheduleQuery(classroomId: classroomId, weekType: weekType);
-    final async = ref.watch(weeklyScheduleProvider(query));
-
-    return Column(
-      children: [
-        // Sélecteur de semaine A/B
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: Row(
-            children: [
-              const Text('Semaine: '),
-              const SizedBox(width: 8),
-              ChoiceChip(
-                label: const Text('A'),
-                selected: weekType == WeekType.a,
-                onSelected: (_) => onWeekChanged(WeekType.a),
-              ),
-              const SizedBox(width: 8),
-              ChoiceChip(
-                label: const Text('B'),
-                selected: weekType == WeekType.b,
-                onSelected: (_) => onWeekChanged(WeekType.b),
-              ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: async.when(
-            data: (entries) {
-              if (entries.isEmpty) {
-                return const EmptyState(
-                  icon: Icons.calendar_view_day,
-                  title: 'Aucun cours',
-                  message: 'L\'emploi du temps de cette classe est vide.',
-                );
-              }
-              return _WeeklyScheduleGrid(entries: entries);
-            },
-            loading: () => const AppLoading(label: 'Chargement de l\'EDT…'),
-            error: (e, st) => AppErrorWidget(message: e.toString()),
-          ),
-        ),
-      ],
     );
   }
 }
