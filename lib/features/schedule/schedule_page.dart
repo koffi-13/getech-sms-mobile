@@ -1,20 +1,33 @@
-/// Page « Emploi du temps » : sélecteur de classe + bascule de semaine A/B
-/// et grille hebdomadaire horizontale (6 colonnes Lundi..Samedi).
+/// Page « Emploi du temps » — RBAC complet (miroir du desktop).
 ///
-/// Affiche une bannière hors-ligne lorsque le serveur est injoignable et un
-/// [EmptyState] lorsque l'emploi du temps est vide.
+/// - **Admin / headmaster / superuser** : vue « Par classe » (dropdown) et
+///   « Par enseignant » (dropdown), édition complète (ajout / modification /
+///   suppression de cours) si le patch serveur est appliqué.
+/// - **Enseignant** : onglets « Mes cours » (grille de tous ses cours,
+///   `GET /schedule/my`) et « Mes classes » (EDT complet des classes où il
+///   enseigne ou dont il est titulaire) — strictement lecture seule.
+/// - **Autres profils** : vue par classe en lecture seule.
+///
+/// Semaines alternées : filtre « Toutes / A / B » (l'alternance vient de
+/// `school_years.alternating_week_start_date` via [currentWeekTypeProvider]).
 library;
 
+import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/auth/auth_state.dart';
+import '../../core/auth/teacher_scope.dart';
 import '../../core/config/constants.dart';
 import '../../core/utils/permissions.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/attendance_dto.dart';
+import '../../shared/models/classroom_dto.dart';
 import '../../shared/widgets/widgets.dart';
+import '../users/user_controller.dart';
 import 'schedule_controller.dart';
+import 'schedule_editor.dart';
+import 'schedule_grid.dart';
 
 class SchedulePage extends ConsumerStatefulWidget {
   const SchedulePage({super.key});
@@ -23,437 +36,775 @@ class SchedulePage extends ConsumerStatefulWidget {
   ConsumerState<SchedulePage> createState() => _SchedulePageState();
 }
 
+/// Filtre de semaine pour la grille.
+enum _WeekFilter { all, a, b }
+
+enum _AdminViewMode { classroom, teacher }
+
 class _SchedulePageState extends ConsumerState<SchedulePage> {
+  _WeekFilter _weekFilter = _WeekFilter.all;
+  WeekType? _currentWeek;
+
+  // Sélections admin.
+  _AdminViewMode _adminMode = _AdminViewMode.classroom;
   int? _classroomId;
-  WeekType _weekType = WeekType.a;
-  // [Fix-SCHEDULE] Mode de vue : 'class' (toutes classes) ou 'my' (mon EDT enseignant)
-  String _viewMode = 'class';
+  int? _teacherId;
+
+  // Sélection enseignant (onglet « Mes classes »).
+  int? _teacherClassroomId;
 
   @override
   Widget build(BuildContext context) {
     final conn = ref.watch(connectionProvider);
-    final classrooms = ref.watch(classroomsForScheduleProvider);
     final auth = ref.watch(authProvider);
-    // [Fix-SCHEDULE] Un enseignant (GRADE_READ) peut voir "Mon EDT"
-    final isTeacher = hasPermission(auth.permissions, RbacPermissions.gradeRead);
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final currentWeekAsync = ref.watch(currentWeekTypeProvider);
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Emploi du temps'),
-        actions: [
-          if (!conn.canReachServer)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: StatusBadge.offline(),
-            ),
-        ],
-      ),
+      appBar: AppBar(title: const Text('Emploi du temps'), actions: [
+        if (!conn.canReachServer)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: StatusBadge.offline(),
+          ),
+      ]),
       body: Column(
         children: [
-          if (!conn.canReachServer) _offlineBanner(context),
-          // [Fix-SCHEDULE] Bascule "Mon EDT" / "Toutes les classes"
-          if (isTeacher)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-              child: SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'my', label: Text('Mon EDT')),
-                  ButtonSegment(value: 'class', label: Text('Par classe')),
-                ],
-                selected: {_viewMode},
-                onSelectionChanged: (s) => setState(() => _viewMode = s.first),
-              ),
-            ),
-          // Mode "Mon EDT" (enseignant)
-          if (_viewMode == 'my' && isTeacher)
-            Expanded(
-              child: !conn.canReachServer
-                  ? const EmptyState(
-                      title: 'Hors-ligne',
-                      message: 'Connectez-vous au serveur pour charger l\'EDT.',
-                      icon: Icons.cloud_off,
-                    )
-                  : ref.watch(myScheduleProvider).when(
-                      data: (list) => list.isEmpty
-                          ? const EmptyState(
-                              title: 'Aucun cours',
-                              message: 'Vous n\'avez aucun cours programmé.',
-                              icon: Icons.event_busy,
-                            )
-                          : _ScheduleGrid(schedule: list),
-                      loading: () => const AppLoading(label: 'Chargement…'),
-                      error: (e, _) => AppErrorWidget(message: e.toString()),
-                    ),
-            )
-          // Mode "Par classe" (existant)
-          else ...[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: classrooms.when(
-                      data: (list) {
-                        if (list.isEmpty) {
-                          return const Text('Aucune classe disponible.');
-                        }
-                        if (_classroomId == null ||
-                            !list.any((c) => c.id == _classroomId)) {
-                          _classroomId = list.first.id;
-                        }
-                        return DropdownButtonFormField<int>(
-                          value: _classroomId,
-                          decoration: const InputDecoration(
-                            labelText: 'Classe',
-                            border: OutlineInputBorder(),
-                            isDense: true,
-                          ),
-                          items: list
-                              .map((c) => DropdownMenuItem(
-                                    value: c.id,
-                                    child: Text(c.name),
-                                  ))
-                              .toList(),
-                          onChanged: (v) => setState(() => _classroomId = v),
+          if (!conn.canReachServer) const ScheduleOfflineBanner(),
+          Expanded(
+            child: !conn.canReachServer
+                ? const EmptyState(
+                    title: 'Hors-ligne',
+                    message:
+                        'Connectez-vous au serveur pour charger l\'emploi du temps.',
+                    icon: Icons.cloud_off,
+                  )
+                : scopeAsync.when(
+                    data: (scope) {
+                      // Semaine alternée courante (auto-détection).
+                      _currentWeek = currentWeekAsync.value;
+                      if (auth.isAdminOrHeadmaster) {
+                        return _AdminScheduleView(
+                          mode: _adminMode,
+                          onModeChanged: (m) =>
+                              setState(() => _adminMode = m),
+                          classroomId: _classroomId,
+                          onClassroomChanged: (id) =>
+                              setState(() => _classroomId = id),
+                          teacherId: _teacherId,
+                          onTeacherChanged: (id) =>
+                              setState(() => _teacherId = id),
+                          weekFilter: _weekFilter,
+                          currentWeek: _currentWeek,
+                          onWeekFilterChanged: (f) =>
+                              setState(() => _weekFilter = f),
                         );
-                      },
-                      loading: () => const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 16),
-                        child: LinearProgressIndicator(),
-                      ),
-                      error: (e, _) => Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        child: Text(
-                          'Erreur : $e',
-                          style: TextStyle(
-                              color: Theme.of(context).colorScheme.error),
-                        ),
-                      ),
+                      }
+                      if (scope.isTeacher) {
+                        return _TeacherScheduleView(
+                          scope: scope,
+                          selectedClassroomId: _teacherClassroomId,
+                          onClassroomChanged: (id) =>
+                              setState(() => _teacherClassroomId = id),
+                          weekFilter: _weekFilter,
+                          currentWeek: _currentWeek,
+                          onWeekFilterChanged: (f) =>
+                              setState(() => _weekFilter = f),
+                        );
+                      }
+                      // Autres profils : vue classe lecture seule.
+                      return _ReadOnlyClassroomView(
+                        weekFilter: _weekFilter,
+                        currentWeek: _currentWeek,
+                        onWeekFilterChanged: (f) =>
+                            setState(() => _weekFilter = f),
+                      );
+                    },
+                    loading: () =>
+                        const AppLoading(label: 'Chargement…'),
+                    error: (e, _) => AppErrorWidget(
+                      message: e.toString(),
+                      onRetry: () => ref.invalidate(teacherScopeProvider),
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  _weekToggle(context),
-                ],
-              ),
-            ),
-            const SizedBox(height: 4),
-            Expanded(
-              child: _classroomId == null
-                  ? const EmptyState(
-                      title: 'Sélectionnez une classe',
-                      message: 'Choisissez une classe pour afficher son emploi du temps.',
-                      icon: Icons.school_outlined,
-                    )
-                  : (!conn.canReachServer
-                      ? const EmptyState(
-                          title: 'Hors-ligne',
-                          message:
-                              'Connectez-vous au serveur pour charger l\'emploi du temps.',
-                          icon: Icons.cloud_off,
-                        )
-                      : ref
-                          .watch(weeklyScheduleProvider(ScheduleQuery(
-                            classroomId: _classroomId!,
-                            weekType: _weekType,
-                          )))
-                          .when(
-                            data: (list) => list.isEmpty
-                                ? EmptyState(
-                                    title: 'Aucun cours programmé',
-                                    message:
-                                        'L\'emploi du temps de cette classe est vide pour la semaine ${_weekType == WeekType.a ? 'A' : 'B'}.',
-                                    icon: Icons.event_busy,
-                                  )
-                                : _ScheduleGrid(schedule: list),
-                            loading: () => const AppLoading(
-                                label: 'Chargement de l\'emploi du temps…'),
-                            error: (e, _) => AppErrorWidget(
-                              message: e.toString(),
-                              onRetry: () => ref.invalidate(
-                                  weeklyScheduleProvider(ScheduleQuery(
-                                    classroomId: _classroomId!,
-                                    weekType: _weekType,
-                                  ))),
-                            ),
-                          )),
-            ),
-          ],
+          ),
         ],
       ),
     );
   }
+}
 
-  Widget _weekToggle(BuildContext context) {
-    return SegmentedButton<WeekType>(
+// ---------------------------------------------------------------------------
+// Segmented control du filtre de semaine
+// ---------------------------------------------------------------------------
+
+class _WeekFilterToggle extends StatelessWidget {
+  const _WeekFilterToggle({
+    required this.value,
+    required this.onChanged,
+    required this.hasAlternatingWeeks,
+  });
+
+  final _WeekFilter value;
+  final ValueChanged<_WeekFilter> onChanged;
+  final bool hasAlternatingWeeks;
+
+  @override
+  Widget build(BuildContext context) {
+    // Pas de semaines alternées → masque le filtre (tout = toutes les semaines).
+    if (!hasAlternatingWeeks) return const SizedBox.shrink();
+    return SegmentedButton<_WeekFilter>(
       segments: const [
-        ButtonSegment(value: WeekType.a, label: Text('A')),
-        ButtonSegment(value: WeekType.b, label: Text('B')),
+        ButtonSegment(value: _WeekFilter.all, label: Text('Toutes')),
+        ButtonSegment(value: _WeekFilter.a, label: Text('A')),
+        ButtonSegment(value: _WeekFilter.b, label: Text('B')),
       ],
-      selected: {_weekType},
-      onSelectionChanged: (s) => setState(() => _weekType = s.first),
-    );
-  }
-
-  Widget _offlineBanner(BuildContext context) {
-    return Material(
-      color: Theme.of(context).colorScheme.errorContainer,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: Row(
-          children: [
-            Icon(Icons.cloud_off,
-                size: 18, color: Theme.of(context).colorScheme.onErrorContainer),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'Mode hors-ligne : emploi du temps indisponible.',
-                style: TextStyle(
-                    color: Theme.of(context).colorScheme.onErrorContainer),
-              ),
-            ),
-          ],
-        ),
-      ),
+      selected: {value},
+      onSelectionChanged: (s) => onChanged(s.first),
     );
   }
 }
 
-/// Grille hebdomadaire horizontale : 6 colonnes (Lundi..Samedi), chaque
-/// colonne liste verticalement les cours du jour triés par heure de début.
-class _ScheduleGrid extends StatelessWidget {
-  const _ScheduleGrid({required this.schedule});
-  final List<WeeklyScheduleDto> schedule;
-
-  @override
-  Widget build(BuildContext context) {
-    final byDay = <SchoolDay, List<WeeklyScheduleDto>>{};
-    for (final s in schedule) {
-      final day = s.day;
-      if (day == null) continue;
-      byDay.putIfAbsent(day, () => []).add(s);
-    }
-    for (final day in byDay.keys) {
-      byDay[day]!.sort((a, b) => a.startTime.compareTo(b.startTime));
-    }
-
-    return Scrollbar(
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.all(16),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: SchoolDay.values.map((d) {
-            final list = byDay[d] ?? const <WeeklyScheduleDto>[];
-            return Container(
-              width: 184,
-              margin: const EdgeInsets.only(right: 12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Card(
-                    color: Theme.of(context).colorScheme.primaryContainer,
-                    margin: EdgeInsets.zero,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 10),
-                      child: Text(
-                        d.label,
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context)
-                            .textTheme
-                            .titleSmall
-                            ?.copyWith(
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onPrimaryContainer,
-                              fontWeight: FontWeight.w700,
-                            ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  if (list.isEmpty)
-                    Card(
-                      margin: EdgeInsets.zero,
-                      child: Padding(
-                        padding: const EdgeInsets.all(12),
-                        child: Text(
-                          'Libre',
-                          textAlign: TextAlign.center,
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ),
-                    )
-                  else
-                    ...list.map((s) => _SessionCard(session: s)),
-                ],
-              ),
-            );
-          }).toList(),
-        ),
-      ),
-    );
+/// Filtre une liste d'entrées selon le filtre de semaine.
+List<WeeklyScheduleDto> _applyWeekFilter(
+    List<WeeklyScheduleDto> list, _WeekFilter filter) {
+  switch (filter) {
+    case _WeekFilter.all:
+      return list;
+    case _WeekFilter.a:
+      return list.where((s) => s.matchesWeek(WeekType.a)).toList();
+    case _WeekFilter.b:
+      return list.where((s) => s.matchesWeek(WeekType.b)).toList();
   }
 }
 
-class _SessionCard extends StatelessWidget {
-  const _SessionCard({required this.session});
-  final WeeklyScheduleDto session;
+// ---------------------------------------------------------------------------
+// Vue ADMIN : mode Classe / Enseignant + édition
+// ---------------------------------------------------------------------------
+
+class _AdminScheduleView extends ConsumerWidget {
+  const _AdminScheduleView({
+    required this.mode,
+    required this.onModeChanged,
+    required this.classroomId,
+    required this.onClassroomChanged,
+    required this.teacherId,
+    required this.onTeacherChanged,
+    required this.weekFilter,
+    required this.currentWeek,
+    required this.onWeekFilterChanged,
+  });
+
+  final _AdminViewMode mode;
+  final ValueChanged<_AdminViewMode> onModeChanged;
+  final int? classroomId;
+  final ValueChanged<int?> onClassroomChanged;
+  final int? teacherId;
+  final ValueChanged<int?> onTeacherChanged;
+  final _WeekFilter weekFilter;
+  final WeekType? currentWeek;
+  final ValueChanged<_WeekFilter> onWeekFilterChanged;
 
   @override
-  Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () => _showDetails(context),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
+  Widget build(BuildContext context, WidgetRef ref) {
+    final classrooms = ref.watch(classroomsForScheduleProvider);
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              SegmentedButton<_AdminViewMode>(
+                segments: const [
+                  ButtonSegment(
+                      value: _AdminViewMode.classroom,
+                      icon: Icon(Icons.school_outlined),
+                      label: Text('Par classe')),
+                  ButtonSegment(
+                      value: _AdminViewMode.teacher,
+                      icon: Icon(Icons.person_outline),
+                      label: Text('Par enseignant')),
+                ],
+                selected: {mode},
+                onSelectionChanged: (s) => onModeChanged(s.first),
+              ),
+              const SizedBox(height: 12),
+              if (mode == _AdminViewMode.classroom)
+                _ClassroomDropdown(
+                  classroomsAsync: classrooms,
+                  selectedId: classroomId,
+                  onChanged: onClassroomChanged,
+                )
+              else
+                _TeacherDropdown(
+                  selectedId: teacherId,
+                  onChanged: onTeacherChanged,
+                ),
+              const SizedBox(height: 8),
               Row(
                 children: [
-                  Icon(Icons.schedule,
-                      size: 14, color: Theme.of(context).colorScheme.primary),
-                  const SizedBox(width: 4),
                   Expanded(
-                    child: Text(
-                      '${session.startTime} – ${session.endTime}',
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: Theme.of(context).colorScheme.primary,
-                            fontWeight: FontWeight.w600,
-                          ),
+                    child: _WeekFilterToggle(
+                      value: weekFilter,
+                      onChanged: onWeekFilterChanged,
+                      hasAlternatingWeeks: true,
                     ),
                   ),
-                  if (session.room != null)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: Theme.of(context)
-                            .colorScheme
-                            .secondaryContainer
-                            .withOpacity(0.6),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(
-                        session.room!,
-                        style: Theme.of(context).textTheme.labelSmall,
-                      ),
-                    ),
                 ],
               ),
-              const SizedBox(height: 6),
-              Text(
-                session.subjectName ?? '—',
-                style: Theme.of(context).textTheme.titleSmall,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-              if (session.teacherName != null) ...[
-                const SizedBox(height: 2),
-                Row(
+            ],
+          ),
+        ),
+        const SizedBox(height: 4),
+        Expanded(
+          child: mode == _AdminViewMode.classroom
+              ? _AdminClassroomGrid(
+                  classroomId: classroomId,
+                  weekFilter: weekFilter,
+                )
+              : _AdminTeacherGrid(
+                  teacherId: teacherId,
+                  weekFilter: weekFilter,
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ClassroomDropdown extends StatelessWidget {
+  const _ClassroomDropdown({
+    required this.classroomsAsync,
+    required this.selectedId,
+    required this.onChanged,
+  });
+
+  final AsyncValue<List<ClassroomDto>> classroomsAsync;
+  final int? selectedId;
+  final ValueChanged<int?> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return classroomsAsync.when(
+      data: (list) {
+        if (list.isEmpty) {
+          return const Text('Aucune classe disponible.');
+        }
+        var effective = selectedId;
+        if (effective == null || !list.any((c) => c.id == effective)) {
+          effective = list.first.id;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (effective != null) onChanged(effective);
+          });
+        }
+        return DropdownButtonFormField<int>(
+          value: effective,
+          isExpanded: true,
+          decoration: const InputDecoration(
+            labelText: 'Classe',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          items: list
+              .map((c) => DropdownMenuItem(
+                    value: c.id,
+                    child: Text(c.name, overflow: TextOverflow.ellipsis),
+                  ))
+              .toList(),
+          onChanged: (v) => onChanged(v),
+        );
+      },
+      loading: () => const Padding(
+        padding: EdgeInsets.symmetric(vertical: 16),
+        child: LinearProgressIndicator(),
+      ),
+      error: (e, _) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Text('Erreur : $e',
+            style:
+                TextStyle(color: Theme.of(context).colorScheme.error)),
+      ),
+    );
+  }
+}
+
+class _TeacherDropdown extends ConsumerWidget {
+  const _TeacherDropdown({
+    required this.selectedId,
+    required this.onChanged,
+  });
+
+  final int? selectedId;
+  final ValueChanged<int?> onChanged;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Liste des enseignants : GET /users (permission USER_READ).
+    final usersAsync = ref.watch(usersListProvider(''));
+    return usersAsync.when(
+      data: (users) {
+        final teachers = users
+            .where((u) =>
+                u.isActive &&
+                ((u.role ?? '').toLowerCase().contains('teacher') ||
+                    (u.role ?? '').toLowerCase().contains('enseignant')))
+            .toList()
+          ..sort((a, b) => a.fullName.compareTo(b.fullName));
+        if (teachers.isEmpty) {
+          return const Text(
+              'Aucun enseignant trouvé (permission USER_READ requise).');
+        }
+        var effective = selectedId;
+        if (effective == null || !teachers.any((t) => t.id == effective)) {
+          effective = teachers.first.id;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (effective != null) onChanged(effective);
+          });
+        }
+        return DropdownButtonFormField<int>(
+          value: effective,
+          isExpanded: true,
+          decoration: const InputDecoration(
+            labelText: 'Enseignant',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          items: teachers
+              .map((t) => DropdownMenuItem(
+                    value: t.id,
+                    child: Text(
+                      t.fullName.isEmpty ? t.username : t.fullName,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ))
+              .toList(),
+          onChanged: (v) => onChanged(v),
+        );
+      },
+      loading: () => const Padding(
+        padding: EdgeInsets.symmetric(vertical: 16),
+        child: LinearProgressIndicator(),
+      ),
+      error: (e, _) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Text('Erreur : $e',
+            style:
+                TextStyle(color: Theme.of(context).colorScheme.error)),
+      ),
+    );
+  }
+}
+
+/// Grille EDT d'une classe (mode admin, éditable).
+class _AdminClassroomGrid extends ConsumerWidget {
+  const _AdminClassroomGrid({
+    required this.classroomId,
+    required this.weekFilter,
+  });
+
+  final int? classroomId;
+  final _WeekFilter weekFilter;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final canEdit = ref.watch(canEditScheduleProvider);
+    if (classroomId == null) {
+      return const EmptyState(
+        title: 'Sélectionnez une classe',
+        message: 'Choisissez une classe pour afficher son emploi du temps.',
+        icon: Icons.school_outlined,
+      );
+    }
+    final async = ref.watch(classroomScheduleProvider(classroomId!));
+    return async.when(
+      data: (list) {
+        final filtered = _applyWeekFilter(list, weekFilter);
+        return ScheduleGridScreen(
+          entries: filtered,
+          mode: ScheduleDisplayMode.classroom,
+          classroomId: classroomId,
+          canEdit: canEdit,
+          showAddButton: canEdit,
+        );
+      },
+      loading: () =>
+          const AppLoading(label: 'Chargement de l\'emploi du temps…'),
+      error: (e, _) => AppErrorWidget(
+        message: e.toString(),
+        onRetry: () => ref.invalidate(classroomScheduleProvider(classroomId!)),
+      ),
+    );
+  }
+}
+
+/// Grille EDT d'un enseignant (mode admin, éditable).
+class _AdminTeacherGrid extends ConsumerWidget {
+  const _AdminTeacherGrid({
+    required this.teacherId,
+    required this.weekFilter,
+  });
+
+  final int? teacherId;
+  final _WeekFilter weekFilter;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (teacherId == null) {
+      return const EmptyState(
+        title: 'Sélectionnez un enseignant',
+        message:
+            'Choisissez un enseignant pour afficher son emploi du temps.',
+        icon: Icons.person_outline,
+      );
+    }
+    final async = ref.watch(teacherScheduleByIdProvider(teacherId!));
+    return async.when(
+      data: (list) {
+        final filtered = _applyWeekFilter(list, weekFilter);
+        return ScheduleGridScreen(
+          entries: filtered,
+          mode: ScheduleDisplayMode.teacher,
+          canEdit: false, // L'édition se fait par classe (besoin des matières).
+          showAddButton: false,
+          emptyMessage: 'Aucun cours planifié pour cet enseignant.',
+        );
+      },
+      loading: () =>
+          const AppLoading(label: 'Chargement de l\'emploi du temps…'),
+      error: (e, _) => AppErrorWidget(
+        message: e.toString(),
+        onRetry: () =>
+            ref.invalidate(teacherScheduleByIdProvider(teacherId!)),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Vue ENSEIGNANT : Mes cours + Mes classes
+// ---------------------------------------------------------------------------
+
+class _TeacherScheduleView extends ConsumerWidget {
+  const _TeacherScheduleView({
+    required this.scope,
+    required this.selectedClassroomId,
+    required this.onClassroomChanged,
+    required this.weekFilter,
+    required this.currentWeek,
+    required this.onWeekFilterChanged,
+  });
+
+  final TeacherScope scope;
+  final int? selectedClassroomId;
+  final ValueChanged<int?> onClassroomChanged;
+  final _WeekFilter weekFilter;
+  final WeekType? currentWeek;
+  final ValueChanged<_WeekFilter> onWeekFilterChanged;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hasAlternating = currentWeek != null ||
+        scope.mySchedule.any((s) => !s.isAllWeeks);
+
+    return DefaultTabController(
+      length: 2,
+      child: Column(
+        children: [
+          const TabBar(
+            tabs: [
+              Tab(text: 'Mes cours'),
+              Tab(text: 'Mes classes'),
+            ],
+          ),
+          Expanded(
+            child: TabBarView(
+              children: [
+                // --- Onglet « Mes cours » : tous ses cours, toutes classes ---
+                ListView(
+                  padding: const EdgeInsets.all(16),
                   children: [
-                    Icon(Icons.person_outline,
-                        size: 12,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant),
-                    const SizedBox(width: 4),
-                    Expanded(
-                      child: Text(
-                        session.teacherName!,
-                        style: Theme.of(context).textTheme.bodySmall,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _WeekFilterToggle(
+                            value: weekFilter,
+                            onChanged: onWeekFilterChanged,
+                            hasAlternatingWeeks: hasAlternating,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    _MyCoursesSection(
+                      scope: scope,
+                      weekFilter: weekFilter,
+                      currentWeek: currentWeek,
                     ),
                   ],
                 ),
+                // --- Onglet « Mes classes » : EDT complet par classe ---
+                _TeacherClassroomsTab(
+                  scope: scope,
+                  selectedClassroomId: selectedClassroomId,
+                  onClassroomChanged: onClassroomChanged,
+                  weekFilter: weekFilter,
+                ),
               ],
-            ],
+            ),
           ),
-        ),
-      ),
-    );
-  }
-
-  void _showDetails(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(session.subjectName ?? 'Cours',
-                  style: Theme.of(ctx).textTheme.titleLarge),
-              const SizedBox(height: 12),
-              _DetailRow(
-                icon: Icons.schedule,
-                label: 'Horaire',
-                value: '${session.startTime} – ${session.endTime}',
-              ),
-              _DetailRow(
-                icon: Icons.calendar_today,
-                label: 'Jour',
-                value: session.day?.label ?? '—',
-              ),
-              if (session.teacherName != null)
-                _DetailRow(
-                  icon: Icons.person_outline,
-                  label: 'Enseignant',
-                  value: session.teacherName!,
-                ),
-              if (session.room != null)
-                _DetailRow(
-                  icon: Icons.place_outlined,
-                  label: 'Salle',
-                  value: session.room!,
-                ),
-              _DetailRow(
-                icon: Icons.repeat,
-                label: 'Semaine',
-                value: session.weekType == WeekType.b ? 'B' : 'A',
-              ),
-            ],
-          ),
-        ),
+        ],
       ),
     );
   }
 }
 
-class _DetailRow extends StatelessWidget {
-  const _DetailRow({
-    required this.icon,
-    required this.label,
-    required this.value,
+class _MyCoursesSection extends StatelessWidget {
+  const _MyCoursesSection({
+    required this.scope,
+    required this.weekFilter,
+    required this.currentWeek,
   });
-  final IconData icon;
-  final String label;
-  final String value;
+
+  final TeacherScope scope;
+  final _WeekFilter weekFilter;
+  final WeekType? currentWeek;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        children: [
-          Icon(icon, size: 18, color: Theme.of(context).colorScheme.primary),
-          const SizedBox(width: 12),
-          Text(label,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant)),
-          const Spacer(),
-          Text(value,
-              style: Theme.of(context)
-                  .textTheme
-                  .bodyMedium
-                  ?.copyWith(fontWeight: FontWeight.w600)),
-        ],
+    if (scope.mySchedule.isEmpty) {
+      return const EmptyState(
+        title: 'Aucun cours planifié',
+        message:
+            'Vous n\'avez aucun cours dans l\'emploi du temps. Contactez '
+            'l\'administration de l\'établissement.',
+        icon: Icons.event_busy,
+      );
+    }
+    final filtered = _applyWeekFilter(scope.mySchedule, weekFilter);
+    if (filtered.isEmpty) {
+      return EmptyState(
+        title: 'Aucun cours cette semaine',
+        message:
+            'Aucun cours pour la semaine ${weekFilter == _WeekFilter.a ? 'A' : 'B'}.',
+        icon: Icons.event_busy,
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ScheduleGridView(
+          schedule: filtered,
+          mode: ScheduleDisplayMode.teacher,
+          onEntryTap: (e) => showScheduleEntryDetails(
+            context,
+            e,
+            mode: ScheduleDisplayMode.teacher,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _TeacherClassroomsTab extends StatelessWidget {
+  const _TeacherClassroomsTab({
+    required this.scope,
+    required this.selectedClassroomId,
+    required this.onClassroomChanged,
+    required this.weekFilter,
+  });
+
+  final TeacherScope scope;
+  final int? selectedClassroomId;
+  final ValueChanged<int?> onClassroomChanged;
+  final _WeekFilter weekFilter;
+
+  @override
+  Widget build(BuildContext context) {
+    final classrooms = scope.myClassrooms;
+    if (classrooms.isEmpty) {
+      return const EmptyState(
+        title: 'Aucune classe liée',
+        message:
+            'Vous n\'êtes ni titulaire ni enseignant dans une classe.',
+        icon: Icons.school_outlined,
+      );
+    }
+    var effective = selectedClassroomId;
+    if (effective == null || !classrooms.any((c) => c.id == effective)) {
+      effective = classrooms.first.id;
+    }
+    final selected =
+        classrooms.firstWhereOrNull((c) => c.id == effective) ??
+            classrooms.first;
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+          child: Column(
+            children: [
+              DropdownButtonFormField<int>(
+                value: effective,
+                isExpanded: true,
+                decoration: InputDecoration(
+                  labelText: 'Classe',
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                  suffixIcon: scope.headClassrooms.any((c) => c.id == effective)
+                      ? const Tooltip(
+                          message: 'Vous êtes titulaire de cette classe',
+                          child: Icon(Icons.star, size: 18),
+                        )
+                      : null,
+                ),
+                items: classrooms
+                    .map((c) => DropdownMenuItem(
+                          value: c.id,
+                          child: Text(
+                            c.name +
+                                (scope.headClassrooms.any((h) => h.id == c.id)
+                                    ? '  (titulaire)'
+                                    : ''),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ))
+                    .toList(),
+                onChanged: (v) => onClassroomChanged(v),
+              ),
+              const SizedBox(height: 8),
+              _ClassroomEdtReader(
+                classroomId: selected.id,
+                weekFilter: weekFilter,
+                compact: true,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Vue par classe lecture seule (autres profils)
+// ---------------------------------------------------------------------------
+
+class _ReadOnlyClassroomView extends StatelessWidget {
+  const _ReadOnlyClassroomView({
+    required this.weekFilter,
+    required this.currentWeek,
+    required this.onWeekFilterChanged,
+  });
+
+  final _WeekFilter weekFilter;
+  final WeekType? currentWeek;
+  final ValueChanged<_WeekFilter> onWeekFilterChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Expanded(
+          child: _ClassroomPickeredReader(
+            weekFilter: weekFilter,
+            onWeekFilterChanged: onWeekFilterChanged,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ClassroomPickeredReader extends ConsumerStatefulWidget {
+  const _ClassroomPickeredReader({
+    required this.weekFilter,
+    required this.onWeekFilterChanged,
+  });
+
+  final _WeekFilter weekFilter;
+  final ValueChanged<_WeekFilter> onWeekFilterChanged;
+
+  @override
+  ConsumerState<_ClassroomPickeredReader> createState() =>
+      _ClassroomPickeredReaderState();
+}
+
+class _ClassroomPickeredReaderState
+    extends ConsumerState<_ClassroomPickeredReader> {
+  int? _classroomId;
+
+  @override
+  Widget build(BuildContext context) {
+    final classrooms = ref.watch(classroomsForScheduleProvider);
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+          child: _ClassroomDropdown(
+            classroomsAsync: classrooms,
+            selectedId: _classroomId,
+            onChanged: (id) => setState(() => _classroomId = id),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Expanded(
+          child: _ClassroomEdtReader(
+            classroomId: _classroomId,
+            weekFilter: widget.weekFilter,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Lecteur d'EDT d'une classe (lecture seule — enseignants et autres profils).
+class _ClassroomEdtReader extends ConsumerWidget {
+  const _ClassroomEdtReader({
+    required this.classroomId,
+    required this.weekFilter,
+    this.compact = false,
+  });
+
+  final int? classroomId;
+  final _WeekFilter weekFilter;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (classroomId == null) {
+      return const EmptyState(
+        title: 'Sélectionnez une classe',
+        message: 'Choisissez une classe pour afficher son emploi du temps.',
+        icon: Icons.school_outlined,
+      );
+    }
+    final async = ref.watch(classroomScheduleProvider(classroomId!));
+    return async.when(
+      data: (list) {
+        final filtered = _applyWeekFilter(list, weekFilter);
+        if (filtered.isEmpty) {
+          return const EmptyState(
+            title: 'Aucun cours programmé',
+            message: 'L\'emploi du temps de cette classe est vide.',
+            icon: Icons.event_busy,
+          );
+        }
+        return ScheduleGridView(
+          schedule: filtered,
+          mode: ScheduleDisplayMode.classroom,
+          compact: compact,
+          onEntryTap: (e) =>
+              showScheduleEntryDetails(context, e),
+        );
+      },
+      loading: () =>
+          const AppLoading(label: 'Chargement de l\'emploi du temps…'),
+      error: (e, _) => AppErrorWidget(
+        message: e.toString(),
+        onRetry: () => ref.invalidate(classroomScheduleProvider(classroomId!)),
       ),
     );
   }

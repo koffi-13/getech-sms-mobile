@@ -187,7 +187,8 @@ class _ClassroomTile extends StatelessWidget {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
-                        if (classroom.teacherName != null) ...[
+                        // Titulaire (jamais null : chaîne vide si inconnu).
+                        if (classroom.teacherName.isNotEmpty) ...[
                           const SizedBox(height: 2),
                           Text(
                             'Titulaire : ${classroom.teacherName}',

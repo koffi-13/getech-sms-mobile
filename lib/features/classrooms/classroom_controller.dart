@@ -1,14 +1,20 @@
 /// Contrôleur du module Classes : liste et détail (offline-first).
+///
+/// La liste suit le pattern en 3 temps :
+/// 1. lecture du cache Drift immédiate (affichage instantané) ;
+/// 2. `GET /classrooms` (toutes les pages) puis persistance **complète** —
+///    y compris les champs dénormalisés (titulaire, niveau, cycle, série,
+///    effectif) dans la table `classrooms` (schéma v2) ;
+/// 3. re-lecture locale : le titulaire et l'effectif survivent désormais au
+///    passage par le cache, y compris hors-ligne.
 library;
 
 import 'package:drift/drift.dart' as d;
-import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart' as log_pkg;
 
 import '../../core/database/database.dart';
 import '../../core/network/api_endpoints.dart';
-import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
@@ -58,11 +64,13 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
         return;
       }
 
-      // 2. Tenter de rafraîchir depuis l'API
+      // 2. Tenter de rafraîchir depuis l'API (toutes les pages)
       final apiClassrooms = await _fetchFromApi();
-      await _saveToLocal(apiClassrooms);
-      
-      // 3. Re-charger depuis le local
+      if (apiClassrooms.isNotEmpty) {
+        await _saveToLocal(apiClassrooms);
+      }
+
+      // 3. Re-charger depuis le local (avec les champs dénormalisés persistés)
       final updatedLocal = await _fetchFromLocal();
       state = AsyncValue.data(updatedLocal);
     } catch (e, st) {
@@ -78,54 +86,108 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
     final canReach = _ref.read(connectionProvider).canReachServer;
     if (canReach) {
       final dio = _ref.read(dioProvider);
-      final response = await dio.get('${ApiEndpoints.classrooms}/$id');
-      return ClassroomDto.fromJson(response.data);
+      final response = await dio.get(
+        buildUrl(_ref.read(connectionProvider).serverUrl!,
+            ApiEndpoints.classroom(id)),
+      );
+      return ClassroomDto.fromJson(
+          Map<String, dynamic>.from(response.data as Map));
     } else {
       final classrooms = state.value ?? await _fetchFromLocal();
-      return classrooms.firstWhere((c) => c.id == id);
+      return classrooms.firstWhere(
+        (c) => c.id == id,
+        orElse: () => throw StateError('Classe #$id introuvable en local.'),
+      );
     }
   }
 
+  /// `GET /classrooms` avec pagination complète (per_page=200, toutes pages).
   Future<List<ClassroomDto>> _fetchFromApi() async {
     final dio = _ref.read(dioProvider);
-    final response = await dio.get(ApiEndpoints.classrooms);
-    final data = response.data;
-    if (data is List) {
-      return data.map((j) => ClassroomDto.fromJson(j)).toList();
-    } else if (data is Map && data['items'] is List) {
-      return (data['items'] as List)
-          .map((j) => ClassroomDto.fromJson(j))
-          .toList();
+    final serverUrl = _ref.read(connectionProvider).serverUrl!;
+    final result = <ClassroomDto>[];
+    var page = 1;
+    const perPage = 200;
+    // Garde-fou : 20 pages maximum (4000 classes).
+    while (page <= 20) {
+      final response = await dio.get(
+        buildUrl(serverUrl, ApiEndpoints.classrooms),
+        queryParameters: {'page': page, 'per_page': perPage},
+      );
+      final data = response.data;
+      List<ClassroomDto> chunk;
+      if (data is List) {
+        chunk = data
+            .whereType<Map>()
+            .map((j) => ClassroomDto.fromJson(Map<String, dynamic>.from(j)))
+            .toList();
+      } else if (data is Map && data['items'] is List) {
+        chunk = (data['items'] as List)
+            .whereType<Map>()
+            .map((j) => ClassroomDto.fromJson(Map<String, dynamic>.from(j)))
+            .toList();
+      } else {
+        chunk = const [];
+      }
+      result.addAll(chunk);
+      if (chunk.length < perPage) break; // dernière page atteinte
+      page++;
     }
-    return const [];
+    return result;
   }
 
+  /// Reconstruit les DTO depuis le cache Drift, en combinant l'effectif servi
+  /// (current_students_count persisté) et le comptage local des assignations :
+  /// le serveur reste la source de vérité, le comptage local rattrape le cas
+  /// où le serveur renverrait 0 alors que des élèves sont synchronisés.
   Future<List<ClassroomDto>> _fetchFromLocal() async {
     final db = _ref.read(databaseProvider);
 
-    final classrooms = await db.select(db.classrooms).get();
+    final classrooms = await (db.select(db.classrooms)
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
 
-    final List<ClassroomDto> dtos = [];
+    // Comptage local groupé en une seule requête (pas de N+1).
+    final countExpr = db.studentClassAssignments.id.count();
+    final countRows = await (db.selectOnly(db.studentClassAssignments)
+          ..addColumns([db.studentClassAssignments.classroomId, countExpr])
+          ..where(db.studentClassAssignments.isDeleted.equals(false))
+          ..groupBy([db.studentClassAssignments.classroomId]))
+        .get();
+    final localCounts = <int, int>{};
+    for (final row in countRows) {
+      final cid = row.read(db.studentClassAssignments.classroomId);
+      if (cid == null) continue;
+      localCounts[cid] = row.read(countExpr) ?? 0;
+    }
+
+    final dtos = <ClassroomDto>[];
     for (final c in classrooms) {
-      final countExpr = db.studentClassAssignments.id.count();
-      final studentCountLocal = await (db.selectOnly(db.studentClassAssignments)
-        ..addColumns([countExpr])
-        ..where(db.studentClassAssignments.classroomId.equals(c.id)))
-        .map((r) => r.read(countExpr))
-        .getSingle();
-
+      final localCount = localCounts[c.id] ?? 0;
+      final serverCount = c.currentStudentsCount ?? 0;
+      // Effectif effectif : valeur serveur si renseignée (> 0), sinon le
+      // comptage local des assignations synchronisées.
+      final effectiveCount = serverCount > 0 ? serverCount : localCount;
       dtos.add(ClassroomDto(
         id: c.id,
         name: c.name,
-        establishmentId: 0,
+        establishmentId: c.establishmentId,
         maxStudents: c.capacity,
-        isActive: true,
-        currentStudentsCount: studentCountLocal ?? 0,
+        isActive: c.isActive,
+        headTeacherId: c.teacherId,
+        headTeacherName: c.headTeacherName,
+        levelName: c.levelName,
+        cycleName: c.cycleName,
+        cycleId: c.cycleId,
+        seriesName: c.seriesName,
+        currentStudentsCount: effectiveCount,
       ));
     }
+    dtos.sort((a, b) => a.name.compareTo(b.name));
     return dtos;
   }
 
+  /// Persiste l'intégralité des champs de `ClassroomResponse` (schéma v2).
   Future<void> _saveToLocal(List<ClassroomDto> list) async {
     final db = _ref.read(databaseProvider);
     await db.batch((batch) {
@@ -135,7 +197,18 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
           ClassroomsCompanion.insert(
             id: d.Value(dto.id),
             name: dto.name,
+            code: const d.Value(null),
             capacity: d.Value(dto.maxStudents ?? 0),
+            teacherId: d.Value(dto.headTeacherId),
+            establishmentId: d.Value(dto.establishmentId),
+            headTeacherName: d.Value(dto.headTeacherName),
+            levelName: d.Value(dto.levelName),
+            cycleName: d.Value(dto.cycleName),
+            cycleId: d.Value(dto.cycleId),
+            seriesName: d.Value(dto.seriesName),
+            currentStudentsCount: d.Value(dto.currentStudentsCount),
+            isActive: d.Value(dto.isActive),
+            isDirty: const d.Value(false),
           ),
           mode: d.InsertMode.insertOrReplace,
         );

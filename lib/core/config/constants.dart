@@ -4,7 +4,25 @@
 /// documenté dans PROMPT.md. Elles évitent les chaînes magiques dans le code.
 library;
 
-import 'package:flutter/material.dart';
+/// Codes de rôles RBAC (RoleBrief.code côté serveur — MAJUSCULES).
+///
+/// Le login (`POST /auth/login`) et `/auth/me` renvoient `roles: [{id, code, name}]`.
+/// Ces codes sont stockés dans `AuthState.roles` et exploités pour différencier
+/// l'Accueil, les Notes et l'Emploi du temps selon le profil.
+class RoleCodes {
+  RoleCodes._();
+
+  static const String admin = 'ADMIN';
+  static const String headmaster = 'HEADMASTER';
+  static const String teacher = 'TEACHER';
+  static const String secretary = 'SECRETARY';
+  static const String accountant = 'ACCOUNTANT';
+  static const String parent = 'PARENT';
+
+  /// Rôles disposant des droits élargis (équivalent `_user_is_admin_or_headmaster`
+  /// du desktop : accès à toutes les classes/matières, modification des notes…).
+  static const List<String> adminLike = [admin, headmaster];
+}
 
 /// Codes de permission RBAC (côté serveur).
 ///
@@ -85,6 +103,17 @@ enum StudentStatus {
     }
     return null;
   }
+
+  /// Résolution par label (le serveur ne renvoie que `student_status_label`
+  /// dans StudentResponse — ex. « Nouveau », « Redoublant »).
+  static StudentStatus? fromLabel(String? label) {
+    if (label == null) return null;
+    final l = label.trim().toLowerCase();
+    for (final s in values) {
+      if (s.label.toLowerCase() == l || s.code.toLowerCase() == l) return s;
+    }
+    return null;
+  }
 }
 
 /// Type d'inscription d'un élève (référentiel).
@@ -102,6 +131,17 @@ enum InscriptionType {
     if (code == null) return null;
     for (final s in values) {
       if (s.code == code) return s;
+    }
+    return null;
+  }
+
+  /// Résolution par label (le serveur ne renvoie que `inscription_type_label`
+  /// dans StudentResponse — ex. « Nouveau », « Ancien », « Exclu », « Abandon »).
+  static InscriptionType? fromLabel(String? label) {
+    if (label == null) return null;
+    final l = label.trim().toLowerCase();
+    for (final s in values) {
+      if (s.label.toLowerCase() == l || s.code.toLowerCase() == l) return s;
     }
     return null;
   }
@@ -127,6 +167,7 @@ enum CourseSessionState {
 }
 
 /// Type de semaine (emploi du temps alterné A/B).
+/// `null` (weekTypeRaw absent) = cours toutes les semaines.
 enum WeekType { a, b }
 
 /// Jours de la semaine scolaire (Lundi=1 .. Samedi=6, pas de dimanche).

@@ -2,7 +2,6 @@
 /// schémas Pydantic du desktop (schemas.py).
 library;
 
-import '../../core/config/constants.dart';
 import '../../core/utils/formatters.dart';
 
 /// Utilitaire de conversion sécurisée en String.
@@ -18,8 +17,8 @@ String? _safeString(dynamic v) {
 /// Classe (ClassroomResponse côté serveur).
 ///
 /// Champs serveur : {id, name, establishment_id, max_students, is_active,
-/// head_teacher_id, head_teacher_name, level_name, cycle_name,
-/// current_students_count, series_name}.
+/// head_teacher_id, head_teacher_name, level_name, cycle_name, cycle_id
+/// [Fix-PERIOD-CYCLE], current_students_count, series_name}.
 class ClassroomDto {
   final int id;
   final String name;
@@ -30,7 +29,6 @@ class ClassroomDto {
   final String? headTeacherName;
   final String? levelName;
   final String? cycleName;
-  // [Fix-PERIOD-CYCLE] cycle_id pour filtrer les périodes par cycle
   final int? cycleId;
   final int? currentStudentsCount;
   final String? seriesName;
@@ -60,8 +58,15 @@ class ClassroomDto {
   double get occupancyRate =>
       capacity == 0 ? 0 : (studentCount / capacity).clamp(0, 1);
 
-  /// Titulaire de classe.
+  /// Titulaire de classe (jamais null — chaîne vide si inconnu).
   String get teacherName => headTeacherName ?? '';
+
+  /// Libellé synthétique niveau · cycle · série.
+  String get levelLabel => [
+        levelName,
+        cycleName,
+        seriesName,
+      ].whereType<String>().where((s) => s.isNotEmpty).join(' · ');
 
   factory ClassroomDto.fromJson(Map<String, dynamic> j) => ClassroomDto(
         id: (j['id'] as num).toInt(),
@@ -88,6 +93,7 @@ class ClassroomDto {
         'head_teacher_name': headTeacherName,
         'level_name': levelName,
         'cycle_name': cycleName,
+        'cycle_id': cycleId,
         'current_students_count': currentStudentsCount,
         'series_name': seriesName,
       };
@@ -275,19 +281,22 @@ class SchoolYearDto {
 /// Période (PeriodResponse côté serveur).
 ///
 /// ⚠️ `start_date`/`end_date` sont des **strings** (pas datetime) côté serveur.
-/// Champs serveur : {id, name, start_date: str, end_date: str, is_active}.
+/// Champs serveur : {id, name, start_date: str, end_date: str, is_active,
+/// cycle_id, cycle_name [Fix-PERIOD-CYCLE], school_year_id}.
+///
+/// Les périodes sont rattachées à un **cycle** (ex. collège vs lycée) : le
+/// mobile filtre `period.cycle_id == classroom.cycle_id` pour n'afficher que
+/// les périodes du cycle de la classe sélectionnée.
 class PeriodDto {
   final int id;
   final String name;
   final String? startDate;
   final String? endDate;
   final bool isActive;
-  // Champs de compatibilité (non dans la réponse serveur de base)
-  final int? schoolYearId;
-  final double weight;
-  // [Fix-PERIOD-CYCLE] cycle_id + cycle_name pour filtrer par cycle
   final int? cycleId;
   final String? cycleName;
+  final int? schoolYearId;
+  final double weight;
 
   const PeriodDto({
     required this.id,
@@ -295,11 +304,24 @@ class PeriodDto {
     this.startDate,
     this.endDate,
     this.isActive = false,
-    this.schoolYearId,
-    this.weight = 1.0,
     this.cycleId,
     this.cycleName,
+    this.schoolYearId,
+    this.weight = 1.0,
   });
+
+  /// La période est-elle active aujourd'hui (start ≤ today ≤ end) ?
+  /// Miroir de `GradeService.get_active_period` du desktop.
+  bool get isCurrent {
+    final s = DateTime.tryParse(startDate ?? '');
+    final e = DateTime.tryParse(endDate ?? '');
+    if (s == null || e == null) return false;
+    final today = DateTime.now();
+    final start = DateTime(s.year, s.month, s.day);
+    final end = DateTime(e.year, e.month, e.day);
+    final now = DateTime(today.year, today.month, today.day);
+    return !now.isBefore(start) && !now.isAfter(end);
+  }
 
   factory PeriodDto.fromJson(Map<String, dynamic> j) => PeriodDto(
         id: (j['id'] as num).toInt(),
@@ -307,10 +329,10 @@ class PeriodDto {
         startDate: _safeString(j['start_date']),
         endDate: _safeString(j['end_date']),
         isActive: (j['is_active'] as bool?) ?? false,
-        schoolYearId: (j['school_year_id'] as num?)?.toInt(),
-        weight: (j['weight'] as num?)?.toDouble() ?? 1.0,
         cycleId: (j['cycle_id'] as num?)?.toInt(),
         cycleName: _safeString(j['cycle_name']),
+        schoolYearId: (j['school_year_id'] as num?)?.toInt(),
+        weight: (j['weight'] as num?)?.toDouble() ?? 1.0,
       );
 
   Map<String, dynamic> toJson() => {
@@ -319,6 +341,8 @@ class PeriodDto {
         'start_date': startDate,
         'end_date': endDate,
         'is_active': isActive,
+        'cycle_id': cycleId,
+        'cycle_name': cycleName,
         'school_year_id': schoolYearId,
         'weight': weight,
       };

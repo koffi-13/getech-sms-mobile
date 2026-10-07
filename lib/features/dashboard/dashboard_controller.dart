@@ -1,27 +1,31 @@
-/// Contrôleur du module Tableau de bord : KPIs (effectifs, paiements, solde dû),
-/// paiements récents et élèves récemment inscrits.
+/// Contrôleur du module Tableau de bord.
 ///
-/// Expose [dashboardStatsProvider] qui appelle `GET /dashboard/stats` via le
-/// [dioProvider] et désérialise la réponse en [DashboardStatsDto]. Le provider
-/// ne déclenche l'appel que lorsque le serveur est joignable
-/// ([ConnectionState.canReachServer] ; sinon il lève une erreur `offline`
-/// afin que l'UI puisse afficher un message « Mode hors-ligne ».
-///
-/// Aligné sur `DashboardStats` du desktop (schemas.py) :
+/// **Accueil standard (admin/comptable/…)** : [dashboardStatsProvider] appelle
+/// `GET /dashboard/stats` avec cache SharedPreferences, aligné sur
+/// `DashboardStats` du desktop (schemas.py) :
 /// {total_students, total_classrooms, total_teachers, total_payments (count),
 /// total_balance_due, total_users, recent_payments[], recent_students[]}.
-/// ⚠️ Les champs `studentsBySex`, `classOccupancy`, `absenteeAlerts`,
-/// `overduePayments`, `paymentsToday` ont été retirés du contrat serveur et ne
-/// sont plus exposés par [DashboardStatsDto].
+///
+/// **Accueil enseignant** : [teacherDashboardProvider] remplace complètement
+/// l'appel à `/dashboard/stats` — cet endpoint n'est PAS scopé par rôle côté
+/// serveur et exposerait des données financières. Les statistiques de
+/// l'enseignant sont calculées côté mobile à partir de son périmètre
+/// ([TeacherScope]) : ses classes (titulariat + enseignement), ses effectifs,
+/// ses matières et ses cours — sans aucune donnée financière ni globale aux
+/// autres utilisateurs.
 library;
 
 import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/auth/teacher_scope.dart';
+import '../../core/config/constants.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
+import '../../shared/models/attendance_dto.dart';
+import '../../shared/models/classroom_dto.dart';
 import '../connections/connection_state.dart';
 import '../../shared/models/sync_dto.dart';
 
@@ -68,15 +72,15 @@ final dashboardStatsProvider =
     if (data is! Map) {
       throw const ApiException('Réponse inattendue du serveur (dashboard).');
     }
-    
+
     final stats = DashboardStatsDto.fromJson(Map<String, dynamic>.from(data));
     // Mettre à jour le cache
     await prefs.setString(_keyDashboardCache, jsonEncode(data));
-    
+
     return stats;
   } catch (e) {
     if (cachedStats != null) return cachedStats;
-    
+
     if (e is OfflineDashboardException) rethrow;
     if (e is ApiException) rethrow;
     throw ApiException(
@@ -84,4 +88,59 @@ final dashboardStatsProvider =
       details: e.toString(),
     );
   }
+});
+
+// ===========================================================================
+// Accueil ENSEIGNANT — statistiques de ses classes uniquement
+// ===========================================================================
+
+/// Données du tableau de bord enseignant (aucune statistique financière ni
+/// globale aux autres utilisateurs).
+class TeacherDashboardData {
+  /// Classes où l'enseignant enseigne ou dont il est titulaire.
+  final List<ClassroomDto> classrooms;
+
+  /// Cours planifiés de l'enseignant (toutes classes).
+  final List<WeeklyScheduleDto> schedule;
+
+  /// Semaine alternée courante (null si non configurée).
+  final WeekType? currentWeek;
+
+  /// Scope complet (pour les helpers de filtrage des cours du jour).
+  final TeacherScope scope;
+
+  const TeacherDashboardData({
+    required this.classrooms,
+    required this.schedule,
+    required this.scope,
+    this.currentWeek,
+  });
+
+  int get classCount => classrooms.length;
+
+  /// Effectif cumulé des classes de l'enseignant.
+  int get studentCount =>
+      classrooms.fold(0, (sum, c) => sum + c.studentCount);
+
+  /// Matières distinctes enseignées.
+  int get subjectCount =>
+      schedule.map((s) => s.subjectId).whereType<int>().toSet().length;
+
+  /// Cours du jour (filtrés par la semaine alternée courante).
+  List<WeeklyScheduleDto> get todayCourses =>
+      scope.coursesForDate(DateTime.now(), currentWeek: currentWeek);
+}
+
+/// Accueil enseignant : dérive du périmètre enseignant ([teacherScopeProvider])
+/// et de la semaine alternée courante — aucun appel réseau supplémentaire.
+final teacherDashboardProvider =
+    FutureProvider.autoDispose<TeacherDashboardData>((ref) async {
+  final scope = await ref.watch(teacherScopeProvider.future);
+  final currentWeek = await ref.watch(currentWeekTypeProvider.future);
+  return TeacherDashboardData(
+    classrooms: scope.myClassrooms,
+    schedule: scope.mySchedule,
+    scope: scope,
+    currentWeek: currentWeek,
+  );
 });

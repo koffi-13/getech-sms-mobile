@@ -292,9 +292,9 @@ class RankingRowDto {
     this.annualAverage,
   });
 
-  /// Nom complet = prenoms + nom.
+  /// Nom complet au format « NOM Prénoms » (convention desktop).
   String get studentName =>
-      [prenoms, nom].where((s) => s.isNotEmpty).join(' ');
+      [nom, prenoms].where((s) => s.isNotEmpty).join(' ');
 
   /// Progression vs dernière période précédente.
   double get progression {
@@ -410,9 +410,9 @@ class BulletinDto {
     this.appreciation,
   });
 
-  /// Nom complet = prenoms + nom.
+  /// Nom complet au format « NOM Prénoms » (convention desktop).
   String get studentName =>
-      [prenoms, nom].where((s) => s.isNotEmpty).join(' ');
+      [nom, prenoms].where((s) => s.isNotEmpty).join(' ');
 
   /// Alias de compatibilité.
   double get generalAverage => overallAverage ?? 0;

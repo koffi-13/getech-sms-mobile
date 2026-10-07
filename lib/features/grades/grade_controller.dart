@@ -16,15 +16,18 @@
 /// la surface de codegen.
 library;
 
+import 'package:collection/collection.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/auth/auth_state.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
 import '../../shared/models/grade_dto.dart';
+import 'grade_utils.dart';
 
 /// Mode de classement (PERIOD = moyenne de la période courante,
 /// SUBJECT = moyenne d'une matière spécifique).
@@ -203,15 +206,72 @@ final gradeControllerProvider =
 // Providers de lecture (family FutureProvider.autoDispose).
 // ===========================================================================
 
-/// Liste des classes pour le sélecteur : `GET /classrooms`.
+/// Classes accessibles pour le module Notes.
+///
+/// - **Enseignant** : union des classes où il enseigne
+///   (`GET /classrooms?teacher_only=true`, scope serveur — miroir de
+///   `_teacher_subject_classroom_ids` du desktop) et des classes dont il est
+///   titulaire (`head_teacher_id == me`, miroir de
+///   `_teacher_head_classroom_ids` + accès bulletin étendu au titulaire).
+/// - **Admin / headmaster** : toutes les classes.
 final classroomsForGradesProvider =
     FutureProvider.autoDispose<List<ClassroomDto>>((ref) async {
   final conn = ref.watch(connectionProvider);
+  final auth = ref.watch(authProvider);
   if (!conn.isPaired || conn.serverUrl == null) return const [];
   final dio = ref.watch(dioProvider);
+
+  // Admin élargi : toutes les classes.
+  if (auth.isAdminOrHeadmaster) {
+    try {
+      final resp = await dio.get(
+        buildUrl(conn.serverUrl!, ApiEndpoints.classrooms),
+        queryParameters: {'per_page': 200},
+      );
+      return _parseClassroomList(resp.data);
+    } on DioException catch (e) {
+      final api = (e.error is ApiException)
+          ? e.error as ApiException
+          : dioErrorToApiException(e);
+      if (api.statusCode == 403) return const [];
+      rethrow;
+    }
+  }
+
+  // Enseignant (ou profil restreint) : classes enseignées + classes titularisées.
+  final results = await Future.wait([
+    _fetchClassrooms(dio, conn.serverUrl!, teacherOnly: true),
+    _fetchClassrooms(dio, conn.serverUrl!, teacherOnly: false),
+  ]);
+  final teaching = results[0];
+  final all = results[1];
+  final userId = auth.user?.id;
+  final head = userId == null
+      ? const <ClassroomDto>[]
+      : all.where((c) => c.headTeacherId == userId).toList();
+
+  final byId = <int, ClassroomDto>{};
+  for (final c in teaching) {
+    byId[c.id] = c;
+  }
+  for (final c in head) {
+    byId.putIfAbsent(c.id, () => c);
+  }
+  return byId.values.toList()..sort((a, b) => a.name.compareTo(b.name));
+});
+
+Future<List<ClassroomDto>> _fetchClassrooms(
+  Dio dio,
+  String serverUrl, {
+  required bool teacherOnly,
+}) async {
   try {
     final resp = await dio.get(
-      buildUrl(conn.serverUrl!, ApiEndpoints.classrooms),
+      buildUrl(serverUrl, ApiEndpoints.classrooms),
+      queryParameters: {
+        'per_page': 200,
+        if (teacherOnly) 'teacher_only': true,
+      },
     );
     return _parseClassroomList(resp.data);
   } on DioException catch (e) {
@@ -221,7 +281,7 @@ final classroomsForGradesProvider =
     if (api.statusCode == 403) return const [];
     rethrow;
   }
-});
+}
 
 List<ClassroomDto> _parseClassroomList(dynamic data) {
   if (data is List) {
@@ -274,6 +334,83 @@ List<PeriodDto> _parsePeriodList(dynamic data) {
   }
   return const [];
 }
+
+/// Périodes filtrées par le **cycle de la classe sélectionnée** — corrige le
+/// mélange collège/lycée dans le champ « Période ».
+///
+/// Miroir du desktop (`GradeService.get_periods(session, year, cycle_id)` via
+/// `classroom.level.cycle_id`) : on matche `period.cycle_id ==
+/// classroom.cycle_id` ([Fix-PERIOD-CYCLE] : `cycle_id` est exposé par
+/// `PeriodResponse` et `ClassroomResponse`). Si le filtre ne renvoie rien
+/// (données legacy sans cycle, ou serveur non patché), on retombe sur toutes
+/// les périodes — jamais de liste vide bloquante.
+final periodsForClassroomProvider = FutureProvider.autoDispose
+    .family<List<PeriodDto>, int>((ref, classroomId) async {
+  final periods = await ref.watch(periodsProvider.future);
+  final classrooms = await ref.watch(classroomsForGradesProvider.future);
+  final classroom = classrooms
+      .where((c) => c.id == classroomId)
+      .firstOrNull;
+  if (classroom == null || classroom.cycleId == null) return periods;
+  final filtered =
+      periods.where((p) => p.cycleId == classroom.cycleId).toList();
+  return filtered.isEmpty ? periods : filtered;
+});
+
+/// Période active (celle du jour) d'une liste — miroir de
+/// `GradeService.get_active_period` : `start_date <= today <= end_date`,
+/// sinon la première. Retourne `null` si la liste est vide.
+PeriodDto? activePeriodOf(List<PeriodDto> periods) {
+  if (periods.isEmpty) return null;
+  for (final p in periods) {
+    if (p.isCurrent) return p;
+  }
+  return periods.first;
+}
+
+/// Types d'évaluation : `GET /grades/assessment-types` (endpoint fourni par
+/// le patch serveur GeTech-SMS). Fallback : [CommonAssessmentTypes.defaults]
+/// si l'endpoint n'existe pas encore (404) — les IDs par défaut correspondent
+/// au seed de développement.
+final assessmentTypesProvider =
+    FutureProvider.autoDispose<List<AssessmentTypeInfo>>((ref) async {
+  final conn = ref.watch(connectionProvider);
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return CommonAssessmentTypes.defaults;
+  }
+  final dio = ref.watch(dioProvider);
+  try {
+    final resp = await dio.get(
+      buildUrl(conn.serverUrl!, ApiEndpoints.gradesAssessmentTypes),
+    );
+    final data = resp.data;
+    List<dynamic>? rawList;
+    if (data is List) {
+      rawList = data;
+    } else if (data is Map && data['items'] is List) {
+      rawList = data['items'] as List;
+    }
+    if (rawList == null || rawList.isEmpty) {
+      return CommonAssessmentTypes.defaults;
+    }
+    final types = rawList
+        .whereType<Map>()
+        .map((j) => AssessmentTypeInfo.fromJson(
+            Map<String, dynamic>.from(j)))
+        .toList();
+    return types.isEmpty ? CommonAssessmentTypes.defaults : types;
+  } on DioException catch (e) {
+    final api = (e.error is ApiException)
+        ? e.error as ApiException
+        : dioErrorToApiException(e);
+    if (api.statusCode == 404 || api.statusCode == 403) {
+      return CommonAssessmentTypes.defaults;
+    }
+    rethrow;
+  } catch (_) {
+    return CommonAssessmentTypes.defaults;
+  }
+});
 
 /// Matières affectées à une classe : `GET /grades/class-subjects?classroom_id=`.
 final classSubjectsProvider = FutureProvider.autoDispose

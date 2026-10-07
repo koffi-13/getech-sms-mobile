@@ -15,23 +15,41 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/auth/auth_state.dart';
+import '../../core/auth/teacher_scope.dart';
 import '../../core/config/constants.dart';
 import '../../core/sync/sync_engine.dart';
 import '../../core/utils/formatters.dart';
+import '../../core/utils/permissions.dart';
 import '../connections/connection_state.dart';
 import '../../shared/models/sync_dto.dart';
 import '../../shared/widgets/widgets.dart';
 import 'dashboard_controller.dart';
 
-/// Page racine après connexion : vue d'ensemble de l'établissement.
+/// Page racine après connexion : vue d'ensemble.
+///
+/// - **Enseignant** : statistiques de SES classes uniquement (effectifs,
+///   matières, cours du jour) — aucune donnée financière ni globale.
+/// - **Autres profils** : KPIs de l'établissement ; les tuiles financières
+///   (Paiements, Solde dû) ne sont affichées qu'avec la permission
+///   PAYMENT_READ, et la tuile Utilisateurs avec USER_READ.
 class DashboardPage extends ConsumerWidget {
   const DashboardPage({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final conn = ref.watch(connectionProvider);
+    final auth = ref.watch(authProvider);
+    final scopeAsync = ref.watch(teacherScopeProvider);
     final statsAsync = ref.watch(dashboardStatsProvider);
     final isOffline = !conn.canReachServer;
+
+    // L'accueil d'un enseignant est totalement différent : statistiques de
+    // ses classes uniquement, sans appel à /dashboard/stats (qui n'est pas
+    // scopé par rôle et exposerait des données financières).
+    final isTeacher = !auth.isAdminOrHeadmaster &&
+        (auth.hasDeclaredTeacherRole ||
+            scopeAsync.maybeWhen(
+                data: (s) => s.isTeacher, orElse: () => false));
 
     return Scaffold(
       appBar: AppBar(
@@ -40,40 +58,43 @@ class DashboardPage extends ConsumerWidget {
           _SyncButton(),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: () async {
-          ref.invalidate(dashboardStatsProvider);
-          // Attendre la prochaine valeur pour garder le spinner affiché.
-          await ref.read(dashboardStatsProvider.future);
-        },
-        child: statsAsync.when(
-          data: (stats) => _DashboardContent(
-            stats: stats,
-            isOffline: isOffline,
-          ),
-          loading: () => const AppLoading(label: 'Chargement des statistiques…'),
-          error: (err, _) {
-            // Distingue le mode hors-ligne des autres erreurs.
-            final offline = isOffline || err is OfflineDashboardException;
-            return ListView(
-              physics: const AlwaysScrollableScrollPhysics(),
-              children: [
-                if (offline)
-                  AppErrorWidget(
-                    message:
-                        'Mode hors-ligne — données non disponibles. Vérifiez votre connexion au serveur.',
-                    onRetry: () => ref.invalidate(dashboardStatsProvider),
-                  )
-                else
-                  AppErrorWidget(
-                    message: err.toString(),
-                    onRetry: () => ref.invalidate(dashboardStatsProvider),
-                  ),
-              ],
-            );
-          },
-        ),
-      ),
+      body: isTeacher
+          ? _TeacherDashboard(isOffline: isOffline)
+          : RefreshIndicator(
+              onRefresh: () async {
+                ref.invalidate(dashboardStatsProvider);
+                // Attendre la prochaine valeur pour garder le spinner affiché.
+                await ref.read(dashboardStatsProvider.future);
+              },
+              child: statsAsync.when(
+                data: (stats) => _DashboardContent(
+                  stats: stats,
+                  isOffline: isOffline,
+                ),
+                loading: () =>
+                    const AppLoading(label: 'Chargement des statistiques…'),
+                error: (err, _) {
+                  // Distingue le mode hors-ligne des autres erreurs.
+                  final offline = isOffline || err is OfflineDashboardException;
+                  return ListView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    children: [
+                      if (offline)
+                        AppErrorWidget(
+                          message:
+                              'Mode hors-ligne — données non disponibles. Vérifiez votre connexion au serveur.',
+                          onRetry: () => ref.invalidate(dashboardStatsProvider),
+                        )
+                      else
+                        AppErrorWidget(
+                          message: err.toString(),
+                          onRetry: () => ref.invalidate(dashboardStatsProvider),
+                        ),
+                    ],
+                  );
+                },
+              ),
+            ),
     );
   }
 }
@@ -173,6 +194,235 @@ class _DashboardContent extends StatelessWidget {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Accueil ENSEIGNANT
+// ---------------------------------------------------------------------------
+
+/// Tableau de bord enseignant : statistiques de ses classes uniquement —
+/// effectifs, matières, cours du jour et prochains créneaux. Aucune donnée
+/// financière, aucun compteur global des autres utilisateurs.
+class _TeacherDashboard extends ConsumerWidget {
+  const _TeacherDashboard({required this.isOffline});
+  final bool isOffline;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(teacherDashboardProvider);
+    return RefreshIndicator(
+      onRefresh: () async {
+        ref.invalidate(teacherDashboardProvider);
+        await ref.read(teacherDashboardProvider.future);
+      },
+      child: async.when(
+        data: (data) => _TeacherDashboardContent(
+            data: data, isOffline: isOffline),
+        loading: () => ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 120),
+            AppLoading(label: 'Chargement de vos classes…'),
+          ],
+        ),
+        error: (e, _) => ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: [
+            AppErrorWidget(
+              message: e.toString(),
+              onRetry: () => ref.invalidate(teacherDashboardProvider),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TeacherDashboardContent extends StatelessWidget {
+  const _TeacherDashboardContent({
+    required this.data,
+    required this.isOffline,
+  });
+
+  final TeacherDashboardData data;
+  final bool isOffline;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final todayCourses = data.todayCourses;
+
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+      children: [
+        if (isOffline)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: _OfflineBanner(),
+          ),
+
+        // --- KPIs du périmètre enseignant ---
+        GridView.count(
+          crossAxisCount: 2,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          crossAxisSpacing: 12,
+          mainAxisSpacing: 12,
+          childAspectRatio: 1.25,
+          children: [
+            KpiCard(
+              label: 'Mes classes',
+              value: '${data.classCount}',
+              icon: Icons.school,
+              color: theme.colorScheme.primary,
+              onTap: () => context.push('/schedule'),
+            ),
+            KpiCard(
+              label: 'Mes élèves',
+              value: '${data.studentCount}',
+              icon: Icons.people,
+              color: Colors.teal,
+              onTap: () => context.push('/students'),
+            ),
+            KpiCard(
+              label: 'Mes matières',
+              value: '${data.subjectCount}',
+              icon: Icons.book_outlined,
+              color: Colors.indigo,
+            ),
+            KpiCard(
+              label: 'Cours aujourd\'hui',
+              value: '${todayCourses.length}',
+              icon: Icons.schedule,
+              color: Colors.deepOrange,
+              onTap: () => context.push('/schedule'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+
+        // --- Cours du jour ---
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SectionHeader(
+                  title: 'Mes cours aujourd\'hui',
+                  icon: Icons.today_outlined,
+                  subtitle: todayCourses.isEmpty
+                      ? 'Aucun cours programmé aujourd\'hui'
+                      : '${todayCourses.length} cours',
+                ),
+                const SizedBox(height: 4),
+                if (todayCourses.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 8),
+                    child: EmptyState(
+                      title: 'Journée libre',
+                      message:
+                          'Aucun cours planifié pour aujourd\'hui.',
+                      icon: Icons.event_available,
+                    ),
+                  )
+                else
+                  ...todayCourses.map((c) => ListTile(
+                        dense: true,
+                        contentPadding:
+                            const EdgeInsets.symmetric(vertical: 4),
+                        leading: CircleAvatar(
+                          backgroundColor:
+                              theme.colorScheme.primaryContainer,
+                          child: const Icon(Icons.schedule, size: 20),
+                        ),
+                        title: Text(
+                          c.subjectName ?? 'Cours',
+                          style: theme.textTheme.bodyMedium
+                              ?.copyWith(fontWeight: FontWeight.w600),
+                        ),
+                        subtitle: Text(
+                          [
+                            '${c.startTime} – ${c.endTime}',
+                            if (c.classroomName != null) c.classroomName!,
+                            if (c.room != null && c.room!.isNotEmpty)
+                              'Salle ${c.room}',
+                          ].join(' • '),
+                        ),
+                      )),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // --- Mes classes ---
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SectionHeader(
+                  title: 'Mes classes',
+                  icon: Icons.school_outlined,
+                  subtitle:
+                      '${data.classCount} classe(s) — enseignement et titulariat',
+                ),
+                const SizedBox(height: 4),
+                if (data.classrooms.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 8),
+                    child: EmptyState(
+                      title: 'Aucune classe liée',
+                      message:
+                          'Vous n\'êtes ni titulaire ni enseignant dans une classe.',
+                      icon: Icons.school_outlined,
+                    ),
+                  )
+                else
+                  ...data.classrooms.map((c) {
+                    final isHead = data.scope.headClassrooms
+                        .any((h) => h.id == c.id);
+                    return ListTile(
+                      dense: true,
+                      contentPadding:
+                          const EdgeInsets.symmetric(vertical: 4),
+                      leading: CircleAvatar(
+                        backgroundColor: isHead
+                            ? Colors.amber.withValues(alpha: 0.2)
+                            : theme.colorScheme.primaryContainer,
+                        child: Icon(
+                          isHead ? Icons.star : Icons.school,
+                          size: 18,
+                          color: isHead
+                              ? Colors.amber.shade800
+                              : null,
+                        ),
+                      ),
+                      title: Text(c.name,
+                          style: theme.textTheme.bodyMedium
+                              ?.copyWith(fontWeight: FontWeight.w600)),
+                      subtitle: Text(
+                        [
+                          '${c.studentCount} élève${c.studentCount > 1 ? 's' : ''}',
+                          if (c.capacity > 0)
+                            'capacité ${c.capacity}',
+                          if (isHead) 'Titulaire',
+                        ].join(' • '),
+                      ),
+                      onTap: () => context.push('/classrooms/${c.id}'),
+                    );
+                  }),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 /// Bandeau "Mode hors-ligne" affiché en haut du tableau de bord.
 class _OfflineBanner extends StatelessWidget {
   @override
@@ -204,7 +454,9 @@ class _OfflineBanner extends StatelessWidget {
   }
 }
 
-/// Grille 2 colonnes de KPI cards (adapte aux permissions de l'utilisateur).
+/// Grille 2 colonnes de KPI cards — tuiles filtrées par permission :
+/// Paiements/Solde dû uniquement avec PAYMENT_READ, Utilisateurs avec
+/// USER_READ (l'accueil n'est plus identique pour tous les profils).
 class _KpiGrid extends ConsumerWidget {
   const _KpiGrid({required this.stats});
   final DashboardStatsDto stats;
@@ -212,71 +464,10 @@ class _KpiGrid extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(authProvider);
-    final perms = auth.permissions;
-    final isSuperuser = perms.contains(RbacPermissions.wildcard);
-
-    // [Fix-DASHBOARD-1] Les KPIs affichés dépendent des permissions :
-    // - Élèves + Classes : visible si STUDENT_READ
-    // - Enseignants : visible si GRADE_READ (enseignants voient les collègues)
-    // - Paiements + Solde dû : visible si PAYMENT_READ
-    // - Utilisateurs : visible si USER_READ
-    final canSeeStudents = isSuperuser ||
-        perms.contains(RbacPermissions.studentRead);
-    final canSeePayments = isSuperuser ||
-        perms.contains(RbacPermissions.paymentRead);
-    final canSeeUsers = isSuperuser ||
-        perms.contains(RbacPermissions.userRead);
-
-    final kpiCards = <Widget>[];
-
-    if (canSeeStudents) {
-      kpiCards.add(KpiCard(
-        label: 'Effectif élèves',
-        value: '${stats.totalStudents}',
-        icon: Icons.people,
-        color: Theme.of(context).colorScheme.primary,
-        onTap: () => context.push('/students'),
-      ));
-      kpiCards.add(KpiCard(
-        label: 'Classes',
-        value: '${stats.totalClassrooms}',
-        icon: Icons.school,
-        color: Colors.teal,
-        onTap: () => context.push('/classrooms'),
-      ));
-    }
-
-    // Enseignants : toujours visible (pour les admins et les enseignants)
-    kpiCards.add(KpiCard(
-      label: 'Enseignants',
-      value: '${stats.totalTeachers}',
-      icon: Icons.badge,
-      color: Colors.indigo,
-    ));
-
-    if (canSeeUsers) {
-      kpiCards.add(KpiCard(
-        label: 'Utilisateurs',
-        value: '${stats.totalUsers}',
-        icon: Icons.manage_accounts,
-        color: Colors.deepPurple,
-      ));
-    }
-
-    if (canSeePayments) {
-      kpiCards.add(KpiCard(
-        label: 'Paiements',
-        value: '${stats.totalPayments}',
-        icon: Icons.payments,
-        color: Colors.green,
-      ));
-      kpiCards.add(KpiCard(
-        label: 'Solde dû',
-        value: MoneyFormatter.compact(stats.totalBalanceDue),
-        icon: Icons.account_balance_wallet,
-        color: Colors.red.shade700,
-      ));
-    }
+    final canSeePayments =
+        hasPermission(auth.permissions, RbacPermissions.paymentRead);
+    final canSeeUsers =
+        hasPermission(auth.permissions, RbacPermissions.userRead);
 
     return GridView.count(
       crossAxisCount: 2,
@@ -285,7 +476,49 @@ class _KpiGrid extends ConsumerWidget {
       crossAxisSpacing: 12,
       mainAxisSpacing: 12,
       childAspectRatio: 1.25,
-      children: kpiCards,
+      children: [
+        KpiCard(
+          label: 'Effectif élèves',
+          value: '${stats.totalStudents}',
+          icon: Icons.people,
+          color: Theme.of(context).colorScheme.primary,
+          onTap: () => context.push('/students'),
+        ),
+        KpiCard(
+          label: 'Classes',
+          value: '${stats.totalClassrooms}',
+          icon: Icons.school,
+          color: Colors.teal,
+          onTap: () => context.push('/classrooms'),
+        ),
+        KpiCard(
+          label: 'Enseignants',
+          value: '${stats.totalTeachers}',
+          icon: Icons.badge,
+          color: Colors.indigo,
+        ),
+        if (canSeeUsers)
+          KpiCard(
+            label: 'Utilisateurs',
+            value: '${stats.totalUsers}',
+            icon: Icons.manage_accounts,
+            color: Colors.deepPurple,
+          ),
+        if (canSeePayments) ...[
+          KpiCard(
+            label: 'Paiements',
+            value: '${stats.totalPayments}',
+            icon: Icons.payments,
+            color: Colors.green,
+          ),
+          KpiCard(
+            label: 'Solde dû',
+            value: MoneyFormatter.compact(stats.totalBalanceDue),
+            icon: Icons.account_balance_wallet,
+            color: Colors.red.shade700,
+          ),
+        ],
+      ],
     );
   }
 
@@ -299,7 +532,6 @@ class _RecentPaymentsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
