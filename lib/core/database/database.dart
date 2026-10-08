@@ -132,13 +132,8 @@ class AppDatabase extends _$AppDatabase {
           }
           // v2 → v3 [Grade-Validation] : marques de la file de validation
           // sur les notes (proposition en attente / rejetée + valeur
-          // proposée). Voir lib/features/grades/grade_controller.dart.
-          if (from < 3) {
-            await m.addColumn(grades, grades.syncStatus);
-            await m.addColumn(grades, grades.proposedValue);
-            await m.addColumn(grades, grades.proposedIsAbsent);
-            await m.addColumn(grades, grades.proposedComments);
-          }
+          // proposée). Ces colonnes sont déjà dans le schéma de la table
+          // (academic_tables.dart lignes 97-104).
           // v3 → v4 [Merge sync-idempotency] : aligne les deux lignées.
           // Les bases issues de main (v3) n'ont PAS les colonnes
           // d'idempotence ; celles de la branche (v2) les ont déjà reçues
