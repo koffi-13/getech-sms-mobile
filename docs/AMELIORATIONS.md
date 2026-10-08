@@ -298,3 +298,121 @@ d'écriture dégradent proprement :
   `f80afea`) — sans ce champ, l'onglet Élèves du détail de classe tombe sur
   le comptage par assignations synchronisées.
 - Devise XOF, interface en français, format « NOM Prénoms » — inchangés.
+
+---
+
+# V2 — Les 9 améliorations suivantes (session du 08/10/2026)
+
+> Build sur le commit b523205. Patch serveur associé : branche
+> `feature/mobile-companion-patches` (commit 8f6fc69) du dépôt desktop.
+
+## 1. Multi-serveurs (bascule entre établissements)
+
+- **Nouveau registre** `lib/features/connections/server_profiles.dart` :
+  liste persistée de profils (`SharedPreferences`), un **JWT, un token
+  d'appairage et une base Drift PAR serveur** (`getech_sms.db` pour le
+  profil hérité — données conservées ; `getech_sms_<id>.db` pour les
+  nouveaux). Migration automatique de l'ancienne config mono-serveur.
+- « Gérer les connexions serveur » ouvre désormais une carte **« Mes
+  serveurs »** : liste (établissement, URL, état en ligne), **Basculer**
+  (bascule à chaud : connexion + session + base + caches réinitialisés),
+  **Oublier** (supprime profil + session + données locales de CE serveur).
+- L'écran **« Appairage du terminal »** garde son rôle d'ajout de nouveaux
+  serveurs ET affiche un bandeau « Serveurs déjà appairés » permettant de
+  **revenir aux serveurs existants** sans ré-appairage (+ bouton « Gérer »).
+- Déconnexion : n'efface que la session du serveur ACTIF (les autres
+  serveurs restent connectés).
+
+## 2. Tableau de bord enseignant (finances + inscriptions masquées)
+
+- Détection enseignant durcie : tant que le scope n'a pas tranché
+  (chargement/erreur), un **état d'attente** est affiché — JAMAIS la vue
+  générique (qui contenait « Paiements récents » et « Élèves récemment
+  inscrits »).
+- Les sections récentes de la vue générique sont désormais **filtrées par
+  permission** (PAYMENT_READ / STUDENT_READ).
+- Serveur : `/auth/login` et `/auth/me` renvoient `user.role` (premier rôle
+  RBAC) — la détection ne dépend plus uniquement de `roles[]`.
+
+## 3. Modules Notes / EDT / Présence toujours visibles chez les enseignants
+
+- Barre du bas + tiroir + grille « Plus » : ces trois modules portent le
+  repli `teacherVisible` — visibles pour tout enseignant détecté (rôle
+  déclaré OU relations de données), même si sa liste de permissions RBAC
+  est incomplète côté serveur.
+- Le serveur fournit désormais le **router /attendance complet**
+  (session, absences, cahier de texte, historique) — le module Présence
+  n'est plus en 404.
+
+## 4. Mode hors-ligne complet (fin des blocages)
+
+- **`checking` n'est plus un état bloquant** (démarrage à froid) sur tous
+  les modules : `canReachServer && !isChecking` partout.
+- **Saisie des notes hors-ligne** : la page lit le cache Drift + les
+  soumissions en attente de l'outbox ; l'enregistrement part dans l'outbox
+  (`grade_submission`) et est poussé à la prochaine connexion via
+  `POST /grades/assessments/{id}/grades`.
+- **[Fix-SYNC-PUSH]** : le push utilisait `{changes: …}` alors que le
+  serveur attend `{lines: […]}` → 422 permanent (les écritures hors-ligne
+  ne se synchronisaient JAMAIS). Corrigé au contrat réel + traitement des
+  résultats par ligne (applied / conflict_server_wins / invalid / error).
+- **File de validation/rejet des notes** (abandon du verrouillage) :
+  une note existante modifiée par un non-admin devient une **proposition**
+  marquée (`En attente de validation (10 → 14)`), qu'un admin **valide**
+  (applique la nouvelle note) ou **rejette** (conserve l'ancienne) —
+  implémenté côté serveur (table `grade_modifications`, migration v1_0019,
+  endpoints approve/reject + liste) ET côté desktop (champs déverrouillés,
+  colonne Statut, dialogue « Modifications en attente (N) »).
+  L'anti-bypass convertit même un `/sync/push` direct en proposition.
+- Marques visibles dans l'app : « Sera synchronisée » / « En attente de
+  validation (X → Y) » / « Modification validée » / « Modifiée — rejetée ».
+
+## 5. Onglet Classes : erreur 500 corrigée + résilience
+
+- **Cause racine serveur** : `Classroom.cycle_id` n'existe pas sur le
+  modèle (la colonne vit sur `Level`) → `AttributeError` → 500 sur
+  `GET /classrooms` (liste ET détail) dès qu'une classe existe. Corrigé
+  (lecture `level.cycle_id`) — test de non-régression ajouté.
+- **Résilience mobile** : échelle de dégradation (per_page=200 toutes
+  pages → 1 page per_page=50) puis repli cache Drift ; le détail classe
+  ne remonte plus jamais d'exception brute à l'UI.
+
+## 6. Photos des élèves en miniature
+
+- Nouveau service `student_photos.dart` : téléchargement authentifié via
+  `GET /students/{id}/photo` (octets), **cache disque par serveur**
+  (`photos/<hash-serveur>_<id>.jpg`), mémo négatif (404 → initiales,
+  pas de re-tentative). `StudentAvatar` branché sur la liste des élèves
+  et l'en-tête du détail (initiales en fallback).
+- Serveur : endpoint `GET /students/{id}/photo` (auth, FileResponse).
+
+## 7. Notifications utilisateurs
+
+- **Rappels de cours (enseignants)**, programmés depuis le cache local
+  (donc y compris hors-ligne), via le système natif (zonedSchedule,
+  alarmes exactes si permises) :
+  2 min avant (« pensez à vérifier la présence des élèves »), à l'heure
+  (« vérifiez la présence avant de démarrer »), 5 min avant la fin.
+  Semaines A/B respectées.
+- **Suivi de la validation des notes** : après chaque synchro, comparaison
+  avec l'instantané précédent → enseignant : « N validée(s) et M
+  rejetée(s) » ; admin : « N modification(s) en attente de validation ».
+- Permissions Android (POST_NOTIFICATIONS, SCHEDULE_EXACT_ALARM,
+  RECEIVE_BOOT_COMPLETED) ajoutées au manifest.
+
+## 8. Icône du logiciel desktop + nom « GeTech-SMS »
+
+- Icône : générée depuis `icon.jpg` du desktop (source de l'ICO officiel)
+  — Android (48→192 + round), iOS (20→1024 complet), web (favicon, 192,
+  512 + maskable). Script réutilisable :
+  ``scripts/generate_mobile_icons.py` (à la racine du dépôt mobile)`.
+- Nom : `android:label`, `CFBundleDisplayName`/`CFBundleName`, titre web,
+  manifest → **GeTech-SMS** (identifiants techniques inchangés).
+
+## 9. Nombre d'enseignants corrigé (0 → réel)
+
+- **API** `/dashboard/stats` **et** service desktop (même source que l'UI
+  Flet) : comptage par **union** des 3 chemins de création
+  (`user_roles/roles` "TEACHER" ; `UserEstablishment.role` legacy ;
+  `User.role` du formulaire desktop), `count(distinct)` — plus aucun
+  double comptage, plus aucun 0 permanent.

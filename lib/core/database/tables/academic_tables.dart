@@ -89,4 +89,17 @@ class Grades extends Table {
   TextColumn get idempotencyKey => text().nullable()();
   TextColumn get deviceUuid => text().nullable()();
   IntColumn get syncVersion => integer().withDefault(const Constant(0))();
+
+  // [Grade-Validation] (schéma v3) — marques de la file de validation :
+  // syncStatus : null (synchrone) | 'queued' (proposition envoyée, en
+  // attente de validation admin) | 'rejected' (proposition rejetée,
+  // l'ancienne valeur est conservée).
+  TextColumn get syncStatus => text().nullable()();
+
+  // Valeur PROPOSÉE (différée) : ce que l'utilisateur a saisi/veut voir
+  // appliqué une fois validé par un admin. La colonne `value` reste la
+  // valeur SERVEUR actuelle.
+  RealColumn get proposedValue => real().nullable()();
+  BoolColumn get proposedIsAbsent => boolean().nullable()();
+  TextColumn get proposedComments => text().nullable()();
 }

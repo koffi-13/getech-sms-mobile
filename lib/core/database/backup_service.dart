@@ -160,4 +160,9 @@ class BackupService {
   }
 }
 
-final backupServiceProvider = Provider<BackupService>((ref) => BackupService(ref));
+/// [Multi-serveurs] WATCH la base : le service est recréé lorsque la base
+/// du profil actif change (bascule de serveur).
+final backupServiceProvider = Provider<BackupService>((ref) {
+  ref.watch(databaseProvider);
+  return BackupService(ref);
+});

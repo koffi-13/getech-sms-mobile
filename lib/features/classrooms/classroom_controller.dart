@@ -56,15 +56,21 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
     }
 
     try {
-      final canReach = _ref.read(connectionProvider).canReachServer;
-      if (!canReach) {
+      // [Fix-CLASSES-500] `checking` (démarrage à froid) ne doit pas
+      // bloquer : on tente l'API, la requête échouera d'elle-même si le
+      // serveur est injoignable — le cache local reste affiché.
+      final conn = _ref.read(connectionProvider);
+      final definitivelyOffline =
+          !conn.canReachServer && !conn.isChecking;
+      if (definitivelyOffline) {
         if (localClassrooms.isEmpty) {
           state = AsyncValue.data(const []);
         }
         return;
       }
 
-      // 2. Tenter de rafraîchir depuis l'API (toutes les pages)
+      // 2. Tenter de rafraîchir depuis l'API (toutes les pages, avec
+      // échelle de dégradation en cas d'erreur serveur).
       final apiClassrooms = await _fetchFromApi();
       if (apiClassrooms.isNotEmpty) {
         await _saveToLocal(apiClassrooms);
@@ -83,33 +89,67 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
   }
 
   Future<ClassroomDto> getById(int id) async {
-    final canReach = _ref.read(connectionProvider).canReachServer;
-    if (canReach) {
-      final dio = _ref.read(dioProvider);
-      final response = await dio.get(
-        buildUrl(_ref.read(connectionProvider).serverUrl!,
-            ApiEndpoints.classroom(id)),
-      );
-      return ClassroomDto.fromJson(
-          Map<String, dynamic>.from(response.data as Map));
-    } else {
-      final classrooms = state.value ?? await _fetchFromLocal();
-      return classrooms.firstWhere(
-        (c) => c.id == id,
-        orElse: () => throw StateError('Classe #$id introuvable en local.'),
-      );
+    final conn = _ref.read(connectionProvider);
+    final definitivelyOffline =
+        !conn.canReachServer && !conn.isChecking;
+    if (!definitivelyOffline) {
+      try {
+        final dio = _ref.read(dioProvider);
+        final response = await dio.get(
+          buildUrl(_ref.read(connectionProvider).serverUrl!,
+              ApiEndpoints.classroom(id)),
+        );
+        final remote = ClassroomDto.fromJson(
+            Map<String, dynamic>.from(response.data as Map));
+        // Fusion avec l'état local (effectif rattrapé par le comptage local).
+        final local = (state.value ?? const <ClassroomDto>[])
+            .where((c) => c.id == id)
+            .firstOrNull;
+        if (local != null &&
+            (remote.currentStudentsCount ?? 0) < (local.currentStudentsCount ?? 0)) {
+          return remote.copyWith(
+              currentStudentsCount: local.currentStudentsCount);
+        }
+        return remote;
+      } catch (e) {
+        _log.w('Détail classe #$id : API indisponible, repli local ($e)');
+      }
+    }
+    // Repli local (jamais d'exception brute vers l'UI).
+    final classrooms = state.value ?? await _fetchFromLocal();
+    return classrooms.firstWhere(
+      (c) => c.id == id,
+      orElse: () => throw StateError('Classe #$id introuvable en local.'),
+    );
+  }
+
+  /// `GET /classrooms` avec pagination complète (per_page=200, toutes pages)
+  /// et échelle de dégradation [Fix-CLASSES-500] :
+  ///   1. tentatives complètes (per_page=200, toutes pages) ;
+  ///   2. en cas d'erreur serveur (5xx/4xx/réseau) : UNE page per_page=50 ;
+  ///   3. sinon l'appelant replie sur le cache local.
+  Future<List<ClassroomDto>> _fetchFromApi() async {
+    try {
+      return await _fetchFromApiPaged(200);
+    } catch (e) {
+      _log.w('API classes (mode complet) échouée, tentative dégradée : $e');
+      try {
+        return await _fetchFromApiPaged(50, maxPages: 1);
+      } catch (e2) {
+        _log.w('API classes (mode dégradé) échouée, repli local : $e2');
+        rethrow;
+      }
     }
   }
 
-  /// `GET /classrooms` avec pagination complète (per_page=200, toutes pages).
-  Future<List<ClassroomDto>> _fetchFromApi() async {
+  Future<List<ClassroomDto>> _fetchFromApiPaged(int perPage,
+      {int maxPages = 20}) async {
     final dio = _ref.read(dioProvider);
     final serverUrl = _ref.read(connectionProvider).serverUrl!;
     final result = <ClassroomDto>[];
     var page = 1;
-    const perPage = 200;
-    // Garde-fou : 20 pages maximum (4000 classes).
-    while (page <= 20) {
+    // Garde-fou : `maxPages` pages maximum.
+    while (page <= maxPages) {
       final response = await dio.get(
         buildUrl(serverUrl, ApiEndpoints.classrooms),
         queryParameters: {'page': page, 'per_page': perPage},

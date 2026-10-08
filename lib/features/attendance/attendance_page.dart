@@ -62,14 +62,14 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
       appBar: AppBar(
         title: const Text('Présence'),
         actions: [
-          if (!conn.canReachServer)
+          if (!conn.canReachServer && !conn.isChecking)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: StatusBadge.offline(),
             ),
         ],
       ),
-      body: !conn.canReachServer
+      body: !conn.canReachServer && !conn.isChecking
           ? const EmptyState(
               title: 'Hors-ligne',
               message: 'La saisie des présences nécessite une connexion au serveur.',

@@ -101,7 +101,7 @@ class _RankingBodyState extends ConsumerState<_RankingBody> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('Classement')),
-      body: !conn.canReachServer
+      body: !conn.canReachServer && !conn.isChecking
           ? const EmptyState(
               title: 'Hors-ligne',
               message: 'Le classement nécessite une connexion au serveur.',

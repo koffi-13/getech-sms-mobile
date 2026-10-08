@@ -21,7 +21,7 @@ class AttendanceHistoryPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final conn = ref.watch(connectionProvider);
-    if (!conn.canReachServer) {
+    if (!conn.canReachServer && !conn.isChecking) {
       return Scaffold(
         appBar: AppBar(title: const Text('Historique d\'absences')),
         body: const EmptyState(

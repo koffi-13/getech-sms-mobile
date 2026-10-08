@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../core/auth/auth_state.dart';
+import '../core/auth/teacher_scope.dart';
 import '../core/config/constants.dart';
 import '../core/utils/permissions.dart';
 
@@ -23,6 +24,14 @@ class AppShell extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(authProvider);
     final perms = auth.permissions;
+
+    // [Fix-TEACHER-NAV] Repli enseignant : les modules Notes / Emploi du
+    // temps / Présence restent visibles pour un enseignant même si sa
+    // liste de permissions RBAC est incomplète côté serveur (rôle TEACHER
+    // déclaré OU relations de données détectées par le scope).
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final teacherish = auth.hasDeclaredTeacherRole ||
+        scopeAsync.maybeWhen(data: (s) => s.isTeacher, orElse: () => false);
 
     final destinations = <_NavDestination>[
       _NavDestination(
@@ -51,6 +60,7 @@ class AppShell extends ConsumerWidget {
         label: 'Notes',
         route: '/grades',
         permission: RbacPermissions.gradeRead,
+        teacherVisible: true,
       ),
       _NavDestination(
         icon: Icons.more_horiz,
@@ -58,7 +68,12 @@ class AppShell extends ConsumerWidget {
         label: 'Plus',
         route: '/more',
       ),
-    ].where((d) => d.permission == null || hasPermission(perms, d.permission!)).toList();
+    ]
+        .where((d) =>
+            d.permission == null ||
+            hasPermission(perms, d.permission!) ||
+            (teacherish && d.teacherVisible))
+        .toList();
 
     return Scaffold(
       body: child,
@@ -88,12 +103,17 @@ class _NavDestination {
     required this.label,
     required this.route,
     this.permission,
+    this.teacherVisible = false,
   });
   final IconData icon;
   final IconData activeIcon;
   final String label;
   final String route;
   final String? permission;
+
+  /// [Fix-TEACHER-NAV] Toujours visible pour un enseignant détecté
+  /// (rôle ou relations), même sans la permission RBAC correspondante.
+  final bool teacherVisible;
 }
 
 class _AppDrawer extends ConsumerWidget {
@@ -105,18 +125,25 @@ class _AppDrawer extends ConsumerWidget {
     final perms = auth.permissions;
     final theme = Theme.of(context);
 
+    // [Fix-TEACHER-NAV] Repli enseignant (même règle que la barre du bas).
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final teacherish = auth.hasDeclaredTeacherRole ||
+        scopeAsync.maybeWhen(data: (s) => s.isTeacher, orElse: () => false);
+
     final items = <_DrawerItem>[
       _DrawerItem(
         icon: Icons.calendar_view_week_outlined,
         label: 'Emploi du temps',
         route: '/schedule',
         permission: RbacPermissions.studentRead,
+        teacherVisible: true,
       ),
       _DrawerItem(
         icon: Icons.fact_check_outlined,
         label: 'Présence',
         route: '/attendance',
         permission: RbacPermissions.studentRead,
+        teacherVisible: true,
       ),
       _DrawerItem(
         icon: Icons.leaderboard_outlined,
@@ -199,7 +226,8 @@ class _AppDrawer extends ConsumerWidget {
                 children: items
                     .where((i) =>
                         i.permission == null ||
-                        hasPermission(perms, i.permission!))
+                        hasPermission(perms, i.permission!) ||
+                        (teacherish && i.teacherVisible))
                     .map((i) => ListTile(
                           leading: Icon(i.icon),
                           title: Text(i.label),
@@ -234,9 +262,13 @@ class _DrawerItem {
     required this.label,
     required this.route,
     this.permission,
+    this.teacherVisible = false,
   });
   final IconData icon;
   final String label;
   final String route;
   final String? permission;
+
+  /// [Fix-TEACHER-NAV] Toujours visible pour un enseignant détecté.
+  final bool teacherVisible;
 }

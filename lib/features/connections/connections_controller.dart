@@ -19,6 +19,7 @@ import '../../core/network/dio_client.dart';
 import '../../core/sync/sync_engine.dart';
 import '../../shared/models/auth_dto.dart';
 import 'connection_state.dart';
+import 'server_profiles.dart';
 
 final log_pkg.Logger _log = log_pkg.Logger(
   printer: log_pkg.PrettyPrinter(noBoxingByDefault: true),
@@ -105,13 +106,15 @@ class ConnectionsController {
       final data = resp.data is Map ? resp.data as Map<String, dynamic> : <String, dynamic>{};
       final pairResp = PairDeviceResponse.fromJson(data);
 
-      // Succès immédiat : Persiste l'état de connexion normal.
-      await _ref.read(connectionProvider.notifier).configure(
+      // [Multi-serveurs] L'appairage réussi est enregistré dans le registre
+      // (nouveau profil ou re-appairage du même serveur) et devient actif.
+      await _ref
+          .read(multiServerControllerProvider)
+          .completePairing(
             serverUrl: serverUrl,
             establishmentCode: establishmentCode,
             deviceToken: pairResp.deviceToken,
             deviceId: pairResp.deviceId.toString(),
-            tolerateClockSkew: tolerateClockSkew,
           );
 
       // Invalide les caches dépendant de l'appairage.
@@ -133,16 +136,18 @@ class ConnectionsController {
       final isClockSkewSuspect = e.response?.statusCode == 400;
 
       if (isNetworkError || isClockSkewSuspect) {
-        // On configure en mode "Force Offline" pour permettre l'accès à l'app
-        // en attendant la synchro.
-        await _ref.read(connectionProvider.notifier).configure(
+        // Mode résilient : le serveur est injoignable ou le token est
+        // rejeté (décalage d'horloge). On enregistre quand même le serveur
+        // dans le registre (token d'appairage temporaire) en mode forcé
+        // hors-ligne — l'accès à l'app reste possible en attendant.
+        await _ref
+            .read(multiServerControllerProvider)
+            .completePairing(
               serverUrl: serverUrl,
               establishmentCode: establishmentCode,
-              deviceToken: pairingToken.trim(), // On utilise le pairing token comme token temporaire
-              deviceId: 'pending',
-              forceOffline: true,
-              tolerateClockSkew: tolerateClockSkew,
+              deviceToken: pairingToken.trim(),
             );
+        await _ref.read(connectionProvider.notifier).setForceOffline(true);
 
         return PairDeviceResponse(
           deviceToken: pairingToken.trim(),

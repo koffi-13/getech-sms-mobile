@@ -228,65 +228,115 @@ class SyncPullResponse {
 }
 
 /// Requête de push : `POST /sync/push`.
+/// Contrat RÉEL de `POST /sync/push` (api/routers/sync.py, PushRequest) :
+/// `{device_token?, lines: [{line_id?, op, table, data}]}`.
 ///
-/// [Fix-SYNC-IDEMPOTENCE] Chaque ligne du payload `changes` peut inclure
-/// `idempotency_key` et `device_uuid` pour permettre au serveur de
-/// détecter les doublons en cas de retry réseau (coupure, timeout).
-/// Le serveur reste rétrocompatible : si ces champs sont absents, il
-/// applique le LWW classique (server-wins).
+/// [Fix-SYNC-PUSH] L'ancien format `{changes: {table: [rows]}}` n'a jamais
+/// correspondu au serveur (422 « field required: lines ») — les écritures
+/// hors-ligne ne se synchronisaient donc jamais.
+///
+/// [Fix-SYNC-IDEMPOTENCE] Le `data` de chaque ligne peut en plus inclure
+/// `idempotency_key` et `device_uuid` pour permettre au serveur de détecter
+/// les doublons en cas de retry réseau (coupure, timeout). Le serveur reste
+/// rétrocompatible : si ces champs sont absents, il applique le LWW
+/// classique (server-wins).
 class SyncPushRequest {
-  final Map<String, List<Map<String, dynamic>>> changes;
+  final List<Map<String, dynamic>> lines;
+  final String? deviceToken;
 
-  const SyncPushRequest({required this.changes});
+  const SyncPushRequest({required this.lines, this.deviceToken});
 
-  Map<String, dynamic> toJson() => {'changes': changes};
+  Map<String, dynamic> toJson() => {
+        if (deviceToken != null) 'device_token': deviceToken,
+        'lines': lines,
+      };
 
   /// [Fix-SYNC-IDEMPOTENCE] Construit une requête de push avec les clés
-  /// d'idempotence injectées dans chaque ligne.
+  /// d'idempotence injectées dans le `data` de chaque ligne.
   ///
   /// [deviceUuid] : UUID v4 de l'appareil courant (généré au pairing).
-  /// Pour chaque ligne qui n'a pas déjà une `idempotency_key`, on en génère
-  /// une nouvelle (UUID v4) et on l'associe au device_uuid.
+  /// Pour chaque ligne dont le `data` (Map) n'a pas déjà une
+  /// `idempotency_key`, on en génère une nouvelle (UUID v4) et on
+  /// l'associe au device_uuid.
   factory SyncPushRequest.withIdempotency({
-    required Map<String, List<Map<String, dynamic>>> changes,
+    required List<Map<String, dynamic>> lines,
+    String? deviceToken,
     required String deviceUuid,
     required String Function() generateIdempotencyKey,
   }) {
-    final enriched = <String, List<Map<String, dynamic>>>{};
-    changes.forEach((table, rows) {
-      enriched[table] = rows.map((row) {
-        final copy = Map<String, dynamic>.from(row);
+    final enriched = lines.map((line) {
+      final copy = Map<String, dynamic>.from(line);
+      final data = copy['data'];
+      if (data is Map) {
+        final dataCopy = Map<String, dynamic>.from(data);
         // Injecter device_uuid si absent
-        copy.putIfAbsent('device_uuid', () => deviceUuid);
+        dataCopy.putIfAbsent('device_uuid', () => deviceUuid);
         // Injecter idempotency_key si absent (UUID v4 généré)
-        copy.putIfAbsent('idempotency_key', generateIdempotencyKey);
-        return copy;
-      }).toList();
-    });
-    return SyncPushRequest(changes: enriched);
+        dataCopy.putIfAbsent('idempotency_key', generateIdempotencyKey);
+        copy['data'] = dataCopy;
+      }
+      return copy;
+    }).toList();
+    return SyncPushRequest(lines: enriched, deviceToken: deviceToken);
   }
 }
 
-/// Réponse du push (résultat par table + conflits éventuels).
+/// Résultat par ligne (PushLineResult côté serveur).
+class SyncPushLineResultDto {
+  final String? lineId;
+  final String table;
+  final String status; // applied | conflict_server_wins | invalid |
+                        // unknown_table | error | queued_for_validation
+  final int? rowId;
+  final String? detail;
+
+  const SyncPushLineResultDto({
+    this.lineId,
+    required this.table,
+    required this.status,
+    this.rowId,
+    this.detail,
+  });
+
+  factory SyncPushLineResultDto.fromJson(Map<String, dynamic> j) =>
+      SyncPushLineResultDto(
+        lineId: j['line_id'] as String?,
+        table: j['table'] as String? ?? '',
+        status: j['status'] as String? ?? 'error',
+        rowId: (j['row_id'] as num?)?.toInt(),
+        detail: j['detail'] as String?,
+      );
+}
+
+/// Réponse du push (PushResponse côté serveur).
 class SyncPushResponse {
   final DateTime serverTime;
-  final Map<String, int> applied; // table -> count
-  final List<String> conflicts; // server-wins : IDs ignorés
+  final int accepted;
+  final List<SyncPushLineResultDto> results;
 
   const SyncPushResponse({
     required this.serverTime,
-    this.applied = const {},
-    this.conflicts = const [],
+    this.accepted = 0,
+    this.results = const [],
   });
 
-  factory SyncPushResponse.fromJson(Map<String, dynamic> j) => SyncPushResponse(
+  factory SyncPushResponse.fromJson(Map<String, dynamic> j) =>
+      SyncPushResponse(
         serverTime: DateFormatter.parse(j['server_time'] as String?) ??
             DateTime.now().toUtc(),
-        applied: Map<String, int>.from(
-          (j['applied'] as Map?)?.map(
-                  (k, v) => MapEntry(k.toString(), (v as num).toInt())) ??
-              const {},
-        ),
-        conflicts: List<String>.from(j['conflicts'] as List? ?? const []),
+        accepted: (j['accepted'] as num?)?.toInt() ?? 0,
+        results: ((j['results'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((e) =>
+                SyncPushLineResultDto.fromJson(Map<String, dynamic>.from(e)))
+            .toList(),
       );
+
+  SyncPushLineResultDto? resultFor(String? lineId) {
+    if (lineId == null) return null;
+    for (final r in results) {
+      if (r.lineId == lineId) return r;
+    }
+    return null;
+  }
 }

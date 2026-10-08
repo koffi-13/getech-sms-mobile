@@ -64,13 +64,11 @@ class GradeEntryPage extends ConsumerWidget {
               message: 'Vous n\'avez pas accès à la saisie des notes (GRADE_READ).',
               icon: Icons.lock_outline,
             )
-          : (!conn.canReachServer
-              ? const EmptyState(
-                  title: 'Hors-ligne',
-                  message: 'La saisie des notes nécessite une connexion au serveur.',
-                  icon: Icons.cloud_off,
-                )
-              : const _GradeEntryBody()),
+          // [Fix-OFFLINE] Plus de garde hors-ligne bloquante : la saisie
+          // est TOUJOURS possible. Hors-ligne, la page lit le cache Drift
+          // (+ soumissions en attente) et l'enregistrement part dans
+          // l'outbox — synchronisé à la prochaine connexion.
+          : const _GradeEntryBody(),
     );
   }
 }
@@ -146,6 +144,44 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          // [Fix-OFFLINE] Bandeau d'information (jamais bloquant) : la
+          // saisie reste possible, l'enregistrement part dans l'outbox.
+          Consumer(builder: (context, ref, _) {
+            final conn = ref.watch(connectionProvider);
+            final offline = !conn.canReachServer && !conn.isChecking;
+            if (!offline) return const SizedBox.shrink();
+            return Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.tertiaryContainer,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.cloud_off_outlined,
+                      size: 18,
+                      color: Theme.of(context).colorScheme.onTertiaryContainer),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Mode hors-ligne : consultation et saisie sur le cache '
+                      'local. L\'enregistrement sera synchronisé à la prochaine '
+                      'connexion.',
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodySmall
+                          ?.copyWith(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onTertiaryContainer),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }),
           // --- Sélecteurs en cascade ---
           SectionHeader(
             title: 'Filtres',
@@ -1098,18 +1134,20 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
           .saveGrades(widget.assessment.id, grades);
       if (mounted) {
         Navigator.of(context).pop();
-        // Admin : les notes existantes modifiées peuvent être ignorées par un
-        // serveur non patché (insert-only) — message explicite au lieu d'un
-        // échec silencieux.
-        final msg = resp.skippedCount > 0
-            ? (widget.isAdmin
-                ? '${resp.savedCount} note(s) enregistrée(s), '
-                    '${resp.skippedCount} existante(s) non mise(s) à jour — '
-                    'appliquez le patch serveur GeTech-SMS (grades-admin-edit) '
-                    'pour permettre la correction des notes existantes.'
-                : '${resp.savedCount} note(s) enregistrée(s), '
-                    '${resp.skippedCount} ignorée(s) (verrouillées).')
-            : '${resp.savedCount} note(s) enregistrée(s).';
+        String msg;
+        if (resp.offlineQueued) {
+          msg = 'Enregistré hors-ligne — la synchronisation aura lieu à la '
+              'prochaine connexion au serveur.';
+        } else if (resp.queuedCount > 0) {
+          msg = '${resp.savedCount} note(s) enregistrée(s) ; '
+              '${resp.queuedCount} modification(s) en attente de validation '
+              'admin.';
+        } else if (resp.skippedCount > 0) {
+          msg = '${resp.savedCount} note(s) enregistrée(s), '
+              '${resp.skippedCount} inchangée(s).';
+        } else {
+          msg = '${resp.savedCount} note(s) enregistrée(s).';
+        }
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(msg), duration: const Duration(seconds: 4)),
         );
@@ -1202,15 +1240,10 @@ class _GradeRowState extends State<_GradeRow> {
     bool? isAbsent,
     String? comment,
   }) =>
-      GradeEntryDto(
-        studentId: widget.grade.studentId,
-        studentName: widget.grade.studentName,
-        studentMatricule: widget.grade.studentMatricule,
-        gradeId: widget.grade.gradeId,
+      widget.grade.copyWith(
         value: value,
-        isAbsent: isAbsent ?? widget.grade.isAbsent,
-        comment: comment ?? widget.grade.comment,
-        isLocked: widget.grade.isLocked,
+        isAbsent: isAbsent,
+        comment: comment,
       );
 
   @override
@@ -1235,12 +1268,12 @@ class _GradeRowState extends State<_GradeRow> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    // Verrou appliqué uniquement aux NON-admins : un admin peut corriger une
-    // note déjà saisie (« Pour les administrateurs, ne verrouillez pas la
-    // modification des notes »).
-    final locked = widget.grade.isLocked && !widget.isAdmin;
+    // [Grade-Validation] Fin du verrouillage des notes existantes : les
+    // champs restent éditables (enseignant : la modification devient une
+    // proposition à valider/rejeter par un admin ; admin : application
+    // directe). La ligne porte une MARQUE de statut (voir _GradeMarkChip).
     final readOnly = !widget.editable;
-    final disabled = locked || readOnly;
+    final disabled = readOnly;
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
       child: Padding(
@@ -1264,31 +1297,12 @@ class _GradeRowState extends State<_GradeRow> {
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                          if (locked)
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: Colors.orange.shade50,
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(Icons.lock,
-                                      size: 11, color: Colors.orange.shade700),
-                                  const SizedBox(width: 2),
-                                  Text(
-                                    'Verrouillée',
-                                    style: theme.textTheme.labelSmall?.copyWith(
-                                      color: Colors.orange.shade700,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          if (readOnly && !locked)
+                          // [Grade-Validation] Marque de statut de la note
+                          // (proposition en attente / validée / rejetée /
+                          // synchronisation différée) au lieu de l'ancien
+                          // badge « Verrouillée ».
+                          _GradeMarkChip(grade: widget.grade),
+                          if (readOnly)
                             Padding(
                               padding: const EdgeInsets.only(left: 4),
                               child: Icon(Icons.visibility_outlined,
@@ -1360,6 +1374,90 @@ class _GradeRowState extends State<_GradeRow> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// [Grade-Validation] Badge de marque d'une note :
+///   - 'pending_sync' (saisie hors-ligne) : « Sera synchronisée » ;
+///   - 'PENDING' (serveur) : « X → Y · en attente de validation » ;
+///   - 'APPROVED' : « Modification validée » ;
+///   - 'REJECTED' : « Modifiée — rejetée (valeur actuelle conservée) » ;
+///   - sinon : pas de badge (note ordinaire).
+class _GradeMarkChip extends StatelessWidget {
+  const _GradeMarkChip({required this.grade});
+
+  final GradeEntryDto grade;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final status = grade.modificationStatus ??
+        (grade.localSyncMark == 'pending_sync' ? 'pending_sync' : null);
+    if (status == null) return const SizedBox.shrink();
+
+    String label;
+    Color fg;
+    Color bg;
+    IconData icon;
+    switch (status) {
+      case 'pending_sync':
+        label = 'Sera synchronisée';
+        fg = Colors.blue.shade800;
+        bg = Colors.blue.shade50;
+        icon = Icons.sync_outlined;
+        break;
+      case 'PENDING':
+        final oldV = grade.modification?.oldValue;
+        final newV = grade.modification?.newValue ??
+            grade.value; // hors-ligne : valeur proposée affichée
+        label = oldV != null
+            ? 'En attente de validation (${oldV.toStringAsFixed(oldV.truncateToDouble() == oldV ? 0 : 1)} → ${newV?.toStringAsFixed(newV!.truncateToDouble() == newV ? 0 : 1) ?? '?'})'
+            : 'En attente de validation';
+        fg = Colors.orange.shade800;
+        bg = Colors.orange.shade50;
+        icon = Icons.hourglass_top_outlined;
+        break;
+      case 'APPROVED':
+        label = 'Modification validée';
+        fg = Colors.green.shade800;
+        bg = Colors.green.shade50;
+        icon = Icons.check_circle_outline;
+        break;
+      case 'REJECTED':
+        label = 'Modifiée — rejetée (ancienne valeur conservée)';
+        fg = Colors.red.shade700;
+        bg = Colors.red.shade50;
+        icon = Icons.block_outlined;
+        break;
+      default:
+        return const SizedBox.shrink();
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 11, color: fg),
+          const SizedBox(width: 2),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: fg,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

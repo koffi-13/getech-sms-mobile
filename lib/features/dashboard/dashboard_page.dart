@@ -17,6 +17,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/auth/teacher_scope.dart';
 import '../../core/config/constants.dart';
+import '../../core/notifications/notification_service.dart';
 import '../../core/sync/sync_engine.dart';
 import '../../core/utils/formatters.dart';
 import '../../core/utils/permissions.dart';
@@ -46,10 +47,17 @@ class DashboardPage extends ConsumerWidget {
     // L'accueil d'un enseignant est totalement différent : statistiques de
     // ses classes uniquement, sans appel à /dashboard/stats (qui n'est pas
     // scopé par rôle et exposerait des données financières).
-    final isTeacher = !auth.isAdminOrHeadmaster &&
-        (auth.hasDeclaredTeacherRole ||
-            scopeAsync.maybeWhen(
-                data: (s) => s.isTeacher, orElse: () => false));
+    //
+    // [Fix-TEACHER-DASHBOARD] Durcissement de la détection : tant que le
+    // scope n'a pas tranché (chargement/erreur) ET qu'aucun rôle TEACHER
+    // n'est déclaré, on affiche un état d'attente — JAMAIS la vue générique
+    // (qui contient paiements récents + élèves récemment inscrits).
+    final declared = auth.hasDeclaredTeacherRole;
+    final scopeIsTeacher = scopeAsync.maybeWhen(
+        data: (s) => s.isTeacher, orElse: () => false);
+    final isTeacher = !auth.isAdminOrHeadmaster && (declared || scopeIsTeacher);
+    final scopePending =
+        !auth.isAdminOrHeadmaster && !declared && !scopeAsync.hasValue;
 
     return Scaffold(
       appBar: AppBar(
@@ -58,9 +66,24 @@ class DashboardPage extends ConsumerWidget {
           _SyncButton(),
         ],
       ),
-      body: isTeacher
-          ? _TeacherDashboard(isOffline: isOffline)
-          : RefreshIndicator(
+      body: scopePending
+          ? (scopeAsync.hasError
+              ? ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  children: [
+                    AppErrorWidget(
+                      message:
+                          'Impossible de déterminer votre profil enseignant.',
+                      onRetry: () =>
+                          ref.invalidate(teacherScopeProvider),
+                    ),
+                  ],
+                )
+              : const AppLoading(
+                  label: 'Détection de votre profil…'))
+          : isTeacher
+              ? _TeacherDashboard(isOffline: isOffline)
+              : RefreshIndicator(
               onRefresh: () async {
                 ref.invalidate(dashboardStatsProvider);
                 // Attendre la prochaine valeur pour garder le spinner affiché.
@@ -70,6 +93,7 @@ class DashboardPage extends ConsumerWidget {
                 data: (stats) => _DashboardContent(
                   stats: stats,
                   isOffline: isOffline,
+                  perms: auth.permissions,
                 ),
                 loading: () =>
                     const AppLoading(label: 'Chargement des statistiques…'),
@@ -118,6 +142,12 @@ class _SyncButtonState extends ConsumerState<_SyncButton> {
     SyncResult? result;
     try {
       result = await ref.read(syncEngineProvider).syncNow();
+      // [Notifications] Suit la validation/rejet des modifications de notes.
+      if (result.isSuccess) {
+        ref
+            .read(notificationServiceProvider)
+            .maybeCheckGradeModifications();
+      }
     } catch (_) {
       result = null;
     } finally {
@@ -156,18 +186,27 @@ class _SyncButtonState extends ConsumerState<_SyncButton> {
 }
 
 /// Contenu complet du tableau de bord (KPIs + sections récentes).
+///
+/// [Fix-TEACHER-DASHBOARD] Les sections « Paiements récents » et « Élèves
+/// récemment inscrits » sont désormais filtrées par permission (elles ne
+/// sont plus rendues inconditionnellement) : PAYMENT_READ pour les
+/// paiements, STUDENT_READ pour les inscriptions.
 class _DashboardContent extends StatelessWidget {
   const _DashboardContent({
     required this.stats,
     required this.isOffline,
+    required this.perms,
   });
 
   final DashboardStatsDto stats;
   final bool isOffline;
+  final List<String> perms;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final canSeePayments = hasPermission(perms, RbacPermissions.paymentRead);
+    final canSeeStudents = hasPermission(perms, RbacPermissions.studentRead);
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
@@ -178,10 +217,14 @@ class _DashboardContent extends StatelessWidget {
             child: _OfflineBanner(),
           ),
         _KpiGrid(stats: stats),
-        const SizedBox(height: 16),
-        _RecentPaymentsCard(payments: stats.recentPayments),
-        const SizedBox(height: 16),
-        _RecentStudentsCard(students: stats.recentStudents),
+        if (canSeePayments) ...[
+          const SizedBox(height: 16),
+          _RecentPaymentsCard(payments: stats.recentPayments),
+        ],
+        if (canSeeStudents) ...[
+          const SizedBox(height: 16),
+          _RecentStudentsCard(students: stats.recentStudents),
+        ],
         const SizedBox(height: 8),
         Text(
           'Devise : $defaultCurrency',

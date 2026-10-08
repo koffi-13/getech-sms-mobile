@@ -93,8 +93,12 @@ class AppDatabase extends _$AppDatabase {
   /// Pour tests : permettre d'injecter une connexion in-memory.
   AppDatabase.forTesting(super.e);
 
+  /// [Multi-serveurs] ouvre le fichier dédié au profil actif
+  /// (`getech_sms.db` pour le profil hérité, `getech_sms_<id>.db` sinon).
+  AppDatabase.forFile(String fileName) : super(_openConnection(fileName));
+
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -126,6 +130,41 @@ class AppDatabase extends _$AppDatabase {
             await m.addColumn(studentAbsences, studentAbsences.deviceUuid);
             await m.addColumn(studentAbsences, studentAbsences.syncVersion);
           }
+          // v2 → v3 [Grade-Validation] : marques de la file de validation
+          // sur les notes (proposition en attente / rejetée + valeur
+          // proposée). Voir lib/features/grades/grade_controller.dart.
+          if (from < 3) {
+            await m.addColumn(grades, grades.syncStatus);
+            await m.addColumn(grades, grades.proposedValue);
+            await m.addColumn(grades, grades.proposedIsAbsent);
+            await m.addColumn(grades, grades.proposedComments);
+          }
+          // v3 → v4 [Merge sync-idempotency] : aligne les deux lignées.
+          // Les bases issues de main (v3) n'ont PAS les colonnes
+          // d'idempotence ; celles de la branche (v2) les ont déjà reçues
+          // via from<2. Ajout tolérant : on ne touche pas aux colonnes
+          // déjà présentes (introspection pragma_table_info).
+          if (from < 4) {
+            Future<void> addIfMissing(
+              TableInfo t,
+              GeneratedColumn c,
+            ) async {
+              final present = await customSelect(
+                "SELECT 1 FROM pragma_table_info('${t.actualTableName}') "
+                "WHERE name = '${c.name}' LIMIT 1",
+              ).get();
+              if (present.isEmpty) {
+                await m.addColumn(t, c);
+              }
+            }
+
+            await addIfMissing(grades, grades.idempotencyKey);
+            await addIfMissing(grades, grades.deviceUuid);
+            await addIfMissing(grades, grades.syncVersion);
+            await addIfMissing(studentAbsences, studentAbsences.idempotencyKey);
+            await addIfMissing(studentAbsences, studentAbsences.deviceUuid);
+            await addIfMissing(studentAbsences, studentAbsences.syncVersion);
+          }
         },
         beforeOpen: (details) async {
           await customStatement('PRAGMA foreign_keys = ON;');
@@ -148,17 +187,25 @@ class AppDatabase extends _$AppDatabase {
   }
 }
 
-LazyDatabase _openConnection() {
+LazyDatabase _openConnection([String fileName = 'getech_sms.db']) {
   return LazyDatabase(() async {
     final dir = await getApplicationDocumentsDirectory();
-    final file = File(p.join(dir.path, 'getech_sms.db'));
+    final file = File(p.join(dir.path, fileName));
     return NativeDatabase.createInBackground(file);
   });
 }
 
-/// Provider Riverpod de la base de données (singleton).
+/// Nom du fichier de base du profil actif — piloté par le registre
+/// multi-serveurs (`activeDbFileNameProvider.notifier.state = ...`).
+final activeDbFileNameProvider = StateProvider<String>((ref) => 'getech_sms.db');
+
+/// Provider Riverpod de la base de données.
+///
+/// WATCH le fichier actif : lors d'une bascule de serveur, l'ancienne base
+/// est fermée (onDispose) et la base du nouveau serveur est ouverte.
 final databaseProvider = Provider<AppDatabase>((ref) {
-  final db = AppDatabase();
+  final fileName = ref.watch(activeDbFileNameProvider);
+  final db = AppDatabase.forFile(fileName);
   ref.onDispose(db.close);
   return db;
 });
