@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart' as log_pkg;
 
 import '../../features/connections/connection_state.dart';
+import '../../shared/models/grade_dto.dart';
 import '../../shared/models/sync_dto.dart';
 import '../database/database.dart';
 import '../network/api_endpoints.dart';
@@ -143,10 +144,15 @@ class SyncResult {
 // ---------------------------------------------------------------------------
 
 class SyncEngine {
-  SyncEngine(this._ref) : _db = _ref.read(databaseProvider);
+  SyncEngine(this._ref) {
+    _db = _ref.watch(databaseProvider);
+  }
 
   final Ref _ref;
-  final AppDatabase _db;
+
+  /// Base locale — initialisée depuis le provider (WATCH) pour suivre la
+  /// bascule de serveur : le moteur est recréé avec la base du profil actif.
+  late final AppDatabase _db;
 
   Future<SyncResult> syncNow() async {
     final notifier = _ref.read(syncProgressProvider.notifier);
@@ -201,7 +207,8 @@ class SyncEngine {
 
   Future<SyncResult> pull() async {
     final conn = _ref.read(connectionProvider);
-    if (!conn.canReachServer || conn.serverUrl == null) {
+    // [Fix-OFFLINE] `checking` ne bloque pas le pull (démarrage à froid).
+    if ((!conn.canReachServer && !conn.isChecking) || conn.serverUrl == null) {
       return SyncResult(
         timestamp: DateTime.now(),
         errors: ['Serveur injoignable'],
@@ -266,7 +273,9 @@ class SyncEngine {
 
   Future<SyncResult> push() async {
     final conn = _ref.read(connectionProvider);
-    if (!conn.canReachServer || conn.serverUrl == null) {
+    // [Fix-OFFLINE] L'état `checking` (démarrage à froid) ne bloque pas :
+    // la requête échouera d'elle-même si le serveur est injoignable.
+    if ((!conn.canReachServer && !conn.isChecking) || conn.serverUrl == null) {
       return SyncResult(
         timestamp: DateTime.now(),
         errors: ['Serveur injoignable'],
@@ -280,83 +289,294 @@ class SyncEngine {
       return SyncResult(timestamp: DateTime.now());
     }
 
-    final changes = <String, List<Map<String, dynamic>>>{};
-    for (final entry in pending) {
-      changes.putIfAbsent(entry.tableNameColumn, () => []).add(entry.payloadMap);
+    var pushed = 0;
+    final errors = <String>[];
+
+    // ---------------------------------------------------------------------
+    // 1. [Grade-Validation] Soumissions de notes hors-ligne → endpoint
+    // dédié (POST /grades/assessments/{id}/grades) avec sémantique de
+    // file de validation. Jamais via /sync/push (le push direct des
+    // notes serait écrasé / bypasserait la validation).
+    // ---------------------------------------------------------------------
+    final submissions = pending
+        .where((e) => e.tableNameColumn == 'grade_submission')
+        .toList(growable: false);
+    final rest = pending
+        .where((e) => e.tableNameColumn != 'grade_submission')
+        .toList(growable: false);
+
+    for (final entry in submissions) {
+      try {
+        pushed += await _pushGradeSubmission(entry, outbox);
+      } catch (e) {
+        _log.w('Soumission notes #${entry.id} échouée : $e');
+        errors.add('Notes hors-ligne : $e');
+        // Garde-fou anti-retry infini : après 5 tentatives on abandonne
+        // l'entrée (erreur conservée dans lastError).
+        if (entry.attempts >= 4) {
+          await outbox.markProcessed(
+            entry.id,
+            error: 'Abandon après ${entry.attempts + 1} tentatives : $e',
+          );
+        }
+      }
     }
 
+    if (rest.isEmpty) {
+      return pushed == 0 && errors.isEmpty
+          ? SyncResult(timestamp: DateTime.now())
+          : SyncResult(pushed: pushed, timestamp: DateTime.now(), errors: errors);
+    }
+
+    // ---------------------------------------------------------------------
+    // 2. Lignes classiques — [Fix-SYNC-PUSH] contrat RÉEL du serveur :
+    // POST /sync/push {lines: [{line_id, op, table, data}]}. L'ancien
+    // format {changes: {table: [rows]}} provoquait un 422 permanent.
+    // ---------------------------------------------------------------------
     final dio = _ref.read(dioProvider);
     final url = buildUrl(conn.serverUrl!, ApiEndpoints.syncPush);
+    final lines = [
+      for (final e in rest)
+        {
+          'line_id': 'ob-${e.id}',
+          'table': e.tableNameColumn,
+          'op': e.operation.toLowerCase() == 'delete' ? 'delete' : 'upsert',
+          'data': e.payloadMap,
+        }
+    ];
 
     try {
-      _log.i('Push vers $url : ${pending.length} entrées '
-          '(${changes.keys.length} tables)');
+      _log.i('Push vers $url : ${lines.length} lignes (+${submissions.length} soumissions notes)');
       final resp = await dio.postJson<Map<String, dynamic>>(
         url,
-        data: SyncPushRequest(changes: changes).toJson(),
+        data: SyncPushRequest(lines: lines).toJson(),
       );
       final data = resp.data;
       if (data == null) {
         return SyncResult(
           timestamp: DateTime.now(),
-          errors: ['Réponse vide du serveur'],
+          pushed: pushed,
+          errors: [...errors, 'Réponse vide du serveur'],
         );
       }
 
       final pushResp = SyncPushResponse.fromJson(data);
-      final appliedCount =
-          pushResp.applied.values.fold(0, (sum, n) => sum + n);
-      _log.i('Push terminé : $appliedCount appliqués, '
-          '${pushResp.conflicts.length} conflits');
+      _log.i('Push terminé : ${pushResp.accepted} appliqués '
+          '(${pushResp.results.length} lignes)');
 
-      for (final entry in pending) {
-        final conflictKey = entry.recordId != null
-            ? '${entry.tableNameColumn}:${entry.recordId}'
-            : null;
-        final isConflict = conflictKey != null &&
-            pushResp.conflicts.contains(conflictKey);
-
-        if (isConflict) {
+      for (final entry in rest) {
+        final lineId = 'ob-${entry.id}';
+        final r = pushResp.resultFor(lineId);
+        if (r == null) {
           await outbox.markProcessed(
             entry.id,
-            error: 'Conflit (server-wins) — ignoré par le serveur',
+            error: 'Sans réponse du serveur pour cette ligne',
           );
-        } else {
-          await outbox.markProcessed(entry.id);
-          if (entry.recordId != null) {
-            final isDelete =
-                entry.operation.toUpperCase() == 'DELETE';
-            await _updateRowSyncState(
-              entry.tableNameColumn,
-              entry.recordId!,
-              pushResp.serverTime,
-              deleted: isDelete,
+          continue;
+        }
+        switch (r.status) {
+          case 'applied':
+            pushed++;
+            await outbox.markProcessed(entry.id);
+            if (entry.recordId != null) {
+              await _updateRowSyncState(
+                entry.tableNameColumn,
+                entry.recordId!,
+                pushResp.serverTime,
+                deleted: entry.operation.toUpperCase() == 'DELETE',
+              );
+            }
+            break;
+          case 'queued_for_validation':
+            // [Grade-Validation] Cas théorique (les notes passent par
+            // l'endpoint dédié) — traité comme un succès partiel.
+            pushed++;
+            await outbox.markProcessed(entry.id, error: r.detail);
+            break;
+          default:
+            // conflict_server_wins | invalid | unknown_table | error :
+            // marqué traité (pas de retry infini), erreur conservée.
+            await outbox.markProcessed(
+              entry.id,
+              error: '${r.status} : ${r.detail ?? ''}',
             );
-          }
         }
       }
 
       await outbox.clearProcessed();
 
-      final errors = pushResp.conflicts.isEmpty
-          ? const <String>[]
-          : [
-              '${pushResp.conflicts.length} conflit(s) résolu(s) '
-              '(server-wins) — re-pull requis',
-            ];
+      final conflicts = pushResp.results
+          .where((r) => r.status == 'conflict_server_wins')
+          .length;
+      if (conflicts > 0) {
+        errors.add(
+          '$conflicts conflit(s) résolu(s) (server-wins) — re-pull requis',
+        );
+      }
 
       return SyncResult(
-        pushed: appliedCount,
+        pushed: pushed,
         timestamp: pushResp.serverTime,
         errors: errors,
       );
     } on ApiException catch (e) {
       _log.w('Push échoué (API) : ${e.message}');
-      return SyncResult(timestamp: DateTime.now(), errors: [e.message]);
+      return SyncResult(
+        timestamp: DateTime.now(),
+        pushed: pushed,
+        errors: [...errors, e.message],
+      );
     } catch (e) {
       _log.e('Push échoué (inattendu) : $e');
-      return SyncResult(timestamp: DateTime.now(), errors: [e.toString()]);
+      return SyncResult(
+        timestamp: DateTime.now(),
+        pushed: pushed,
+        errors: [...errors, e.toString()],
+      );
     }
+  }
+
+  /// Pousse UNE soumission de notes hors-ligne via l'endpoint dédié et
+  /// applique les marques locales (queued / résolues).
+  Future<int> _pushGradeSubmission(
+    OutboxEntry entry,
+    Outbox outbox,
+  ) async {
+    final conn = _ref.read(connectionProvider);
+    final dio = _ref.read(dioProvider);
+    final payload = entry.payloadMap;
+    final assessmentId = (payload['assessment_id'] as num?)?.toInt() ?? 0;
+    final rows = ((payload['grades'] as List?) ?? const [])
+        .whereType<Map>()
+        .map(Map<String, dynamic>.from)
+        .toList();
+    if (assessmentId == 0 || rows.isEmpty) {
+      await outbox.markProcessed(entry.id, error: 'Soumission vide — ignorée');
+      return 0;
+    }
+
+    final url = buildUrl(conn.serverUrl!, ApiEndpoints.assessmentGrades(assessmentId));
+    final resp = await dio.post(url, data: {'grades': rows});
+    final data = resp.data is Map
+        ? Map<String, dynamic>.from(resp.data as Map)
+        : const <String, dynamic>{};
+    final body = SaveGradesResponse.fromJson(data);
+
+    // Marques locales par ligne (valeur proposée conservée pour
+    // l'affichage « X -> Y · en attente de validation »).
+    await _applySubmissionMarks(assessmentId, rows, body);
+    await outbox.markProcessed(entry.id);
+    _log.i('Soumission notes #$assessmentId : ${body.savedCount} saved, '
+        '${body.queuedCount} queued, ${body.skippedCount} unchanged');
+    return body.savedCount + body.queuedCount + body.skippedCount;
+  }
+
+  /// Applique les marques issues d'une soumission sur les lignes Drift
+  /// locales (les lignes existent déjà — répliquées par le pull).
+  Future<void> _applySubmissionMarks(
+    int assessmentId,
+    List<Map<String, dynamic>> requestRows,
+    SaveGradesResponse body,
+  ) async {
+    final byStudent = <int, Map<String, dynamic>>{};
+    for (final r in requestRows) {
+      final sid = (r['student_id'] as num?)?.toInt();
+      if (sid != null) byStudent[sid] = r;
+    }
+
+    for (final line in body.results) {
+      final gradeId = line.gradeId;
+      if (gradeId == null) continue; // note nouvelle : le pull la matérialisera
+      final request = byStudent[line.studentId];
+      final queued = line.action == 'queued';
+      await (_db.update(_db.grades)..where((t) => t.id.equals(gradeId))).write(
+        GradesCompanion(
+          syncStatus: queued ? const Value('queued') : const Value(null),
+          proposedValue: queued
+              ? Value((request?['value'] as num?)?.toDouble())
+              : const Value(null),
+          proposedIsAbsent: queued
+              ? Value((request?['is_absent'] as bool?) ?? false)
+              : const Value(null),
+          proposedComments: queued
+              ? Value(request?['comment'] as String?)
+              : const Value(null),
+          isDirty: const Value(false),
+        ),
+      );
+    }
+  }
+
+  /// [Grade-Validation] Application du pull des notes avec préservation
+  /// des marques locales :
+  ///   - une ligne locale `queued` n'est PAS écrasée si la valeur serveur
+  ///     n'a pas encore repris la valeur proposée (l'admin n'a pas tranché) ;
+  ///   - quand la valeur serveur rejoint la valeur proposée, la marque est
+  ///     résolue (syncStatus -> null) ;
+  ///   - les colonnes proposées (proposedValue…) survivent à l'upsert.
+  Future<void> _applyGradesPull(
+    List<Map<String, dynamic>> rows,
+    DateTime syncedAt,
+  ) async {
+    final ids = rows.map(_rId).where((id) => id > 0).toList();
+    final byId = <int, Grade>{};
+    if (ids.isNotEmpty) {
+      final existing =
+          await (_db.select(_db.grades)..where((t) => t.id.isIn(ids))).get();
+      for (final g in existing) {
+        byId[g.id] = g;
+      }
+    }
+
+    await _db.batch((b) {
+      for (final row in rows) {
+        final id = _rId(row);
+        if (id <= 0) continue;
+        final local = byId[id];
+
+        // Protection : proposition pas encore poussée -> le pull attend.
+        if (local != null && local.syncStatus == 'pending') continue;
+
+        final serverValue = _rDblN(row, 'value');
+        String? nextStatus = local?.syncStatus;
+        double? nextProposed = local?.proposedValue;
+        bool? nextProposedAbsent = local?.proposedIsAbsent;
+        String? nextProposedComments = local?.proposedComments;
+
+        // Résolution implicite : l'admin a appliqué la valeur proposée.
+        if (local != null &&
+            local.syncStatus == 'queued' &&
+            serverValue != null &&
+            local.proposedValue != null &&
+            (serverValue - local.proposedValue!).abs() < 0.001) {
+          nextStatus = null;
+          nextProposed = null;
+          nextProposedAbsent = null;
+          nextProposedComments = null;
+        }
+
+        b.insert(
+          _db.grades,
+          GradesCompanion.insert(
+            id: Value(id),
+            assessmentId: _rInt(row, 'assessment_id'),
+            studentId: _rInt(row, 'student_id'),
+            value: Value(serverValue),
+            isAbsent: Value(_rBool(row, 'is_absent')),
+            comments: Value(_rStrN(row, 'comments')),
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: const Value(false),
+            // [Grade-Validation] marques préservées / résolues.
+            syncStatus: Value(nextStatus),
+            proposedValue: Value(nextProposed),
+            proposedIsAbsent: Value(nextProposedAbsent),
+            proposedComments: Value(nextProposedComments),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
+      }
+    });
   }
 
   Future<void> _applyTableChanges(
@@ -365,6 +585,14 @@ class SyncEngine {
     DateTime syncedAt,
   ) async {
     if (rows.isEmpty) return;
+
+    // [Grade-Validation] Les notes suivent un chemin dédié : préservation
+    // des marques (queued/rejected + valeur proposée) et protection des
+    // propositions en attente contre l'écrasement par le pull.
+    if (table == 'grades') {
+      await _applyGradesPull(rows, syncedAt);
+      return;
+    }
 
     try {
       await _db.batch((b) {
@@ -550,24 +778,8 @@ class SyncEngine {
               );
               break;
 
-            case 'grades':
-              b.insert(
-                _db.grades,
-                GradesCompanion.insert(
-                  id: Value(_rId(row)),
-                  assessmentId: _rInt(row, 'assessment_id'),
-                  studentId: _rInt(row, 'student_id'),
-                  value: Value(_rDblN(row, 'value')),
-                  isAbsent: Value(_rBool(row, 'is_absent')),
-                  comments: Value(_rStrN(row, 'comments')),
-                  syncedAt: Value(syncedAt),
-                  isDirty: const Value(false),
-                  isDeleted: const Value(false),
-                ),
-                mode: InsertMode.insertOrReplace,
-              );
-              break;
-
+            // [Grade-Validation] `grades` est routé en tête de méthode vers
+            // _applyGradesPull (préservation des marques) — pas de cas ici.
             case 'students':
               b.insert(
                 _db.students,
@@ -986,6 +1198,11 @@ class SyncEngine {
           syncedAt: Value(syncedAt),
           isDirty: const Value(false),
           isDeleted: Value(deleted),
+          // [Grade-Validation] écriture directe appliquée -> marque résolue.
+          syncStatus: const Value(null),
+          proposedValue: const Value(null),
+          proposedIsAbsent: const Value(null),
+          proposedComments: const Value(null),
         ));
         break;
       case 'students':
@@ -1155,4 +1372,8 @@ class SyncEngine {
   }
 }
 
-final syncEngineProvider = Provider<SyncEngine>((ref) => SyncEngine(ref));
+final syncEngineProvider = Provider<SyncEngine>((ref) {
+  // WATCH databaseProvider : invalide le moteur lors d'une bascule.
+  ref.watch(databaseProvider);
+  return SyncEngine(ref);
+});

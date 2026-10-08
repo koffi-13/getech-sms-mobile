@@ -18,12 +18,15 @@ library;
 
 import 'package:collection/collection.dart';
 import 'package:dio/dio.dart';
+import 'package:drift/drift.dart' as d;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/auth/auth_state.dart';
+import '../../core/database/database.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
+import '../../core/sync/outbox.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
 import '../../shared/models/grade_dto.dart';
@@ -128,18 +131,56 @@ class GradeController {
   Dio get _dio => _ref.read(dioProvider);
   String? get _serverUrl => _ref.read(connectionProvider).serverUrl;
 
-  /// Sauvegarde en lot des notes d'une évaluation :
-  /// `POST /grades/assessments/{id}/grades` (RBAC GRADE_EDIT).
+  bool get _definitivelyOffline {
+    final conn = _ref.read(connectionProvider);
+    return !conn.canReachServer && !conn.isChecking;
+  }
+
+  /// Sauvegarde en lot des notes d'une évaluation — [Offline-First].
   ///
-  /// Le serveur attend `{grades: list[dict]}` (GradeBulkSaveRequest). On
-  /// sérialise chaque [GradeEntryDto] via `toJson()` puis on invalide le
-  /// provider des notes de l'évaluation.
+  /// TOUJOURS :
+  ///   1. les marques locales (propositions) sont persistées dans Drift
+  ///      (lignes existantes : syncStatus='pending', proposedValue=X) ;
+  ///   2. les NOUVELLES notes n'écrivent PAS de ligne Drift (pas d'id
+  ///      serveur) — elles vivent dans la soumission ;
+  ///
+  /// PUIS :
+  ///   - en ligne : `POST /grades/assessments/{id}/grades` immédiat ;
+  ///   - hors-ligne : la soumission complète part dans l'outbox
+  ///     (`grade_submission`) et sera poussée par [SyncEngine] à la
+  ///     prochaine connexion (avec sémantique de file de validation
+  ///     serveur : les modifications de notes existantes par un non-admin
+  ///     deviennent des propositions à valider/rejeter par un admin).
   Future<SaveGradesResponse> saveGrades(
     int assessmentId,
     List<GradeEntryDto> entries,
   ) async {
+    // 1. Persistance locale des propositions (Drift).
+    await _persistLocalPropositions(assessmentId, entries);
+
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
+
+    // 2. Hors-ligne : outbox « grade_submission ».
+    if (_definitivelyOffline) {
+      await _ref.read(outboxProvider).enqueue(
+        table: 'grade_submission',
+        operation: 'UPSERT',
+        payload: {
+          'assessment_id': assessmentId,
+          'grades': entries.map((e) => e.toJson()).toList(),
+        },
+      );
+      _ref.invalidate(assessmentGradesProvider(assessmentId));
+      return const SaveGradesResponse(
+        offlineQueued: true,
+        savedCount: 0,
+        skippedCount: 0,
+        queuedCount: 0,
+      );
+    }
+
+    // 3. En ligne : POST direct.
     final body = SaveGradesRequest(
       grades: entries.map((e) => e.toJson()).toList(),
     ).toJson();
@@ -151,11 +192,76 @@ class GradeController {
         ? Map<String, dynamic>.from(resp.data as Map)
         : <String, dynamic>{};
     final result = SaveGradesResponse.fromJson(data);
+
+    // 4. Marques locales miroir de la réponse serveur (queued -> 'queued').
+    await _mirrorResponseMarks(assessmentId, entries, result);
+
     _ref.invalidate(assessmentGradesProvider(assessmentId));
-    // Invalide aussi la liste des évaluations (le compteur gradesEnteredCount
-    // peut avoir changé).
     _invalidateAssessmentsFor(assessmentId);
     return result;
+  }
+
+  /// Marque localement (Drift) les PROPOSITIONS de modification : les lignes
+  /// EXISTANTES reçoivent syncStatus='pending' + la valeur proposée (la
+  /// colonne `value` reste la valeur serveur actuelle).
+  Future<void> _persistLocalPropositions(
+    int assessmentId,
+    List<GradeEntryDto> entries,
+  ) async {
+    final db = _ref.read(databaseProvider);
+    final rows = await (db.select(db.grades)
+          ..where((t) => t.assessmentId.equals(assessmentId))
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    final byStudent = {for (final g in rows) g.studentId: g};
+
+    for (final e in entries) {
+      final existing = byStudent[e.studentId];
+      if (existing == null) continue; // note nouvelle : pas de ligne locale
+      await (db.update(db.grades)..where((t) => t.id.equals(existing.id)))
+          .write(GradesCompanion(
+        syncStatus: const d.Value('pending'),
+        proposedValue: d.Value(e.value),
+        proposedIsAbsent: d.Value(e.isAbsent),
+        proposedComments: d.Value(e.comment),
+        isDirty: const d.Value(true),
+      ));
+    }
+  }
+
+  /// Après un POST en ligne, reflète la réponse serveur sur les marques
+  /// locales ('queued' pour les propositions, null pour les notes
+  /// appliquées/inchangées).
+  Future<void> _mirrorResponseMarks(
+    int assessmentId,
+    List<GradeEntryDto> sent,
+    SaveGradesResponse result,
+  ) async {
+    final db = _ref.read(databaseProvider);
+    final rows = await (db.select(db.grades)
+          ..where((t) => t.assessmentId.equals(assessmentId))
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    final byStudent = {for (final g in rows) g.studentId: g};
+    final sentByStudent = {for (final e in sent) e.studentId: e};
+
+    for (final line in result.results) {
+      final gradeId = line.gradeId;
+      if (gradeId == null) continue;
+      final e = sentByStudent[line.studentId];
+      final queued = line.action == 'queued';
+      await (db.update(db.grades)..where((t) => t.id.equals(gradeId)))
+          .write(GradesCompanion(
+        syncStatus: queued ? const d.Value('queued') : const d.Value(null),
+        proposedValue:
+            queued ? d.Value(e?.value) : const d.Value(null),
+        proposedIsAbsent:
+            queued ? d.Value(e?.isAbsent ?? false) : const d.Value(null),
+        proposedComments:
+            queued ? d.Value(e?.comment) : const d.Value(null),
+        isDirty: const d.Value(false),
+      ));
+    }
   }
 
   /// Crée une évaluation : `POST /grades/assessments` (RBAC GRADE_EDIT).
@@ -490,26 +596,221 @@ List<AssessmentDto> _parseAssessmentList(dynamic data) {
   return const [];
 }
 
-/// Notes d'une évaluation (entrées par élève) :
-/// `GET /grades/assessments/{id}/grades` → list[GradeEntryResponse].
+/// Notes d'une évaluation (entrées par élève) — [Offline-First].
+///
+/// En ligne : `GET /grades/assessments/{id}/grades` (les marques serveur
+/// `modification_status` sont alors réconciliées dans Drift pour un
+/// affichage cohérent lors des prochaines consultations hors-ligne).
+/// Hors-ligne : reconstruction depuis Drift (notes répliquées + marques
+/// queued/rejected) + superposition des soumissions en attente de
+/// l'outbox (notes nouvelles ou propositions pas encore poussées).
 final assessmentGradesProvider = FutureProvider.autoDispose
     .family<List<GradeEntryDto>, int>((ref, assessmentId) async {
   final conn = ref.watch(connectionProvider);
   if (!conn.isPaired || conn.serverUrl == null) return const [];
+
+  final definitelyOffline = !conn.canReachServer && !conn.isChecking;
+  if (definitelyOffline) {
+    return _gradeEntriesFromLocal(ref, assessmentId);
+  }
+
   final dio = ref.watch(dioProvider);
   try {
     final resp = await dio.get(
       buildUrl(conn.serverUrl!, ApiEndpoints.assessmentGrades(assessmentId)),
     );
-    return _parseGradeEntryList(resp.data);
+    final entries = _parseGradeEntryList(resp.data);
+    // Réconcilie les marques serveur dans Drift (affichage hors-ligne).
+    await _reconcileServerMarks(ref, assessmentId, entries);
+    return entries;
   } on DioException catch (e) {
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
     if (api.statusCode == 403) return const [];
-    rethrow;
+    // Réseau indisponible en cours de requête -> repli local.
+    return _gradeEntriesFromLocal(ref, assessmentId);
+  } catch (_) {
+    return _gradeEntriesFromLocal(ref, assessmentId);
   }
 });
+
+/// Réconcilie les marques serveur (PENDING/APPROVED/REJECTED) dans Drift.
+Future<void> _reconcileServerMarks(
+  Ref ref,
+  int assessmentId,
+  List<GradeEntryDto> entries,
+) async {
+  try {
+    final db = ref.read(databaseProvider);
+    final rows = await (db.select(db.grades)
+          ..where((t) => t.assessmentId.equals(assessmentId))
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    final byGradeId = {for (final g in rows) g.id: g};
+
+    for (final e in entries) {
+      final gradeId = e.gradeId;
+      if (gradeId == null) continue;
+      final local = byGradeId[gradeId];
+      final serverStatus = e.modificationStatus;
+
+      String? nextStatus;
+      double? nextProposed;
+      bool? nextProposedAbsent;
+      String? nextProposedComments;
+
+      if (serverStatus == 'PENDING') {
+        nextStatus = 'queued';
+        nextProposed = e.modification?.newValue;
+        nextProposedAbsent = e.modification?.newIsAbsent;
+        nextProposedComments = e.modification?.newComments;
+      } else if (serverStatus == 'REJECTED') {
+        nextStatus = 'rejected';
+        nextProposed = e.modification?.newValue;
+        nextProposedAbsent = e.modification?.newIsAbsent;
+        nextProposedComments = e.modification?.newComments;
+      } else {
+        // APPROVED (appliquée) ou aucune proposition : marque résolue.
+        nextStatus = null;
+        nextProposed = null;
+        nextProposedAbsent = null;
+        nextProposedComments = null;
+      }
+
+      // Évite les écritures inutiles.
+      if (local != null &&
+          local.syncStatus == nextStatus &&
+          local.proposedValue == nextProposed) {
+        continue;
+      }
+
+      await (db.update(db.grades)..where((t) => t.id.equals(gradeId))).write(
+        GradesCompanion(
+          syncStatus: d.Value(nextStatus),
+          proposedValue: d.Value(nextProposed),
+          proposedIsAbsent: d.Value(nextProposedAbsent),
+          proposedComments: d.Value(nextProposedComments),
+        ),
+      );
+    }
+  } catch (_) {
+    // La réconciliation est best-effort : jamais bloquante.
+  }
+}
+
+/// Reconstruction hors-ligne des lignes de notes d'une évaluation :
+/// Drift (notes répliquées + marques) + outbox (soumissions en attente).
+Future<List<GradeEntryDto>> _gradeEntriesFromLocal(
+  Ref ref,
+  int assessmentId,
+) async {
+  final db = ref.read(databaseProvider);
+
+  // Élèves de la classe de l'évaluation (chaîne Drift : assessment ->
+  // class_subject -> classroom -> assignations actives -> students).
+  final assessmentRow = await (db.select(db.assessments)
+        ..where((t) => t.id.equals(assessmentId)))
+      .getSingleOrNull();
+  if (assessmentRow == null) return const [];
+
+  final classSubject = await (db.select(db.classSubjects)
+        ..where((t) => t.id.equals(assessmentRow.classSubjectId)))
+      .getSingleOrNull();
+  if (classSubject == null) return const [];
+
+  final assignmentRows = await (db.select(db.studentClassAssignments)
+        ..where((t) => t.classroomId.equals(classSubject.classroomId))
+        ..where((t) => t.isDeleted.equals(false)))
+      .get();
+  final studentIds = assignmentRows.map((a) => a.studentId).toSet();
+  if (studentIds.isEmpty) return const [];
+  final studentRows = await (db.select(db.students)
+        ..where((t) => t.id.isIn(studentIds))
+        ..where((t) => t.isDeleted.equals(false)))
+      .get();
+  studentRows.sort((a, b) =>
+      '${a.nom} ${a.prenoms ?? ''}'.compareTo('${b.nom} ${b.prenoms ?? ''}'));
+
+  // Notes répliquées + marques.
+  final gradeRows = await (db.select(db.grades)
+        ..where((t) => t.assessmentId.equals(assessmentId))
+        ..where((t) => t.isDeleted.equals(false)))
+        .get();
+  final gradeByStudent = {for (final g in gradeRows) g.studentId: g};
+
+  // Soumission(s) en attente dans l'outbox pour CETTE évaluation.
+  final outbox = ref.read(outboxProvider);
+  final pendingEntries = await outbox.pending();
+  final submission = pendingEntries
+      .where((e) => e.tableNameColumn == 'grade_submission')
+      .map((e) => e.payloadMap)
+      .where((p) => (p['assessment_id'] as num?)?.toInt() == assessmentId)
+      .firstOrNull;
+  final pendingByStudent = <int, Map<String, dynamic>>{};
+  if (submission != null) {
+    for (final r in ((submission['grades'] as List?) ?? const [])
+        .whereType<Map>()) {
+      final m = Map<String, dynamic>.from(r);
+      final sid = (m['student_id'] as num?)?.toInt();
+      if (sid != null) pendingByStudent[sid] = m;
+    }
+  }
+
+  final result = <GradeEntryDto>[];
+  for (final s in studentRows) {
+    final sid = s.id;
+    final name = '${s.nom} ${s.prenoms ?? ''}'.trim();
+    final matricule = s.matricule ?? '';
+    final local = gradeByStudent[sid];
+    final pending = pendingByStudent[sid];
+
+    // Valeur affichée : proposition en attente > note répliquée.
+    final pendingValue = (pending?['value'] as num?)?.toDouble();
+    final value =
+        pending != null ? pendingValue : (local?.proposedValue ?? local?.value);
+    final isAbsent = pending != null
+        ? (pending['is_absent'] as bool? ?? false)
+        : (local?.proposedIsAbsent ?? local?.isAbsent ?? false);
+    final comment = pending != null
+        ? (pending['comment'] as String?)
+        : (local?.proposedComments ?? local?.comments);
+
+    // Marques (dans l'ordre : soumission locale > marque Drift).
+    String? mark;
+    if (pending != null) {
+      mark = 'pending_sync';
+    } else if (local?.syncStatus == 'queued') {
+      mark = 'PENDING';
+    } else if (local?.syncStatus == 'rejected') {
+      mark = 'REJECTED';
+    }
+
+    result.add(GradeEntryDto(
+      studentId: sid,
+      studentName: name,
+      studentMatricule: matricule,
+      gradeId: local?.id,
+      value: value,
+      isAbsent: isAbsent,
+      comment: comment,
+      isLocked: local != null,
+      modificationStatus: mark,
+      modification: (mark != null && local != null)
+          ? GradeModificationBriefDto(
+              id: 0,
+              status: mark,
+              newValue: local.proposedValue,
+              newIsAbsent: local.proposedIsAbsent ?? false,
+              newComments: local.proposedComments,
+              oldValue: local.value,
+            )
+          : null,
+      localSyncMark: pending != null ? 'pending_sync' : null,
+    ));
+  }
+  return result;
+}
 
 List<GradeEntryDto> _parseGradeEntryList(dynamic data) {
   if (data is List) {

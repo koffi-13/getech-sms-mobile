@@ -38,6 +38,36 @@ class ClassroomDto {
     this.seriesName,
   });
 
+  /// Copie avec champs surchargés (fusion remote/local du détail classe).
+  ClassroomDto copyWith({
+    int? id,
+    String? name,
+    int? establishmentId,
+    int? maxStudents,
+    bool? isActive,
+    int? headTeacherId,
+    String? headTeacherName,
+    String? levelName,
+    String? cycleName,
+    int? cycleId,
+    int? currentStudentsCount,
+    String? seriesName,
+  }) =>
+      ClassroomDto(
+        id: id ?? this.id,
+        name: name ?? this.name,
+        establishmentId: establishmentId ?? this.establishmentId,
+        maxStudents: maxStudents ?? this.maxStudents,
+        isActive: isActive ?? this.isActive,
+        headTeacherId: headTeacherId ?? this.headTeacherId,
+        headTeacherName: headTeacherName ?? this.headTeacherName,
+        levelName: levelName ?? this.levelName,
+        cycleName: cycleName ?? this.cycleName,
+        cycleId: cycleId ?? this.cycleId,
+        currentStudentsCount: currentStudentsCount ?? this.currentStudentsCount,
+        seriesName: seriesName ?? this.seriesName,
+      );
+
   /// Alias de commodité : capacité = max_students.
   int get capacity => maxStudents ?? 0;
 

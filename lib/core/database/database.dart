@@ -93,8 +93,12 @@ class AppDatabase extends _$AppDatabase {
   /// Pour tests : permettre d'injecter une connexion in-memory.
   AppDatabase.forTesting(super.e);
 
+  /// [Multi-serveurs] ouvre le fichier dédié au profil actif
+  /// (`getech_sms.db` pour le profil hérité, `getech_sms_<id>.db` sinon).
+  AppDatabase.forFile(String fileName) : super(_openConnection(fileName));
+
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -124,6 +128,15 @@ class AppDatabase extends _$AppDatabase {
             await m.addColumn(classrooms, classrooms.currentStudentsCount);
             await m.addColumn(classrooms, classrooms.isActive);
           }
+          // v2 → v3 [Grade-Validation] : marques de la file de validation
+          // sur les notes (proposition en attente / rejetée + valeur
+          // proposée). Voir lib/features/grades/grade_controller.dart.
+          if (from < 3) {
+            await m.addColumn(grades, grades.syncStatus);
+            await m.addColumn(grades, grades.proposedValue);
+            await m.addColumn(grades, grades.proposedIsAbsent);
+            await m.addColumn(grades, grades.proposedComments);
+          }
         },
         beforeOpen: (details) async {
           await customStatement('PRAGMA foreign_keys = ON;');
@@ -146,17 +159,25 @@ class AppDatabase extends _$AppDatabase {
   }
 }
 
-LazyDatabase _openConnection() {
+LazyDatabase _openConnection([String fileName = 'getech_sms.db']) {
   return LazyDatabase(() async {
     final dir = await getApplicationDocumentsDirectory();
-    final file = File(p.join(dir.path, 'getech_sms.db'));
+    final file = File(p.join(dir.path, fileName));
     return NativeDatabase.createInBackground(file);
   });
 }
 
-/// Provider Riverpod de la base de données (singleton).
+/// Nom du fichier de base du profil actif — piloté par le registre
+/// multi-serveurs (`activeDbFileNameProvider.notifier.state = ...`).
+final activeDbFileNameProvider = StateProvider<String>((ref) => 'getech_sms.db');
+
+/// Provider Riverpod de la base de données.
+///
+/// WATCH le fichier actif : lors d'une bascule de serveur, l'ancienne base
+/// est fermée (onDispose) et la base du nouveau serveur est ouverte.
 final databaseProvider = Provider<AppDatabase>((ref) {
-  final db = AppDatabase();
+  final fileName = ref.watch(activeDbFileNameProvider);
+  final db = AppDatabase.forFile(fileName);
   ref.onDispose(db.close);
   return db;
 });

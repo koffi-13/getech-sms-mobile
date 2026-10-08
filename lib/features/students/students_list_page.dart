@@ -20,6 +20,7 @@ import '../classrooms/classroom_controller.dart';
 import '../connections/connection_state.dart';
 import 'student_controller.dart';
 import 'student_export_dialog.dart';
+import 'student_photos.dart';
 
 class StudentsListPage extends ConsumerStatefulWidget {
   const StudentsListPage({super.key});
@@ -421,8 +422,11 @@ class _StudentTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       child: ListTile(
-        leading: CircleAvatar(
-          child: Text(student.displayInitials),
+        // Photo de l'élève via l'endpoint dédié (cache disque), initiales
+        // en fallback — `photo_path` n'est pas une URL utilisable.
+        leading: StudentAvatar(
+          studentId: student.id,
+          initials: student.displayInitials,
         ),
         title: Text(
           student.fullName,

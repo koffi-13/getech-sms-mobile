@@ -107,9 +107,12 @@ class Outbox {
   }
 }
 
-/// Provider Riverpod de l'outbox (singleton lié à la base de données).
+/// Provider Riverpod de l'outbox.
+///
+/// WATCH la base : lors d'une bascule de serveur, l'outbox est recréé sur
+/// la base du nouveau profil.
 final outboxProvider = Provider<Outbox>((ref) {
-  return Outbox(ref.read(databaseProvider));
+  return Outbox(ref.watch(databaseProvider));
 });
 
 /// Provider exposant les entrées en attente de l'outbox.

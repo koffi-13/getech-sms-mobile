@@ -228,34 +228,80 @@ class SyncPullResponse {
 }
 
 /// Requête de push : `POST /sync/push`.
+/// Contrat RÉEL de `POST /sync/push` (api/routers/sync.py, PushRequest) :
+/// `{device_token?, lines: [{line_id?, op, table, data}]}`.
+///
+/// [Fix-SYNC-PUSH] L'ancien format `{changes: {table: [rows]}}` n'a jamais
+/// correspondu au serveur (422 « field required: lines ») — les écritures
+/// hors-ligne ne se synchronisaient donc jamais.
 class SyncPushRequest {
-  final Map<String, List<Map<String, dynamic>>> changes;
+  final List<Map<String, dynamic>> lines;
+  final String? deviceToken;
 
-  const SyncPushRequest({required this.changes});
+  const SyncPushRequest({required this.lines, this.deviceToken});
 
-  Map<String, dynamic> toJson() => {'changes': changes};
+  Map<String, dynamic> toJson() => {
+        if (deviceToken != null) 'device_token': deviceToken,
+        'lines': lines,
+      };
 }
 
-/// Réponse du push (résultat par table + conflits éventuels).
+/// Résultat par ligne (PushLineResult côté serveur).
+class SyncPushLineResultDto {
+  final String? lineId;
+  final String table;
+  final String status; // applied | conflict_server_wins | invalid |
+                        // unknown_table | error | queued_for_validation
+  final int? rowId;
+  final String? detail;
+
+  const SyncPushLineResultDto({
+    this.lineId,
+    required this.table,
+    required this.status,
+    this.rowId,
+    this.detail,
+  });
+
+  factory SyncPushLineResultDto.fromJson(Map<String, dynamic> j) =>
+      SyncPushLineResultDto(
+        lineId: j['line_id'] as String?,
+        table: j['table'] as String? ?? '',
+        status: j['status'] as String? ?? 'error',
+        rowId: (j['row_id'] as num?)?.toInt(),
+        detail: j['detail'] as String?,
+      );
+}
+
+/// Réponse du push (PushResponse côté serveur).
 class SyncPushResponse {
   final DateTime serverTime;
-  final Map<String, int> applied; // table -> count
-  final List<String> conflicts; // server-wins : IDs ignorés
+  final int accepted;
+  final List<SyncPushLineResultDto> results;
 
   const SyncPushResponse({
     required this.serverTime,
-    this.applied = const {},
-    this.conflicts = const [],
+    this.accepted = 0,
+    this.results = const [],
   });
 
-  factory SyncPushResponse.fromJson(Map<String, dynamic> j) => SyncPushResponse(
+  factory SyncPushResponse.fromJson(Map<String, dynamic> j) =>
+      SyncPushResponse(
         serverTime: DateFormatter.parse(j['server_time'] as String?) ??
             DateTime.now().toUtc(),
-        applied: Map<String, int>.from(
-          (j['applied'] as Map?)?.map(
-                  (k, v) => MapEntry(k.toString(), (v as num).toInt())) ??
-              const {},
-        ),
-        conflicts: List<String>.from(j['conflicts'] as List? ?? const []),
+        accepted: (j['accepted'] as num?)?.toInt() ?? 0,
+        results: ((j['results'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((e) =>
+                SyncPushLineResultDto.fromJson(Map<String, dynamic>.from(e)))
+            .toList(),
       );
+
+  SyncPushLineResultDto? resultFor(String? lineId) {
+    if (lineId == null) return null;
+    for (final r in results) {
+      if (r.lineId == lineId) return r;
+    }
+    return null;
+  }
 }

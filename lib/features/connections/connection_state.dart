@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/config/app_config.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/auth/secure_storage.dart';
+import 'server_profiles.dart';
 
 /// Statut de la connexion au serveur.
 enum ServerStatus {
@@ -39,13 +40,15 @@ class DiscoveredServer {
   String get url => 'http://$ip:$port';
 }
 
-/// État global de la connexion.
+/// État global de la connexion (au serveur ACTIF du registre multi-serveurs).
 class ConnectionState {
   final ServerStatus status;
+  final String? profileId;
   final String? serverIp;
   final int? serverPort;
   final String? serverUrlOverride;
   final String? establishmentCode;
+  final String? establishmentName;
   final String? pairingToken;
   final Duration? latency;
   final DateTime? lastSyncAt;
@@ -57,10 +60,12 @@ class ConnectionState {
 
   const ConnectionState({
     this.status = ServerStatus.unpaired,
+    this.profileId,
     this.serverIp,
     this.serverPort,
     this.serverUrlOverride,
     this.establishmentCode,
+    this.establishmentName,
     this.pairingToken,
     this.latency,
     this.lastSyncAt,
@@ -74,6 +79,11 @@ class ConnectionState {
   bool get isPaired => pairingToken != null && (serverIp != null || serverUrlOverride != null);
   bool get isOnline => status == ServerStatus.online && !forceOffline;
   bool get canReachServer => isOnline && status != ServerStatus.offline;
+
+  /// Vrai tant que le premier heartbeat n'a pas tranché (au démarrage à
+  /// froid) : les pages ne doivent PAS bloquer sur cet état — les requêtes
+  /// réelles échoueront d'elles-mêmes si le serveur est injoignable.
+  bool get isChecking => status == ServerStatus.checking;
 
   /// URL complète du serveur, TOUJOURS avec le préfixe `/api/v1`.
   /// - Si `serverUrlOverride` est défini (appairage manuel), il contient déjà
@@ -95,10 +105,12 @@ class ConnectionState {
 
   ConnectionState copyWith({
     ServerStatus? status,
+    String? profileId,
     String? serverIp,
     int? serverPort,
     String? serverUrlOverride,
     String? establishmentCode,
+    String? establishmentName,
     String? pairingToken,
     Duration? latency,
     DateTime? lastSyncAt,
@@ -111,10 +123,12 @@ class ConnectionState {
   }) {
     return ConnectionState(
       status: status ?? this.status,
+      profileId: profileId ?? this.profileId,
       serverIp: serverIp ?? this.serverIp,
       serverPort: serverPort ?? this.serverPort,
       serverUrlOverride: serverUrlOverride ?? this.serverUrlOverride,
       establishmentCode: establishmentCode ?? this.establishmentCode,
+      establishmentName: establishmentName ?? this.establishmentName,
       pairingToken: pairingToken ?? this.pairingToken,
       latency: latency ?? this.latency,
       lastSyncAt: lastSyncAt ?? this.lastSyncAt,
@@ -150,78 +164,43 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
   }
 
   Future<void> _init() async {
+    // [Multi-serveurs] Le chargement est piloté par le registre
+    // (serverProfileRegistryProvider -> MultiServerController.bootstrap) :
+    // il applique le profil actif via applyProfile(). On ne lit plus les
+    // clés legacy ici.
     final prefs = await SharedPreferences.getInstance();
-    final storage = _ref.read(secureStorageProvider);
-
-    final ip = prefs.getString('server_ip');
-    final port = prefs.getInt('server_port');
-    final url = prefs.getString('server_url');
-    final code = prefs.getString('establishment_code');
-    final force = prefs.getBool('force_offline') ?? false;
-    final tolerate = prefs.getBool('tolerate_clock_skew') ?? true;
     final lastSync = prefs.getString('last_sync_at');
     final lastCount = prefs.getInt('last_sync_count');
-    final token = await storage.getPairingToken();
-
-    if (token != null && (ip != null || url != null)) {
+    if (lastSync != null || lastCount != null) {
       state = state.copyWith(
-        status: ServerStatus.checking,
-        serverIp: ip,
-        serverPort: port ?? 8000,
-        serverUrlOverride: url,
-        establishmentCode: code,
-        pairingToken: token,
-        forceOffline: force,
-        tolerateClockSkew: tolerate,
         lastSyncAt: lastSync != null ? DateTime.tryParse(lastSync) : null,
         lastSyncCount: lastCount,
       );
-      if (!force) checkStatus();
-      _startHeartbeat();
     }
   }
 
-  Future<void> configure({
-    required String serverUrl,
-    required String establishmentCode,
-    required String deviceToken,
-    String? deviceId,
-    bool forceOffline = false,
-    bool tolerateClockSkew = true,
-  }) async {
-    final prefs = await SharedPreferences.getInstance();
+  /// Applique un profil du registre multi-serveurs (bascule ou démarrage).
+  Future<void> applyProfile(ServerProfile profile) async {
     final storage = _ref.read(secureStorageProvider);
-
-    await prefs.setString('server_url', serverUrl);
-    await prefs.setString('establishment_code', establishmentCode);
-    await prefs.setBool('force_offline', forceOffline);
-    await prefs.setBool('tolerate_clock_skew', tolerateClockSkew);
-    await storage.savePairingToken(deviceToken);
-    if (deviceId != null) await storage.saveDeviceId(deviceId);
+    final token = await storage.read(
+          storage.profileKey(AppConfig.keyDeviceToken, profile.id)) ??
+      '';
 
     state = state.copyWith(
-      status: forceOffline ? ServerStatus.offline : ServerStatus.checking,
-      serverUrlOverride: serverUrl,
-      establishmentCode: establishmentCode,
-      pairingToken: deviceToken,
-      forceOffline: forceOffline,
-      tolerateClockSkew: tolerateClockSkew,
+      status: ServerStatus.checking,
+      profileId: profile.id,
+      serverUrlOverride: profile.serverUrl,
+      establishmentCode: profile.establishmentCode,
+      establishmentName: profile.establishmentName,
+      pairingToken: token.isEmpty ? null : token,
       clearError: true,
     );
-    if (!forceOffline) await checkStatus();
+    if (!state.forceOffline) checkStatus();
     _startHeartbeat();
   }
 
-  Future<void> unpair() async {
-    final prefs = await SharedPreferences.getInstance();
-    final storage = _ref.read(secureStorageProvider);
-
-    await prefs.remove('server_ip');
-    await prefs.remove('server_port');
-    await prefs.remove('server_url');
-    await prefs.remove('establishment_code');
-    await storage.deletePairingToken();
-
+  /// Plus aucun serveur enregistré : retour à l'onboarding d'appairage.
+  void markUnpaired() {
     _heartbeatTimer?.cancel();
     state = ConnectionState.initial;
   }
@@ -291,11 +270,17 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
   }
 
   Future<void> toggleForceOffline() async {
-    final prefs = await SharedPreferences.getInstance();
     final next = !state.forceOffline;
-    await prefs.setBool('force_offline', next);
-    state = state.copyWith(forceOffline: next);
-    if (!next) checkStatus();
+    await setForceOffline(next);
+  }
+
+  /// Force ou relâche le mode hors-ligne (utilisé par l'appairage résilient
+  /// et la page Connexions).
+  Future<void> setForceOffline(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('force_offline', value);
+    state = state.copyWith(forceOffline: value);
+    if (!value) checkStatus();
   }
 
   Future<void> toggleTolerateClockSkew() async {

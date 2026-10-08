@@ -9,13 +9,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../shared/models/auth_dto.dart'
     show ChangePasswordRequest, LoginRequest, LoginResponse, MeResponse, UserDto;
-import '../../features/connections/connection_state.dart';
 import '../config/app_config.dart';
 import '../config/constants.dart';
 import '../network/api_endpoints.dart';
 import '../network/api_exceptions.dart';
 import '../network/dio_client.dart';
 import 'secure_storage.dart';
+import '../../features/connections/connection_state.dart';
+import '../../features/connections/server_profiles.dart';
 
 /// État immuable d'authentification.
 class AuthState {
@@ -102,9 +103,13 @@ class AuthNotifier extends Notifier<AuthState> {
 
   String? get _serverUrl => ref.read(connectionProvider).serverUrl;
 
-  /// Restaure la session JWT depuis le stockage sécurisé au démarrage.
+  /// Restaure la session JWT du serveur ACTIF (clé par profil) au démarrage
+  /// ou après une bascule de serveur.
   Future<void> _restoreSession() async {
-    final token = await _storage.getJwt();
+    final pid = ref.read(activeProfileIdProvider) ??
+        ref.read(connectionProvider).profileId;
+    if (pid == null) return;
+    final token = await _storage.getJwtFor(pid);
     if (token == null || token.isEmpty) return;
     state = state.copyWith(token: token);
     // Vérifie la validité du token via /auth/me.
@@ -132,8 +137,17 @@ class AuthNotifier extends Notifier<AuthState> {
         ).toJson(),
       );
       final login = LoginResponse.fromJson(resp.data as Map<String, dynamic>);
-      await _storage.saveJwt(login.accessToken);
-      await _storage.saveCredentials(username, password);
+      // [Multi-serveurs] JWT + identifiants stockés PAR PROFIL : la session
+      // d'un autre serveur n'est jamais écrasée.
+      final pid = ref.read(activeProfileIdProvider) ??
+          ref.read(connectionProvider).profileId;
+      if (pid != null) {
+        await _storage.saveJwtFor(pid, login.accessToken);
+        await _storage.saveCredentialsFor(pid, username, password);
+      } else {
+        await _storage.saveJwt(login.accessToken);
+        await _storage.saveCredentials(username, password);
+      }
       state = state.copyWith(
         token: login.accessToken,
         user: login.user,
@@ -241,9 +255,16 @@ class AuthNotifier extends Notifier<AuthState> {
     }
   }
 
-  /// Déconnexion locale (efface le JWT).
+  /// Déconnexion locale — efface UNIQUEMENT le JWT du serveur actif
+  /// (les sessions des autres serveurs enregistrés sont conservées).
   Future<void> logoutLocal() async {
-    await _storage.deleteJwt();
+    final pid = ref.read(activeProfileIdProvider) ??
+        ref.read(connectionProvider).profileId;
+    if (pid != null) {
+      await _storage.deleteJwtFor(pid);
+    } else {
+      await _storage.deleteJwt();
+    }
     state = const AuthState();
   }
 

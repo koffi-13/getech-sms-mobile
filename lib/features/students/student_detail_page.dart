@@ -13,6 +13,7 @@ import '../../core/utils/permissions.dart';
 import '../../shared/models/student_dto.dart';
 import '../../shared/widgets/widgets.dart';
 import 'student_controller.dart';
+import 'student_photos.dart';
 
 class StudentDetailPage extends ConsumerWidget {
   const StudentDetailPage({super.key, required this.id});
@@ -158,28 +159,12 @@ class _HeaderCard extends StatelessWidget {
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            CircleAvatar(
+            // Photo via l'endpoint dédié GET /students/{id}/photo (cache
+            // disque, fallback initiales) — `photo_path` n'est PAS une URL.
+            StudentAvatar(
+              studentId: student.id,
+              initials: student.displayInitials,
               radius: 44,
-              backgroundColor: color,
-              child: student.photoPath != null && student.photoPath!.isNotEmpty
-                  ? ClipOval(
-                      child: Image.network(
-                        student.photoPath!,
-                        fit: BoxFit.cover,
-                        width: 88,
-                        height: 88,
-                        errorBuilder: (_, __, ___) => Text(
-                          student.displayInitials,
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 24),
-                        ),
-                      ),
-                    )
-                  : Text(
-                      student.displayInitials,
-                      style: const TextStyle(
-                          color: Colors.white, fontSize: 24),
-                    ),
             ),
             const SizedBox(height: 12),
             Text(

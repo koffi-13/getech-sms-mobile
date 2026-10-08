@@ -126,6 +126,53 @@ class AssessmentCreateRequest {
 ///
 /// Champs serveur : {student_id, student_name, student_matricule, grade_id,
 /// value, is_absent, comment, is_locked}.
+/// Brève d'une proposition de modification de note (file de validation).
+class GradeModificationBriefDto {
+  final int id;
+  final String status; // PENDING | APPROVED | REJECTED
+  final double? newValue;
+  final bool newIsAbsent;
+  final String? newComments;
+  final double? oldValue;
+  final String? requestedByName;
+  final String? requestedRole;
+  final DateTime? requestedAt;
+  final String? reviewedByName;
+  final DateTime? reviewedAt;
+  final String? reviewNote;
+
+  const GradeModificationBriefDto({
+    required this.id,
+    required this.status,
+    this.newValue,
+    this.newIsAbsent = false,
+    this.newComments,
+    this.oldValue,
+    this.requestedByName,
+    this.requestedRole,
+    this.requestedAt,
+    this.reviewedByName,
+    this.reviewedAt,
+    this.reviewNote,
+  });
+
+  factory GradeModificationBriefDto.fromJson(Map<String, dynamic> j) =>
+      GradeModificationBriefDto(
+        id: (j['id'] as num).toInt(),
+        status: j['status'] as String? ?? 'PENDING',
+        newValue: (j['new_value'] as num?)?.toDouble(),
+        newIsAbsent: (j['new_is_absent'] as bool?) ?? false,
+        newComments: j['new_comments'] as String?,
+        oldValue: (j['old_value'] as num?)?.toDouble(),
+        requestedByName: j['requested_by_name'] as String?,
+        requestedRole: j['requested_role'] as String?,
+        requestedAt: DateFormatter.parse(j['requested_at'] as String?),
+        reviewedByName: j['reviewed_by_name'] as String?,
+        reviewedAt: DateFormatter.parse(j['reviewed_at'] as String?),
+        reviewNote: j['review_note'] as String?,
+      );
+}
+
 class GradeEntryDto {
   final int studentId;
   final String studentName;
@@ -136,6 +183,18 @@ class GradeEntryDto {
   final String? comment; // serveur: "comment" (singulier)
   final bool isLocked;
 
+  /// [Grade-Validation] Marque de la dernière proposition de modification
+  /// pour cette note : PENDING (en attente de validation admin) /
+  /// APPROVED (appliquée) / REJECTED (ancienne valeur conservée).
+  final String? modificationStatus;
+
+  /// [Grade-Validation] Détail de la proposition (valeur proposée, etc.).
+  final GradeModificationBriefDto? modification;
+
+  /// [Offline] Marque LOCALE (non serveur) : 'pending_sync' = modifiée
+  /// hors-ligne en attente de synchronisation. Résolu au push.
+  final String? localSyncMark;
+
   const GradeEntryDto({
     required this.studentId,
     this.studentName = '',
@@ -145,6 +204,9 @@ class GradeEntryDto {
     this.isAbsent = false,
     this.comment,
     this.isLocked = false,
+    this.modificationStatus,
+    this.modification,
+    this.localSyncMark,
   });
 
   factory GradeEntryDto.fromJson(Map<String, dynamic> j) => GradeEntryDto(
@@ -156,6 +218,11 @@ class GradeEntryDto {
         isAbsent: (j['is_absent'] as bool?) ?? false,
         comment: j['comment'] as String?,
         isLocked: (j['is_locked'] as bool?) ?? false,
+        modificationStatus: j['modification_status'] as String?,
+        modification: j['modification'] is Map
+            ? GradeModificationBriefDto.fromJson(
+                Map<String, dynamic>.from(j['modification'] as Map))
+            : null,
       );
 
   Map<String, dynamic> toJson() => {
@@ -166,8 +233,27 @@ class GradeEntryDto {
         'value': value,
         'is_absent': isAbsent,
         'comment': comment,
-        'is_locked': isLocked,
       };
+
+  GradeEntryDto copyWith({
+    double? value,
+    bool? isAbsent,
+    String? comment,
+    bool? keepValue,
+  }) =>
+      GradeEntryDto(
+        studentId: studentId,
+        studentName: studentName,
+        studentMatricule: studentMatricule,
+        gradeId: gradeId,
+        value: keepValue == true ? this.value : (value ?? this.value),
+        isAbsent: isAbsent ?? this.isAbsent,
+        comment: comment ?? this.comment,
+        isLocked: isLocked,
+        modificationStatus: modificationStatus,
+        modification: modification,
+        localSyncMark: localSyncMark,
+      );
 }
 
 /// Requête de sauvegarde en lot des notes (GradeBulkSaveRequest).
@@ -179,16 +265,150 @@ class SaveGradesRequest {
   Map<String, dynamic> toJson() => {'grades': grades};
 }
 
+/// Ligne de résultat d'une sauvegarde en lot (action par élève).
+class SaveGradesLineResultDto {
+  final int studentId;
+  final String action; // saved | unchanged | queued
+  final int? gradeId;
+  final int? modificationId;
+
+  const SaveGradesLineResultDto({
+    required this.studentId,
+    required this.action,
+    this.gradeId,
+    this.modificationId,
+  });
+
+  factory SaveGradesLineResultDto.fromJson(Map<String, dynamic> j) =>
+      SaveGradesLineResultDto(
+        studentId: (j['student_id'] as num).toInt(),
+        action: j['action'] as String? ?? 'saved',
+        gradeId: (j['grade_id'] as num?)?.toInt(),
+        modificationId: (j['modification_id'] as num?)?.toInt(),
+      );
+}
+
 /// Réponse de sauvegarde en lot (GradeBulkSaveResponse).
 class SaveGradesResponse {
   final int savedCount;
   final int skippedCount;
 
-  const SaveGradesResponse({this.savedCount = 0, this.skippedCount = 0});
+  /// [Grade-Validation] Propositions mises en file d'attente (non-admin
+  /// modifiant une note existante) — en attente de validation admin.
+  final int queuedCount;
 
-  factory SaveGradesResponse.fromJson(Map<String, dynamic> j) => SaveGradesResponse(
+  /// [Offline] Sauvegarde locale : sera synchronisée à la prochaine connexion.
+  final bool offlineQueued;
+
+  final List<SaveGradesLineResultDto> results;
+
+  const SaveGradesResponse({
+    this.savedCount = 0,
+    this.skippedCount = 0,
+    this.queuedCount = 0,
+    this.offlineQueued = false,
+    this.results = const [],
+  });
+
+  factory SaveGradesResponse.fromJson(Map<String, dynamic> j) =>
+      SaveGradesResponse(
         savedCount: (j['saved_count'] as num?)?.toInt() ?? 0,
         skippedCount: (j['skipped_count'] as num?)?.toInt() ?? 0,
+        queuedCount: (j['queued_count'] as num?)?.toInt() ?? 0,
+        results: ((j['results'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((e) =>
+                SaveGradesLineResultDto.fromJson(Map<String, dynamic>.from(e)))
+            .toList(),
+      );
+}
+
+/// Ligne de la liste GET /grades/modifications (vue admin/enseignant).
+class GradeModificationListDto {
+  final int id;
+  final int gradeId;
+  final int assessmentId;
+  final int studentId;
+  final String studentName;
+  final String studentMatricule;
+  final int? classroomId;
+  final String? classroomName;
+  final int? subjectId;
+  final String? subjectName;
+  final String? periodName;
+  final String? assessmentName;
+  final double? oldValue;
+  final bool oldIsAbsent;
+  final String? oldComments;
+  final double? newValue;
+  final bool newIsAbsent;
+  final String? newComments;
+  final String? reason;
+  final String status;
+  final String? requestedByName;
+  final String? requestedRole;
+  final DateTime? requestedAt;
+  final String? reviewedByName;
+  final DateTime? reviewedAt;
+  final String? reviewNote;
+
+  const GradeModificationListDto({
+    required this.id,
+    required this.gradeId,
+    required this.assessmentId,
+    required this.studentId,
+    required this.studentName,
+    required this.studentMatricule,
+    this.classroomId,
+    this.classroomName,
+    this.subjectId,
+    this.subjectName,
+    this.periodName,
+    this.assessmentName,
+    this.oldValue,
+    this.oldIsAbsent = false,
+    this.oldComments,
+    this.newValue,
+    this.newIsAbsent = false,
+    this.newComments,
+    this.reason,
+    required this.status,
+    this.requestedByName,
+    this.requestedRole,
+    this.requestedAt,
+    this.reviewedByName,
+    this.reviewedAt,
+    this.reviewNote,
+  });
+
+  factory GradeModificationListDto.fromJson(Map<String, dynamic> j) =>
+      GradeModificationListDto(
+        id: (j['id'] as num).toInt(),
+        gradeId: (j['grade_id'] as num).toInt(),
+        assessmentId: (j['assessment_id'] as num?)?.toInt() ?? 0,
+        studentId: (j['student_id'] as num?)?.toInt() ?? 0,
+        studentName: j['student_name'] as String? ?? '',
+        studentMatricule: j['student_matricule'] as String? ?? '',
+        classroomId: (j['classroom_id'] as num?)?.toInt(),
+        classroomName: j['classroom_name'] as String?,
+        subjectId: (j['subject_id'] as num?)?.toInt(),
+        subjectName: j['subject_name'] as String?,
+        periodName: j['period_name'] as String?,
+        assessmentName: j['assessment_name'] as String?,
+        oldValue: (j['old_value'] as num?)?.toDouble(),
+        oldIsAbsent: (j['old_is_absent'] as bool?) ?? false,
+        oldComments: j['old_comments'] as String?,
+        newValue: (j['new_value'] as num?)?.toDouble(),
+        newIsAbsent: (j['new_is_absent'] as bool?) ?? false,
+        newComments: j['new_comments'] as String?,
+        reason: j['reason'] as String?,
+        status: j['status'] as String? ?? 'PENDING',
+        requestedByName: j['requested_by_name'] as String?,
+        requestedRole: j['requested_role'] as String?,
+        requestedAt: DateFormatter.parse(j['requested_at'] as String?),
+        reviewedByName: j['reviewed_by_name'] as String?,
+        reviewedAt: DateFormatter.parse(j['reviewed_at'] as String?),
+        reviewNote: j['review_note'] as String?,
       );
 }
 

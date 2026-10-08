@@ -28,6 +28,7 @@ import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/section_header.dart';
 import 'connection_state.dart';
 import 'connections_controller.dart';
+import 'server_profiles.dart';
 
 /// Page d'appairage.
 class DevicePairingPage extends ConsumerStatefulWidget {
@@ -186,6 +187,14 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
     return Scaffold(
       appBar: AppBar(
         title: const Text('Appairage du terminal'),
+        // [Multi-serveurs] Retour direct aux serveurs enregistrés.
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.dns_rounded),
+            tooltip: 'Serveurs enregistrés',
+            onPressed: () => context.go('/connections'),
+          ),
+        ],
         bottom: TabBar(
           controller: _tabController,
           tabs: const [
@@ -195,47 +204,125 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
           ],
         ),
       ),
-      body: Stack(
+      body: Column(
         children: [
-          TabBarView(
-            controller: _tabController,
-            children: [
-              _DiscoveryTab(onSelect: _prefillFromDiscovered),
-              _ManualForm(
-                formKey: _formKey,
-                serverCtrl: _serverCtrl,
-                establishmentCtrl: _establishmentCtrl,
-                pairingTokenCtrl: _pairingTokenCtrl,
-                onSubmit: _submitManual,
-                submitting: _submitting,
-                tolerateClockSkew: _tolerateClockSkew,
-                onTolerateChanged: (v) => setState(() => _tolerateClockSkew = v),
-                error: _submitError,
-              ),
-              _QrTab(
-                onScan: _openQrScanner,
-                onManual: () => _tabController.animateTo(1),
-              ),
-            ],
-          ),
-          if (_submitting)
-            Container(
-              color: Colors.black.withValues(alpha: 0.35),
-              alignment: Alignment.center,
-              child: const Card(
-                child: Padding(
-                  padding: EdgeInsets.all(20),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      CircularProgressIndicator(),
-                      SizedBox(height: 16),
-                      Text('Appairage en cours…'),
-                    ],
-                  ),
+          // [Multi-serveurs] Retour aux serveurs existants : bascule directe
+          // sans ré-appairage.
+          const _ExistingServersStrip(),
+          Expanded(
+            child: Stack(
+              children: [
+                TabBarView(
+                  controller: _tabController,
+                  children: [
+                    _DiscoveryTab(onSelect: _prefillFromDiscovered),
+                    _ManualForm(
+                      formKey: _formKey,
+                      serverCtrl: _serverCtrl,
+                      establishmentCtrl: _establishmentCtrl,
+                      pairingTokenCtrl: _pairingTokenCtrl,
+                      onSubmit: _submitManual,
+                      submitting: _submitting,
+                      tolerateClockSkew: _tolerateClockSkew,
+                      onTolerateChanged: (v) => setState(() => _tolerateClockSkew = v),
+                      error: _submitError,
+                    ),
+                    _QrTab(
+                      onScan: _openQrScanner,
+                      onManual: () => _tabController.animateTo(1),
+                    ),
+                  ],
                 ),
-              ),
+                if (_submitting)
+                  Container(
+                    color: Colors.black.withValues(alpha: 0.35),
+                    alignment: Alignment.center,
+                    child: const Card(
+                      child: Padding(
+                        padding: EdgeInsets.all(20),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircularProgressIndicator(),
+                            SizedBox(height: 16),
+                            Text('Appairage en cours…'),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Bandeau « Serveurs existants » : retour rapide à un serveur déjà appairé
+/// (bascule directe, sans ré-appairage).
+class _ExistingServersStrip extends ConsumerWidget {
+  const _ExistingServersStrip();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final regAsync = ref.watch(serverProfileRegistryProvider);
+    final conn = ref.watch(connectionProvider);
+
+    final others = regAsync.maybeWhen(
+      data: (reg) => reg.profiles
+          .where((p) => p.id != conn.profileId)
+          .toList(growable: false),
+      orElse: () => const <ServerProfile>[],
+    );
+
+    if (others.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      width: double.infinity,
+      color: theme.colorScheme.surfaceContainerLow,
+      padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Serveurs déjà appairés',
+            style: theme.textTheme.labelMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 4),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                for (final p in others)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8, top: 4, bottom: 4),
+                    child: ActionChip(
+                      avatar: Icon(
+                        Icons.dns_rounded,
+                        size: 18,
+                        color: theme.colorScheme.primary,
+                      ),
+                      label: Text(p.displayName),
+                      onPressed: () async {
+                        await ref
+                            .read(multiServerControllerProvider)
+                            .switchTo(p.id);
+                      },
+                    ),
+                  ),
+                TextButton(
+                  onPressed: () => context.go('/connections'),
+                  child: const Text('Gérer'),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );

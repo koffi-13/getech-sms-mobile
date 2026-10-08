@@ -9,7 +9,9 @@ import 'package:go_router/go_router.dart';
 
 import 'app_shell.dart';
 import 'core/auth/auth_state.dart';
+import 'core/auth/teacher_scope.dart';
 import 'core/config/theme.dart';
+import 'core/notifications/notification_service.dart';
 import 'features/attendance/attendance_history_page.dart';
 import 'features/attendance/attendance_page.dart';
 import 'features/auth/login_page.dart';
@@ -19,6 +21,7 @@ import 'features/connections/connection_state.dart';
 import 'features/connections/connections_page.dart';
 import 'features/connections/device_pairing_page.dart';
 import 'features/connections/qr_scanner_page.dart';
+import 'features/connections/server_profiles.dart';
 import 'features/dashboard/dashboard_page.dart';
 import 'features/grades/bulletin_page.dart';
 import 'features/grades/grade_entry_page.dart';
@@ -44,12 +47,18 @@ import 'features/students/student_import_page.dart';
 /// Provider du mode de thème (système / clair / sombre).
 final themeModeProvider = StateProvider<ThemeMode>((ref) => ThemeMode.system);
 
-/// Notifier qui déclenche le re-calcul du routeur quand l'auth ou la connexion
-/// change (pour les redirects de garde).
+/// Notifier qui déclenche le re-calcul du routeur quand l'auth, la connexion
+/// ou le bootstrap multi-serveurs change (pour les redirects de garde).
 class _RouterNotifier extends ChangeNotifier {
   _RouterNotifier(this._ref) {
     _ref.listen<AuthState>(authProvider, (_, __) => notifyListeners());
     _ref.listen(connectionProvider, (_, __) => notifyListeners());
+    // Bootstrap multi-serveurs : dès que le registre a appliqué le profil
+    // actif, le routeur réévalue ses redirects.
+    _ref.listen<AsyncValue<bool>>(
+      serverBootstrapProvider,
+      (_, __) => notifyListeners(),
+    );
   }
   final Ref _ref;
 }
@@ -63,6 +72,9 @@ final goRouterProvider = Provider<GoRouter>((ref) {
     initialLocation: '/',
     refreshListenable: notifier,
     redirect: (context, state) {
+      // Déclenche le chargement du registre multi-serveurs (idempotent).
+      ref.read(serverBootstrapProvider);
+
       final conn = ref.read(connectionProvider);
       final auth = ref.read(authProvider);
       final loc = state.matchedLocation;
@@ -71,16 +83,26 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       final isLogin = loc == '/login';
       final isConnections = loc == '/connections';
 
-      // 1) Pas encore appairé → onboarding d'appairage (pairing + QR scanner).
+      // 0) Registre pas encore chargé : attendre (évite le flash vers
+      // /pairing au démarrage à froid).
+      final bootstrapped =
+          ref.read(serverBootstrapProvider).hasValue;
+      if (!bootstrapped) return null;
+
+      // 1) Aucun serveur enregistré → onboarding d'appairage.
       if (!conn.isPaired) {
         return (isPairing || isQrScanner) ? null : '/pairing';
       }
       // 2) Appairé mais non authentifié → login.
       if (!auth.isAuthenticated) {
-        return isLogin ? null : '/login';
+        return (isLogin || isConnections || isPairing || isQrScanner)
+            ? null
+            : '/login';
       }
-      // 3) Authentifié : empêcher l'accès aux écrans d'onboarding.
-      if (isPairing || isLogin) return '/dashboard';
+      // 3) Authentifié : /login est interdit (les écrans d'appairage et de
+      // gestion des connexions restent accessibles pour AJOUTER un serveur
+      // ou basculer d'établissement).
+      if (isLogin) return '/dashboard';
       // 4) Racine → dashboard.
       if (loc == '/') return '/dashboard';
       return null;
@@ -281,6 +303,13 @@ class _MoreGridPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(authProvider);
     final perms = auth.permissions;
+
+    // [Fix-TEACHER-NAV] Repli enseignant : Notes / EDT / Présence restent
+    // accessibles même avec des permissions RBAC incomplètes.
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final teacherish = auth.hasDeclaredTeacherRole ||
+        scopeAsync.maybeWhen(data: (s) => s.isTeacher, orElse: () => false);
+
     final items = <_MoreItem>[
       _MoreItem(
         icon: Icons.calendar_view_week,
@@ -288,6 +317,7 @@ class _MoreGridPage extends ConsumerWidget {
         color: Colors.teal,
         route: '/schedule',
         permission: 'STUDENT_READ',
+        teacherVisible: true,
       ),
       _MoreItem(
         icon: Icons.fact_check,
@@ -295,6 +325,15 @@ class _MoreGridPage extends ConsumerWidget {
         color: Colors.deepOrange,
         route: '/attendance',
         permission: 'STUDENT_READ',
+        teacherVisible: true,
+      ),
+      _MoreItem(
+        icon: Icons.grading,
+        label: 'Saisie de notes',
+        color: Colors.indigo,
+        route: '/grades',
+        permission: 'GRADE_READ',
+        teacherVisible: true,
       ),
       _MoreItem(
         icon: Icons.leaderboard,
@@ -366,7 +405,8 @@ class _MoreGridPage extends ConsumerWidget {
     ].where((i) =>
         i.permission == null ||
         perms.contains('*') ||
-        perms.contains(i.permission!)).toList();
+        perms.contains(i.permission!) ||
+        (teacherish && i.teacherVisible)).toList();
 
     return Scaffold(
       appBar: AppBar(title: const Text('Plus')),
@@ -432,12 +472,16 @@ class _MoreItem {
     required this.color,
     required this.route,
     this.permission,
+    this.teacherVisible = false,
   });
   final IconData icon;
   final String label;
   final Color color;
   final String route;
   final String? permission;
+
+  /// [Fix-TEACHER-NAV] Toujours visible pour un enseignant détecté.
+  final bool teacherVisible;
 }
 
 /// Widget racine de l'application.
@@ -448,6 +492,9 @@ class GeTechApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final router = ref.watch(goRouterProvider);
     final themeMode = ref.watch(themeModeProvider);
+    // [Notifications] Programme les rappels de cours du jour dès que le
+    // profil enseignant + l'emploi du temps sont résolus (cache local).
+    ref.watch(courseRemindersSchedulerProvider);
     return MaterialApp.router(
       title: 'GeTech-SMS',
       debugShowCheckedModeBanner: false,

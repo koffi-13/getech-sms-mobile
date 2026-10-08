@@ -22,6 +22,42 @@ class SecureStorage {
       _storage.write(key: key, value: value);
   Future<void> delete(String key) => _storage.delete(key: key);
 
+  // --- Clés PAR PROFIL DE SERVEUR (multi-serveurs) ---
+
+  /// Clé suffixée par l'id de profil : `getech.jwt.srv_123-abc`.
+  String profileKey(String base, String profileId) => '$base.$profileId';
+
+  Future<String?> getJwtFor(String profileId) =>
+      _storage.read(key: profileKey(AppConfig.keyJwt, profileId));
+  Future<void> saveJwtFor(String profileId, String token) =>
+      _storage.write(key: profileKey(AppConfig.keyJwt, profileId), value: token);
+  Future<void> deleteJwtFor(String profileId) =>
+      _storage.delete(key: profileKey(AppConfig.keyJwt, profileId));
+
+  Future<String?> getDeviceTokenFor(String profileId) =>
+      _storage.read(key: profileKey(AppConfig.keyDeviceToken, profileId));
+  Future<void> saveDeviceTokenFor(String profileId, String token) =>
+      _storage.write(
+          key: profileKey(AppConfig.keyDeviceToken, profileId), value: token);
+
+  Future<({String username, String password})?> getCredentialsFor(
+      String profileId) async {
+    final raw =
+        await _storage.read(key: profileKey(AppConfig.keyCredentials, profileId));
+    if (raw == null || !raw.contains(':::')) return null;
+    final parts = raw.split(':::');
+    return (username: parts[0], password: parts[1]);
+  }
+
+  Future<void> saveCredentialsFor(
+      String profileId, String username, String password) =>
+      _storage.write(
+        key: profileKey(AppConfig.keyCredentials, profileId),
+        value: '$username:::$password',
+      );
+
+  // --- Accès legacy (mono-serveur : migration uniquement) ---
+
   Future<String?> getJwt() => _storage.read(key: AppConfig.keyJwt);
   Future<void> saveJwt(String token) =>
       _storage.write(key: AppConfig.keyJwt, value: token);

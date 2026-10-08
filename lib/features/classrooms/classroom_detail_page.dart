@@ -193,7 +193,7 @@ class _ScheduleTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final conn = ref.watch(connectionProvider);
-    if (!conn.canReachServer) {
+    if (!conn.canReachServer && !conn.isChecking) {
       return const Center(
         child: EmptyState(
           icon: Icons.cloud_off,
