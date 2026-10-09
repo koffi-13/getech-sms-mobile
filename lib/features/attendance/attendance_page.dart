@@ -6,8 +6,9 @@
 /// le jour sélectionné (filtrage par `dayOfWeek`).
 library;
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/config/constants.dart';
 import '../../core/network/api_exceptions.dart';
@@ -62,20 +63,28 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
       appBar: AppBar(
         title: const Text('Présence'),
         actions: [
-          if (!conn.canReachServer && !conn.isChecking)
+          // [Fix-PRESENCE-ONLINE] La saisie n'est proposée QUE lorsque la
+          // connexion au serveur est établie (y compris pendant la
+          // vérification initiale : état indéterminé = pas de saisie).
+          if (!conn.canReachServer)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: StatusBadge.offline(),
+              child: conn.isChecking
+                  ? const StatusBadge(
+                      label: 'Connexion…',
+                      color: Colors.orange,
+                      icon: Icons.wifi_find,
+                    )
+                  : StatusBadge.offline(),
             ),
         ],
       ),
-      body: !conn.canReachServer && !conn.isChecking
-          ? const EmptyState(
-              title: 'Hors-ligne',
-              message: 'La saisie des présences nécessite une connexion au serveur.',
-              icon: Icons.cloud_off,
-            )
-          : ListView(
+      // [Fix-PRESENCE-ONLINE] Garde stricte : contrairement aux autres
+      // modules (local-first), la présence n'est JAMAIS saisie hors-ligne —
+      // ni en file d'attente ni en cache. L'état « checking » (heartbeat en
+      // cours) est traité comme non-connecté : on attend le verdict.
+      body: conn.canReachServer
+          ? ListView(
               padding: const EdgeInsets.all(16),
               children: [
                 // --- Sélecteurs ---
@@ -190,7 +199,51 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                   _activeSessionView(context),
                 ],
               ],
-            ),
+            )
+            : _offlinePlaceholder(conn),
+    );
+  }
+
+  /// [Fix-PRESENCE-ONLINE] Vue affichée à la place du formulaire tant que la
+  /// connexion au serveur n'est pas établie. Trois états :
+  /// - non appairé : aucun serveur configuré → proposer l'appairage ;
+  /// - vérification en cours (heartbeat) : attendre le verdict ;
+  /// - hors-ligne / mode hors-ligne forcé : inviter à se reconnecter.
+  Widget _offlinePlaceholder(ConnectionState conn) {
+    if (!conn.isPaired) {
+      return EmptyState(
+        title: 'Aucun serveur',
+        message:
+            'La présence ne peut être saisie qu\'en connexion au serveur. '
+            'Appairez d\'abord un serveur GeTech-SMS.',
+        icon: Icons.dns_outlined,
+        actionLabel: 'Appairer un serveur',
+        onAction: () => context.push('/connections'),
+      );
+    }
+    if (conn.isChecking) {
+      return EmptyState(
+        title: 'Connexion au serveur…',
+        message:
+            'Vérification de la liaison en cours. La saisie des présences '
+            'sera proposée dès que la connexion sera établie.',
+        icon: Icons.wifi_find,
+        actionLabel: 'Revérifier',
+        onAction: () => ref.read(connectionProvider.notifier).checkStatus(),
+      );
+    }
+    return EmptyState(
+      title: 'Hors-ligne',
+      message: conn.forceOffline
+          ? 'Le mode hors-ligne est activé. La présence ne peut être saisie '
+              'qu\'en connexion au serveur — désactivez le mode hors-ligne '
+              'pour saisir les absences et le cahier de texte.'
+          : 'Serveur injoignable. La présence ne peut être saisie qu\'en '
+              'connexion au serveur. Vérifiez que le serveur GeTech-SMS est '
+              'démarré et joignable, puis réessayez.',
+      icon: Icons.cloud_off,
+      actionLabel: 'Réessayer',
+      onAction: () => ref.read(connectionProvider.notifier).checkStatus(),
     );
   }
 
@@ -314,7 +367,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
     } on ApiException catch (e) {
       _showError(e.message);
     } catch (e) {
-      _showError('Erreur : $e');
+      _showError(AppErrorWidget.humanize(e.toString()));
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -571,7 +624,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
     } on ApiException catch (e) {
       _showError(e.message);
     } catch (e) {
-      _showError('Erreur : $e');
+      _showError(AppErrorWidget.humanize(e.toString()));
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -594,7 +647,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
     } on ApiException catch (e) {
       _showError(e.message);
     } catch (e) {
-      _showError('Erreur : $e');
+      _showError(AppErrorWidget.humanize(e.toString()));
     } finally {
       if (mounted) setState(() => _saving = false);
     }

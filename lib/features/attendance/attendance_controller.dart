@@ -4,6 +4,10 @@
 ///
 /// Source de données V1 : API REST (online). Aucun cache Drift pour limiter
 /// la surface de codegen.
+///
+/// RÈGLE MÉTIER : la présence n'est saisie qu'en connexion au serveur.
+/// Aucune mutation n'est mise en file d'attente hors-ligne (contrairement
+/// aux notes) — chaque appel vérifie [ConnectionState.canReachServer].
 library;
 
 import 'package:dio/dio.dart';
@@ -21,12 +25,29 @@ import '../../shared/models/student_dto.dart';
 /// Contrôleur Riverpod exposant les opérations de mutation (démarrage de
 /// session, sauvegarde des absences, cahier de texte). Stateless : la page
 /// appelante gère son propre indicateur de chargement.
+///
+/// [Fix-PRESENCE-ONLINE] Règle métier : la présence n'est JAMAIS saisie
+/// hors-ligne (ni file d'attente, ni cache d'écriture). Chaque mutation
+/// exige une connexion au serveur confirmée par le heartbeat.
 class AttendanceController {
   AttendanceController(this._ref);
   final Ref _ref;
 
   Dio get _dio => _ref.read(dioProvider);
   String? get _serverUrl => _ref.read(connectionProvider).serverUrl;
+
+  /// Garde commune : refuse toute saisie de présence tant que la liaison
+  /// au serveur n'est pas établie (couvre : non appairé, heartbeat en cours,
+  /// serveur injoignable, mode hors-ligne forcé).
+  void _requireOnlineServer() {
+    final conn = _ref.read(connectionProvider);
+    if (!conn.canReachServer) {
+      throw const ApiException(
+        'La présence ne peut être saisie qu\'en connexion au serveur. '
+        'Attendez que la connexion soit établie, puis réessayez.',
+      );
+    }
+  }
 
   /// Démarre une session de cours : `POST /attendance/session`.
   Future<CourseSessionDto> startSession({
@@ -38,6 +59,7 @@ class AttendanceController {
     String? startTime,
     String? endTime,
   }) async {
+    _requireOnlineServer();
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
     final body = <String, dynamic>{
@@ -65,6 +87,7 @@ class AttendanceController {
   /// `POST /attendance/session/{sessionId}/absences`.
   Future<void> saveAbsences(
       int sessionId, List<StudentAbsenceDto> absences) async {
+    _requireOnlineServer();
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
     await _dio.post(
@@ -78,6 +101,7 @@ class AttendanceController {
   /// Marque une session comme terminée (PATCH /attendance/session/{id}).
   Future<CourseSessionDto> markSessionState(
       int sessionId, String state) async {
+    _requireOnlineServer();
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
     final resp = await _dio.patch(
@@ -101,6 +125,7 @@ class AttendanceController {
     String? homework,
     int? recordId,
   }) async {
+    _requireOnlineServer();
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
     final dto = LessonRecordDto(
