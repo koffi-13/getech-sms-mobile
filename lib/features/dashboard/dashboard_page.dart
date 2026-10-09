@@ -142,12 +142,14 @@ class _SyncButtonState extends ConsumerState<_SyncButton> {
     SyncResult? result;
     try {
       result = await ref.read(syncEngineProvider).syncNow();
-      // [Notifications] Suit la validation/rejet des modifications de notes.
+      // [Notifications] Suit la validation/rejet des modifications de
+      // notes + informe du résultat de la synchro (utile, non répétitif).
       if (result.isSuccess) {
-        ref
+        await ref
             .read(notificationServiceProvider)
             .maybeCheckGradeModifications();
       }
+      await ref.read(notificationServiceProvider).notifySyncResult(result);
     } catch (_) {
       result = null;
     } finally {

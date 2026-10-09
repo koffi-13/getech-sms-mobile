@@ -324,7 +324,9 @@ final classroomsForGradesProvider =
     FutureProvider.autoDispose<List<ClassroomDto>>((ref) async {
   final conn = ref.watch(connectionProvider);
   final auth = ref.watch(authProvider);
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return _classroomsForGradesFromLocal(ref, auth);
+  }
   final dio = ref.watch(dioProvider);
 
   // Admin élargi : toutes les classes.
@@ -340,31 +342,79 @@ final classroomsForGradesProvider =
           ? e.error as ApiException
           : dioErrorToApiException(e);
       if (api.statusCode == 403) return const [];
-      rethrow;
+      // [Fix-OFFLINE] serveur injoignable → cache Drift.
+      return _classroomsForGradesFromLocal(ref, auth);
     }
   }
 
   // Enseignant (ou profil restreint) : classes enseignées + classes titularisées.
-  final results = await Future.wait([
-    _fetchClassrooms(dio, conn.serverUrl!, teacherOnly: true),
-    _fetchClassrooms(dio, conn.serverUrl!, teacherOnly: false),
-  ]);
-  final teaching = results[0];
-  final all = results[1];
-  final userId = auth.user?.id;
-  final head = userId == null
-      ? const <ClassroomDto>[]
-      : all.where((c) => c.headTeacherId == userId).toList();
+  try {
+    final results = await Future.wait([
+      _fetchClassrooms(dio, conn.serverUrl!, teacherOnly: true),
+      _fetchClassrooms(dio, conn.serverUrl!, teacherOnly: false),
+    ]);
+    final teaching = results[0];
+    final all = results[1];
+    final userId = auth.user?.id;
+    final head = userId == null
+        ? const <ClassroomDto>[]
+        : all.where((c) => c.headTeacherId == userId).toList();
 
-  final byId = <int, ClassroomDto>{};
-  for (final c in teaching) {
-    byId[c.id] = c;
+    final byId = <int, ClassroomDto>{};
+    for (final c in teaching) {
+      byId[c.id] = c;
+    }
+    for (final c in head) {
+      byId.putIfAbsent(c.id, () => c);
+    }
+    return byId.values.toList()..sort((a, b) => a.name.compareTo(b.name));
+  } catch (_) {
+    // [Fix-OFFLINE] réseau KO → cache Drift.
+    return _classroomsForGradesFromLocal(ref, auth);
   }
-  for (final c in head) {
-    byId.putIfAbsent(c.id, () => c);
-  }
-  return byId.values.toList()..sort((a, b) => a.name.compareTo(b.name));
 });
+
+/// Classes pour la cascade Notes servies depuis le cache Drift local.
+Future<List<ClassroomDto>> _classroomsForGradesFromLocal(
+    Ref ref, AuthState auth) async {
+  try {
+    final db = ref.read(databaseProvider);
+    final rows = await (db.select(db.classrooms)
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    var dtos = rows
+        .map((c) => ClassroomDto(
+              id: c.id,
+              name: c.name,
+              headTeacherId: c.teacherId,
+              headTeacherName: c.headTeacherName,
+              levelName: c.levelName,
+              cycleName: c.cycleName,
+              cycleId: c.cycleId,
+              seriesName: c.seriesName,
+              currentStudentsCount: c.currentStudentsCount,
+              maxStudents: c.capacity == 0 ? null : c.capacity,
+            ))
+        .toList();
+
+    // Enseignant : restreindre aux classes enseignées + titularisées.
+    final userId = auth.user?.id;
+    if (!auth.isAdminOrHeadmaster && userId != null) {
+      final csRows = await (db.select(db.classSubjects)
+            ..where((t) => t.teacherId.equals(userId)))
+          .get();
+      final teachingIds = csRows.map((r) => r.classroomId).toSet();
+      dtos = dtos
+          .where((c) =>
+              teachingIds.contains(c.id) || c.headTeacherId == userId)
+          .toList();
+    }
+    dtos.sort((a, b) => a.name.compareTo(b.name));
+    return dtos;
+  } catch (_) {
+    return const [];
+  }
+}
 
 Future<List<ClassroomDto>> _fetchClassrooms(
   Dio dio,
@@ -409,7 +459,9 @@ List<ClassroomDto> _parseClassroomList(dynamic data) {
 final periodsProvider =
     FutureProvider.autoDispose<List<PeriodDto>>((ref) async {
   final conn = ref.watch(connectionProvider);
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return _periodsFromLocal(ref);
+  }
   final dio = ref.watch(dioProvider);
   try {
     final resp = await dio.get(
@@ -421,9 +473,39 @@ final periodsProvider =
         ? e.error as ApiException
         : dioErrorToApiException(e);
     if (api.statusCode == 403) return const [];
-    rethrow;
+    // [Fix-OFFLINE] serveur injoignable → cache Drift.
+    return _periodsFromLocal(ref);
+  } catch (_) {
+    return _periodsFromLocal(ref);
   }
 });
+
+/// Périodes servies depuis le cache Drift local (hors-ligne).
+///
+/// La table locale `periods` n'a pas de colonne cycle : le filtre par cycle
+/// de [periodsForClassroomProvider] retombe alors sur la liste complète
+/// (comportement prévu — jamais de liste vide bloquante).
+Future<List<PeriodDto>> _periodsFromLocal(Ref ref) async {
+  try {
+    final db = ref.read(databaseProvider);
+    final rows = await (db.select(db.periods)
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    return rows
+        .map((p) => PeriodDto(
+              id: p.id,
+              name: p.name,
+              startDate: p.startDate?.toIso8601String().substring(0, 10),
+              endDate: p.endDate?.toIso8601String().substring(0, 10),
+              isActive: p.isActive,
+              schoolYearId: p.schoolYearId,
+              weight: p.weight,
+            ))
+        .toList();
+  } catch (_) {
+    return const [];
+  }
+}
 
 List<PeriodDto> _parsePeriodList(dynamic data) {
   if (data is List) {
@@ -522,7 +604,9 @@ final assessmentTypesProvider =
 final classSubjectsProvider = FutureProvider.autoDispose
     .family<List<ClassSubjectDto>, int>((ref, classroomId) async {
   final conn = ref.watch(connectionProvider);
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return _classSubjectsFromLocal(ref, classroomId);
+  }
   final dio = ref.watch(dioProvider);
   try {
     final resp = await dio.get(
@@ -535,9 +619,51 @@ final classSubjectsProvider = FutureProvider.autoDispose
         ? e.error as ApiException
         : dioErrorToApiException(e);
     if (api.statusCode == 403) return const [];
-    rethrow;
+    // [Fix-OFFLINE] serveur injoignable → cache Drift.
+    return _classSubjectsFromLocal(ref, classroomId);
+  } catch (_) {
+    return _classSubjectsFromLocal(ref, classroomId);
   }
 });
+
+/// Matières d'une classe servies depuis le cache Drift local
+/// (tables `class_subjects` + `subjects` + `users`).
+Future<List<ClassSubjectDto>> _classSubjectsFromLocal(
+    Ref ref, int classroomId) async {
+  try {
+    final db = ref.read(databaseProvider);
+    final rows = await (db.select(db.classSubjects)
+          ..where((t) => t.classroomId.equals(classroomId))
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    if (rows.isEmpty) return const [];
+
+    final subjects = {
+      for (final s in await db.select(db.subjects).get())
+        s.id: (name: s.name, code: s.code)
+    };
+    final users = {
+      for (final u in await db.select(db.users).get())
+        u.id: [u.firstName, u.lastName].whereType<String>().join(' ').trim()
+    };
+
+    return rows
+        .map((r) => ClassSubjectDto(
+              id: r.id,
+              subjectId: r.subjectId,
+              subjectName: subjects[r.subjectId]?.name ?? '',
+              subjectCode: subjects[r.subjectId]?.code ?? '',
+              coefficient: r.coefficient,
+              assignedTeacherId: r.teacherId,
+              assignedTeacherName:
+                  r.teacherId == null ? null : users[r.teacherId],
+              classroomId: r.classroomId,
+            ))
+        .toList();
+  } catch (_) {
+    return const [];
+  }
+}
 
 List<ClassSubjectDto> _parseClassSubjectList(dynamic data) {
   if (data is List) {
@@ -560,7 +686,9 @@ List<ClassSubjectDto> _parseClassSubjectList(dynamic data) {
 final assessmentsProvider = FutureProvider.autoDispose
     .family<List<AssessmentDto>, AssessmentsQuery>((ref, q) async {
   final conn = ref.watch(connectionProvider);
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return _assessmentsFromLocal(ref, q);
+  }
   final dio = ref.watch(dioProvider);
   try {
     final resp = await dio.get(
@@ -576,9 +704,57 @@ final assessmentsProvider = FutureProvider.autoDispose
         ? e.error as ApiException
         : dioErrorToApiException(e);
     if (api.statusCode == 403) return const [];
-    rethrow;
+    // [Fix-OFFLINE] serveur injoignable → cache Drift.
+    return _assessmentsFromLocal(ref, q);
+  } catch (_) {
+    return _assessmentsFromLocal(ref, q);
   }
 });
+
+/// Évaluations d'une matière+période servies depuis le cache Drift local
+/// (tables `assessments` + comptage des notes locales).
+Future<List<AssessmentDto>> _assessmentsFromLocal(
+    Ref ref, AssessmentsQuery q) async {
+  try {
+    final db = ref.read(databaseProvider);
+    final query = db.select(db.assessments)
+      ..where((t) => t.classSubjectId.equals(q.classSubjectId))
+      ..where((t) => t.isDeleted.equals(false));
+    if (q.periodId != 0) {
+      query.where((t) => t.periodId.equals(q.periodId));
+    }
+    final rows = await query.get();
+
+    // Comptage local des notes saisies par évaluation.
+    final countExpr = db.grades.id.count();
+    final countRows = await (db.selectOnly(db.grades)
+          ..addColumns([db.grades.assessmentId, countExpr])
+          ..where(db.grades.isDeleted.equals(false))
+          ..groupBy([db.grades.assessmentId]))
+        .get();
+    final counts = <int, int>{};
+    for (final row in countRows) {
+      final aid = row.read(db.grades.assessmentId);
+      if (aid != null) counts[aid] = row.read(countExpr) ?? 0;
+    }
+
+    return rows
+        .map((a) => AssessmentDto(
+              id: a.id,
+              name: a.title,
+              maxScore: a.maxScore,
+              coefficient: a.coefficient,
+              dateTaken: a.date?.toIso8601String().substring(0, 10),
+              classSubjectId: a.classSubjectId,
+              periodId: a.periodId,
+              gradesEnteredCount: counts[a.id] ?? 0,
+            ))
+        .toList()
+      ..sort((a, b) => (b.dateTaken ?? '').compareTo(a.dateTaken ?? ''));
+  } catch (_) {
+    return const [];
+  }
+}
 
 List<AssessmentDto> _parseAssessmentList(dynamic data) {
   if (data is List) {

@@ -477,10 +477,11 @@ class _SyncCardState extends ConsumerState<_SyncCard> {
       final result = await engine.syncNow();
       // Trace la synchro sur le profil actif (registre multi-serveurs).
       ref.read(multiServerControllerProvider).recordSync();
-      // [Notifications] Suit la validation/rejet des modifications de notes.
+      // [Notifications] Suivi validation/rejet + résultat utile.
       if (result.isSuccess) {
-        ref.read(notificationServiceProvider).maybeCheckGradeModifications();
+        await ref.read(notificationServiceProvider).maybeCheckGradeModifications();
       }
+      await ref.read(notificationServiceProvider).notifySyncResult(result);
 
       final pulled = (result.pulled as int?) ?? 0;
       final pushed = (result.pushed as int?) ?? 0;

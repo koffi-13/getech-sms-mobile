@@ -7,7 +7,6 @@ import 'package:go_router/go_router.dart';
 
 import '../../shared/models/classroom_dto.dart';
 import '../../shared/widgets/widgets.dart';
-import '../connections/connection_state.dart';
 import '../schedule/schedule_controller.dart';
 import '../schedule/schedule_grid.dart';
 import '../students/student_controller.dart';
@@ -192,16 +191,8 @@ class _ScheduleTab extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final conn = ref.watch(connectionProvider);
-    if (!conn.canReachServer && !conn.isChecking) {
-      return const Center(
-        child: EmptyState(
-          icon: Icons.cloud_off,
-          title: 'Hors-ligne',
-          message: 'L\'emploi du temps nécessite une connexion au serveur.',
-        ),
-      );
-    }
+    // [Fix-OFFLINE] Plus de garde bloquante : classroomScheduleProvider est
+    // local-first (cache Drift) — l'onglet EDT reste consultable hors-ligne.
     final async = ref.watch(classroomScheduleProvider(classroom.id));
     return async.when(
       data: (list) {

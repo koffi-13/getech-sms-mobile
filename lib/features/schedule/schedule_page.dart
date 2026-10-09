@@ -69,16 +69,12 @@ class _SchedulePageState extends ConsumerState<SchedulePage> {
       ]),
       body: Column(
         children: [
+          // [Fix-OFFLINE] Plus de blocage : l'EDT est servi depuis le cache
+          // local Drift (dernière synchro) et se rafraîchira au retour du
+          // serveur. Le bandeau informe simplement du mode dégradé.
           if (!conn.canReachServer) const ScheduleOfflineBanner(),
           Expanded(
-            child: !conn.canReachServer
-                ? const EmptyState(
-                    title: 'Hors-ligne',
-                    message:
-                        'Connectez-vous au serveur pour charger l\'emploi du temps.',
-                    icon: Icons.cloud_off,
-                  )
-                : scopeAsync.when(
+            child: scopeAsync.when(
                     data: (scope) {
                       // Semaine alternée courante (auto-détection).
                       _currentWeek = currentWeekAsync.value;

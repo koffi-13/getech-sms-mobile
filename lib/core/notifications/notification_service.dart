@@ -32,10 +32,68 @@ import '../auth/teacher_scope.dart';
 import '../network/api_endpoints.dart';
 import '../network/api_exceptions.dart';
 import '../network/dio_client.dart';
+import '../sync/sync_engine.dart' show SyncResult;
 import '../../shared/models/grade_dto.dart';
 
 /// Intervalle minimal entre deux vérifications de modifications (5 min).
 const Duration _modsCheckThrottle = Duration(minutes: 5);
+
+/// Réglages de notifications (persistés dans SharedPreferences).
+///
+/// [Fix-NOTIFS] Les notifications « utiles et nécessaires » seulement :
+/// chaque famille peut être désactivée depuis Paramètres.
+class NotificationSettings {
+  NotificationSettings._({
+    required this.courseReminders,
+    required this.gradesValidation,
+    required this.syncUpdates,
+  });
+
+  /// Rappels de cours (enseignants) : 2 min avant, début, fin de créneau.
+  final bool courseReminders;
+
+  /// Suivi de la validation des notes (admin : nouvelles propositions ;
+  /// enseignant : décisions reçues).
+  final bool gradesValidation;
+
+  /// Résultat des synchronisations (éléments reçus/envoyés, envoi de
+  /// l'outbox après une période hors-ligne).
+  final bool syncUpdates;
+
+  static const _kCourse = 'getech.notif.course_reminders';
+  static const _kGrades = 'getech.notif.grades_validation';
+  static const _kSync = 'getech.notif.sync_updates';
+
+  static Future<NotificationSettings> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    return NotificationSettings._(
+      courseReminders: prefs.getBool(_kCourse) ?? true,
+      gradesValidation: prefs.getBool(_kGrades) ?? true,
+      syncUpdates: prefs.getBool(_kSync) ?? true,
+    );
+  }
+
+  Future<void> save({
+    bool? courseReminders,
+    bool? gradesValidation,
+    bool? syncUpdates,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (courseReminders != null) {
+      await prefs.setBool(_kCourse, courseReminders);
+    }
+    if (gradesValidation != null) {
+      await prefs.setBool(_kGrades, gradesValidation);
+    }
+    if (syncUpdates != null) {
+      await prefs.setBool(_kSync, syncUpdates);
+    }
+  }
+}
+
+/// Provider des réglages de notifications.
+final notificationSettingsProvider =
+    FutureProvider<NotificationSettings>((ref) => NotificationSettings.load());
 
 class NotificationService {
   NotificationService(this._ref);
@@ -102,6 +160,9 @@ class NotificationService {
   Future<int> scheduleTodayCourseReminders() async {
     final auth = _ref.read(authProvider);
     if (!auth.isAuthenticated) return 0;
+    // [Fix-NOTIFS] respecte le réglage utilisateur.
+    final settings = await NotificationSettings.load();
+    if (!settings.courseReminders) return 0;
     final scope = _ref.read(teacherScopeProvider).valueOrNull;
     final isTeacher =
         auth.hasDeclaredTeacherRole || (scope != null && scope.isTeacher);
@@ -266,19 +327,28 @@ class NotificationService {
 
   /// Vérifie les modifications de notes et notifie les changements.
   ///
-  /// À appeler après une synchronisation réussie (throttle 5 min) :
-  ///   - enseignant : « votre modification a été validée / rejetée » ;
-  ///   - admin : « N modification(s) en attente de validation ».
+  /// [Fix-NOTIFS] Plus de répétition : l'admin n'est notifié que quand le
+  /// nombre de propositions en attente AUGMENTE (nouvelles propositions) —
+  /// l'ancienne version notifiait « N en attente » à chaque synchro tant
+  /// qu'il restait des propositions non traitées (spam ressenti comme des
+  /// « notifications de développement »). L'enseignant est notifié des
+  /// décisions (validée/rejetée) sur ses propositions.
   Future<void> maybeCheckGradeModifications({bool force = false}) async {
     final auth = _ref.read(authProvider);
     final conn = _ref.read(connectionProvider);
     if (!auth.isAuthenticated || conn.serverUrl == null) return;
     if (!conn.canReachServer && !conn.isChecking) return;
 
+    // [Fix-NOTIFS] respecte le réglage utilisateur.
+    final settings = await NotificationSettings.load();
+    if (!settings.gradesValidation) return;
+
     final prefs = await SharedPreferences.getInstance();
     final pid = _ref.read(activeProfileIdProvider) ?? conn.profileId;
     final snapshotKey = 'getech.grade_mods_snapshot.${pid ?? 'default'}';
     final throttleKey = 'getech.grade_mods_lastcheck.${pid ?? 'default'}';
+    final pendingCountKey =
+        'getech.grade_mods_pending_count.${pid ?? 'default'}';
     if (!force) {
       final last = DateTime.tryParse(prefs.getString(throttleKey) ?? '');
       if (last != null &&
@@ -331,12 +401,20 @@ class NotificationService {
 
       if (isAdmin) {
         final pending = rows.where((m) => m.status == 'PENDING').length;
-        if (pending > 0) {
+        // [Fix-NOTIFS] notification sur TRANSITION uniquement : notifier
+        // seulement si le nombre d'attentes AUGMENTE (nouvelles
+        // propositions). Une baisse (décisions traitées) ou une stabilité
+        // ne notifie plus.
+        final previousPending = prefs.getInt(pendingCountKey) ?? 0;
+        await prefs.setInt(pendingCountKey, pending);
+        if (pending > previousPending) {
+          final newOnes = pending - previousPending;
           await showNow(
             'modifications-pending',
-            'Notes à valider',
-            '$pending modification(s) de note(s) en attente de votre '
-            'validation.',
+            'Nouvelles modifications de notes',
+            '$newOnes nouvelle(s) proposition(s) de note(s) à valider '
+            '($pending au total). Ouvrez le module Notes du serveur pour '
+            'les accorder ou les rejeter.',
           );
         }
       } else if (approved > 0 || rejected > 0) {
@@ -355,6 +433,44 @@ class NotificationService {
       // Serveur sans patch : silencieux.
     } catch (_) {
       // Best-effort.
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 3. Résultat de synchronisation (notification utile)
+  // ---------------------------------------------------------------------------
+
+  /// Notifie le résultat d'une synchronisation — uniquement quand quelque
+  /// chose a réellement bougé (éléments reçus, envoyés, ou erreurs).
+  ///
+  /// [Fix-NOTIFS] Remplace les messages répétitifs par une information
+  /// actionnable : « X élément(s) reçu(s), Y envoyé(s) » ou, en cas
+  /// d'échec, le nombre d'erreurs avec invitation à réessayer.
+  Future<void> notifySyncResult(SyncResult result) async {
+    // Respecte le réglage utilisateur.
+    final settings = await NotificationSettings.load();
+    if (!settings.syncUpdates) return;
+
+    if (!result.isSuccess) {
+      await showNow(
+        'sync-failed',
+        'Synchronisation incomplète',
+        '${result.errors.length} erreur(s) pendant la synchronisation. '
+        'Vos modifications locales sont conservées et seront renvoyées '
+        'à la prochaine tentative.',
+      );
+      return;
+    }
+    if (result.pulled > 0 || result.pushed > 0) {
+      final parts = <String>[
+        if (result.pulled > 0) '${result.pulled} reçu(s)',
+        if (result.pushed > 0) '${result.pushed} envoyé(s)',
+      ];
+      await showNow(
+        'sync-done',
+        'Synchronisation terminée',
+        'Vos données sont à jour (${parts.join(' · ')}).',
+      );
     }
   }
 

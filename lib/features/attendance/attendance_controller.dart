@@ -9,6 +9,7 @@ library;
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/database/database.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
@@ -253,6 +254,48 @@ final absenceHistoryProvider = FutureProvider.autoDispose
   }
 });
 
+/// [Fix-OFFLINE] Historique d'absences depuis le cache Drift local
+/// (tables `student_absences` + `course_sessions` + `subjects`, remplies
+/// par la synchro) — sert l'historique quand le serveur ne répond pas.
+Future<List<AbsenceHistoryEntry>> _absenceHistoryFromLocal(
+    Ref ref, int studentId) async {
+  try {
+    final db = ref.read(databaseProvider);
+    final absences = await (db.select(db.studentAbsences)
+          ..where((t) => t.studentId.equals(studentId)))
+        .get();
+    if (absences.isEmpty) return const [];
+
+    final sessionIds = absences.map((a) => a.courseSessionId).toSet();
+    final sessions = await (db.select(db.courseSessions)
+          ..where((t) => t.id.isIn(sessionIds)))
+        .get();
+    final sessionById = {for (final s in sessions) s.id: s};
+    final subjects = {
+      for (final s in await db.select(db.subjects).get()) s.id: s.name,
+    };
+
+    final entries = absences.map((a) {
+      final s = sessionById[a.courseSessionId];
+      return AbsenceHistoryEntry(
+        id: a.id,
+        studentId: studentId,
+        studentName: '',
+        courseSessionId: a.courseSessionId,
+        date: s?.date,
+        courseName: s == null ? null : subjects[s.subjectId],
+        isJustified: a.isJustified,
+        reason: a.reason,
+      );
+    }).toList();
+    entries.sort((a, b) =>
+        (b.date ?? DateTime(1970)).compareTo(a.date ?? DateTime(1970)));
+    return entries;
+  } catch (_) {
+    return const [];
+  }
+}
+
 /// Vue enrichie d'une absence pour l'historique : inclut la date du cours et
 /// le nom de la matière (dénormalisés côté serveur dans la réponse
 /// `/attendance/absences`). [StudentAbsenceDto] ne expose pas ces champs, on
@@ -294,10 +337,14 @@ class AbsenceHistoryEntry {
 
 /// Historique enrichi : `GET /attendance/absences?student_id=` →
 /// `List<AbsenceHistoryEntry>` (avec date + matière).
+///
+/// [Fix-OFFLINE] Repli cache Drift si le serveur ne répond pas.
 final absenceHistoryEntriesProvider = FutureProvider.autoDispose
     .family<List<AbsenceHistoryEntry>, int>((ref, studentId) async {
   final conn = ref.watch(connectionProvider);
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return _absenceHistoryFromLocal(ref, studentId);
+  }
   final dio = ref.watch(dioProvider);
   try {
     final resp = await dio.get(
@@ -319,7 +366,10 @@ final absenceHistoryEntriesProvider = FutureProvider.autoDispose
         ? e.error as ApiException
         : dioErrorToApiException(e);
     if (api.statusCode == 403) return const [];
-    rethrow;
+    // Serveur injoignable → cache local.
+    return _absenceHistoryFromLocal(ref, studentId);
+  } catch (_) {
+    return _absenceHistoryFromLocal(ref, studentId);
   }
 });
 

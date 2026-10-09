@@ -156,15 +156,35 @@ final teacherScopeProvider =
 
   // Appels parallèles : classes enseignées, toutes les classes (titulariat),
   // emploi du temps personnel.
-  final results = await Future.wait([
-    _fetchClassrooms(dio, serverUrl, teacherOnly: true),
-    _fetchClassrooms(dio, serverUrl, teacherOnly: false),
-    _fetchMySchedule(dio, serverUrl),
-  ]);
-
-  final teaching = results[0] as List<ClassroomDto>;
-  final all = results[1] as List<ClassroomDto>;
-  final schedule = results[2] as List<WeeklyScheduleDto>;
+  //
+  // [Fix-SCOPE-OFFLINE] Les erreurs réseau (serveur injoignable, 500…)
+  // ne remontent PLUS en erreur : repli sur les données locales Drift.
+  // L'ancien comportement affichait « Impossible de déterminer votre
+  // profil enseignant » + une erreur brute dès que le serveur tombait.
+  List<ClassroomDto> teaching = const [];
+  List<ClassroomDto> all = const [];
+  List<WeeklyScheduleDto> schedule = const [];
+  try {
+    final results = await Future.wait([
+      _fetchClassrooms(dio, serverUrl, teacherOnly: true),
+      _fetchClassrooms(dio, serverUrl, teacherOnly: false),
+      _fetchMySchedule(dio, serverUrl),
+    ]);
+    teaching = results[0] as List<ClassroomDto>;
+    all = results[1] as List<ClassroomDto>;
+    schedule = results[2] as List<WeeklyScheduleDto>;
+  } catch (e) {
+    // Repli local : classes (titulariat + enseignement via class_subjects)
+    // et cours planifiés depuis le cache de synchro.
+    try {
+      final local = await _localTeacherScope(ref, auth.user?.id);
+      teaching = local.teachingClassrooms;
+      all = local.allClassrooms;
+      schedule = local.mySchedule;
+    } catch (_) {
+      // Données locales indisponibles → périmètre vide (pas d'erreur UI).
+    }
+  }
 
   final userId = auth.user?.id;
   final head = userId == null
@@ -185,6 +205,84 @@ final teacherScopeProvider =
     mySchedule: schedule,
   );
 });
+
+/// Périmètre enseignant reconstruit depuis le cache Drift local.
+Future<_LocalTeacherScope> _localTeacherScope(Ref ref, int? userId) async {
+  final db = ref.read(databaseProvider);
+
+  final classrooms = await (db.select(db.classrooms)
+        ..where((t) => t.isDeleted.equals(false)))
+      .get();
+
+  List<ClassroomDto> all = classrooms
+      .map((c) => ClassroomDto(
+            id: c.id,
+            name: c.name,
+            // La colonne locale teacherId EST le titulaire (head teacher).
+            headTeacherId: c.teacherId,
+            headTeacherName: c.headTeacherName,
+            levelName: c.levelName,
+            cycleName: c.cycleName,
+            cycleId: c.cycleId,
+            seriesName: c.seriesName,
+            currentStudentsCount: c.currentStudentsCount,
+            maxStudents: c.capacity == 0 ? null : c.capacity,
+          ))
+      .toList();
+
+  List<ClassroomDto> teaching = const [];
+  if (userId != null) {
+    final csRows = await (db.select(db.classSubjects)
+          ..where((t) => t.teacherId.equals(userId)))
+        .get();
+    final teachingIds = csRows.map((r) => r.classroomId).toSet();
+    teaching =
+        all.where((c) => teachingIds.contains(c.id)).toList();
+  }
+
+  List<WeeklyScheduleDto> schedule = const [];
+  if (userId != null) {
+    final rows = await (db.select(db.weeklySchedules)
+          ..where((t) => t.teacherId.equals(userId))
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    final subjects = {
+      for (final s in await db.select(db.subjects).get()) s.id: s.name,
+    };
+    schedule = rows
+        .map((r) => WeeklyScheduleDto(
+              id: r.id,
+              classroomId: r.classroomId,
+              subjectId: r.subjectId,
+              subjectName: subjects[r.subjectId],
+              teacherId: r.teacherId,
+              timeSlotId: r.timeSlotId,
+              dayOfWeek: r.dayOfWeek,
+              startTime: r.startTime ?? '',
+              endTime: r.endTime ?? '',
+              room: r.room,
+              weekTypeRaw: r.weekType,
+            ))
+        .toList();
+  }
+
+  return _LocalTeacherScope(
+    allClassrooms: all,
+    teachingClassrooms: teaching,
+    mySchedule: schedule,
+  );
+}
+
+class _LocalTeacherScope {
+  final List<ClassroomDto> allClassrooms;
+  final List<ClassroomDto> teachingClassrooms;
+  final List<WeeklyScheduleDto> mySchedule;
+  const _LocalTeacherScope({
+    required this.allClassrooms,
+    required this.teachingClassrooms,
+    required this.mySchedule,
+  });
+}
 
 Future<List<ClassroomDto>> _fetchClassrooms(
   Dio dio,

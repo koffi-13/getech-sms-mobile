@@ -381,7 +381,7 @@ class ScheduleOfflineBanner extends StatelessWidget {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                'Mode hors-ligne : emploi du temps indisponible.',
+                'Mode hors-ligne : affichage du dernier emploi du temps synchronisé.',
                 style: TextStyle(
                     color: Theme.of(context).colorScheme.onErrorContainer),
               ),

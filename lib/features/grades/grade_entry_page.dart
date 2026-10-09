@@ -23,6 +23,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/auth/auth_state.dart';
+import '../../core/auth/teacher_scope.dart';
 import '../../core/config/constants.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/utils/formatters.dart';
@@ -44,6 +45,14 @@ class GradeEntryPage extends ConsumerWidget {
     final conn = ref.watch(connectionProvider);
 
     final canRead = hasPermission(perms, RbacPermissions.gradeRead);
+    // [Fix-TEACHER-GUARD] Repli enseignant (miroir de la barre de
+    // navigation) : un enseignant dont le RBAC serveur est incomplet
+    // garde accès à la saisie de notes — sinon il voyait l'onglet mais
+    // se heurtait à « Permission insuffisante ».
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final teacherish = auth.hasDeclaredTeacherRole ||
+        scopeAsync.maybeWhen(data: (s) => s.isTeacher, orElse: () => false);
+    final canUse = canRead || teacherish || auth.isSuperuser;
 
     return Scaffold(
       appBar: AppBar(
@@ -52,13 +61,11 @@ class GradeEntryPage extends ConsumerWidget {
           IconButton(
             tooltip: 'Classement',
             icon: const Icon(Icons.leaderboard_outlined),
-            onPressed: canRead
-                ? () => context.push('/grades/ranking')
-                : null,
+            onPressed: canUse ? () => context.push('/grades/ranking') : null,
           ),
         ],
       ),
-      body: !canRead
+      body: !canUse
           ? const EmptyState(
               title: 'Permission insuffisante',
               message: 'Vous n\'avez pas accès à la saisie des notes (GRADE_READ).',
