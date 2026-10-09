@@ -12,6 +12,7 @@ library;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../features/connections/connection_state.dart';
+import '../../features/connections/server_profiles.dart';
 import 'sync_engine.dart';
 
 /// Planificateur de synchronisation.
@@ -43,19 +44,29 @@ class SyncScheduler {
   /// Callback statique pour WorkManager (synchro en arrière-plan).
   ///
   /// WorkManager appelle des fonctions top-level sans `Ref` : cette méthode
-  /// crée donc un [ProviderContainer] autonome, attend que l'état de
-  /// connexion se stabilise (lecture SecureStorage + ping serveur), puis
-  /// déclenche [SyncEngine.syncNow]. Le container est dispos à la fin.
+  /// crée donc un [ProviderContainer] autonome, effectue la synchro, puis
+  /// libère les ressources.
+  ///
+  /// [Fix-BG-SYNC] Le registre multi-serveurs est bootstrapé AVANT la
+  /// synchro : sans cela, l'état de connexion restait `unpaired` (le
+  /// profil actif n'était jamais appliqué) et `syncNow` était un no-op —
+  /// la tâche périodique ne synchronisait donc JAMAIS rien.
   static Future<void> runBackgroundSync() async {
     final container = ProviderContainer();
 
     try {
-      // Initialise l'état de connexion (lecture async depuis SecureStorage).
-      // La lecture déclenche le `build()` du ConnectionNotifier qui charge
-      // l'URL serveur et lance un ping `/health` en arrière-plan.
-      container.read(connectionProvider);
+      // 1) Bootstrap multi-serveurs : charge le registre et applique le
+      //    profil actif (serverUrl, base Drift, heartbeat).
+      try {
+        await container.read(serverBootstrapProvider.future);
+      } catch (e) {
+        // Registre vide / erreur de lecture → pas de serveur appairé.
+        // ignore: avoid_print
+        print('[SyncScheduler] bootstrap arrière-plan sans serveur : $e');
+        return;
+      }
 
-      // Attend que le statut quitte "checking" (ping terminé) ou timeout.
+      // 2) Attend que le statut quitte "checking" (ping terminé) ou timeout.
       final sw = Stopwatch()..start();
       while (sw.elapsed < const Duration(seconds: 15)) {
         await Future.delayed(const Duration(milliseconds: 500));
@@ -63,7 +74,7 @@ class SyncScheduler {
         if (state.status != ServerStatus.checking) break;
       }
 
-      // Lance la synchro (syncNow vérifie canReachServer en interne).
+      // 3) Lance la synchro (syncNow vérifie canReachServer en interne).
       await container.read(syncEngineProvider).syncNow();
     } catch (e) {
       // ignore: avoid_print

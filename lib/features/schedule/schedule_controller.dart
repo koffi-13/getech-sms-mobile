@@ -20,11 +20,13 @@
 library;
 
 import 'package:dio/dio.dart';
+import 'package:drift/drift.dart' as d;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/auth/auth_state.dart';
 import '../../core/auth/teacher_scope.dart';
 import '../../core/config/constants.dart';
+import '../../core/database/database.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
@@ -55,11 +57,15 @@ class ScheduleQuery {
 
 /// Liste des classes pour le sélecteur (réutilise `GET /classrooms`).
 ///
-/// Renvoie une liste vide silencieuse en cas de 403 (permissions insuffisantes).
+/// [Fix-OFFLINE] Local-first : hors-ligne, le cache Drift (classes)
+/// alimente le sélecteur. Renvoie une liste vide silencieuse en cas de
+/// 403 (permissions insuffisantes).
 final classroomsForScheduleProvider =
     FutureProvider.autoDispose<List<ClassroomDto>>((ref) async {
   final conn = ref.watch(connectionProvider);
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return _classroomsFromLocal(ref);
+  }
   final dio = ref.watch(dioProvider);
   try {
     final resp = await dio.get(
@@ -72,34 +78,152 @@ final classroomsForScheduleProvider =
         ? e.error as ApiException
         : dioErrorToApiException(e);
     if (api.statusCode == 403) return const [];
-    rethrow;
+    // Serveur injoignable → cache local.
+    return _classroomsFromLocal(ref);
   }
 });
+
+/// Classes servies depuis le cache Drift local (hors-ligne).
+Future<List<ClassroomDto>> _classroomsFromLocal(Ref ref) async {
+  try {
+    final db = ref.read(databaseProvider);
+    final rows = await (db.select(db.classrooms)
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    return rows
+        .map((c) => ClassroomDto(
+              id: c.id,
+              name: c.name,
+              headTeacherId: c.teacherId,
+              headTeacherName: c.headTeacherName,
+              levelName: c.levelName,
+              cycleName: c.cycleName,
+              cycleId: c.cycleId,
+              seriesName: c.seriesName,
+              currentStudentsCount: c.currentStudentsCount,
+              maxStudents: c.capacity == 0 ? null : c.capacity,
+            ))
+        .toList();
+  } catch (_) {
+    return const [];
+  }
+}
 
 /// Emploi du temps **complet** d'une classe (toutes semaines confondues) :
 /// `GET /schedule?classroom_id=X`.
 ///
 /// Le serveur ignore le paramètre `week_type` : on récupère tout puis on
 /// filtre côté client (via [WeeklyScheduleDto.matchesWeek]) dans l'UI.
+///
+/// [Fix-OFFLINE] Local-first : le cache Drift (table `weekly_schedules`,
+/// rempli par la synchro) est servi immédiatement — l'EDT reste
+/// consultable hors-ligne. L'API ne sert qu'à rafraîchir le cache quand
+/// le serveur répond.
 final classroomScheduleProvider = FutureProvider.autoDispose
     .family<List<WeeklyScheduleDto>, int>((ref, classroomId) async {
   final conn = ref.watch(connectionProvider);
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+
+  // 1) Cache local immédiat (seule source hors-ligne).
+  final local = await _scheduleFromLocal(ref, classroomId);
+
+  if (!conn.isPaired || conn.serverUrl == null) return local;
+  final definitelyOffline = !conn.canReachServer && !conn.isChecking;
+  if (definitelyOffline) return local;
+
+  // 2) Rafraîchissement API (échecs réseau tolérés → cache local).
   final dio = ref.watch(dioProvider);
   try {
     final resp = await dio.get(
       buildUrl(conn.serverUrl!, ApiEndpoints.schedule),
       queryParameters: {'classroom_id': classroomId},
     );
-    return _parseWeeklyScheduleList(resp.data);
+    final remote = _parseWeeklyScheduleList(resp.data);
+    await _saveScheduleToLocal(ref, remote);
+    // Reservir le local enrichi (noms de matières résolus).
+    final updated = await _scheduleFromLocal(ref, classroomId);
+    return updated.isNotEmpty || remote.isEmpty ? updated : remote;
   } on DioException catch (e) {
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
-    if (api.statusCode == 403 || api.statusCode == 404) return const [];
-    rethrow;
+    if (api.statusCode == 403 || api.statusCode == 404) return local;
+    return local; // réseau KO → cache
+  } catch (_) {
+    return local;
   }
 });
+
+/// EDT d'une classe depuis le cache Drift (noms de matières résolus via
+/// la table locale `subjects`).
+Future<List<WeeklyScheduleDto>> _scheduleFromLocal(
+    Ref ref, int? classroomId) async {
+  try {
+    final db = ref.read(databaseProvider);
+    final query = db.select(db.weeklySchedules)
+      ..where((t) => t.isDeleted.equals(false));
+    if (classroomId != null) {
+      query.where((t) => t.classroomId.equals(classroomId));
+    }
+    final rows = await query.get();
+    if (rows.isEmpty) return const [];
+
+    final subjects = {
+      for (final s in await db.select(db.subjects).get()) s.id: s.name,
+    };
+    final classrooms = {
+      for (final c in await db.select(db.classrooms).get()) c.id: c.name,
+    };
+
+    return rows
+        .map((r) => WeeklyScheduleDto(
+              id: r.id,
+              classroomId: r.classroomId,
+              classroomName: classrooms[r.classroomId],
+              subjectId: r.subjectId,
+              subjectName: subjects[r.subjectId],
+              teacherId: r.teacherId,
+              timeSlotId: r.timeSlotId,
+              dayOfWeek: r.dayOfWeek,
+              startTime: r.startTime ?? '',
+              endTime: r.endTime ?? '',
+              room: r.room,
+              weekTypeRaw: r.weekType,
+            ))
+        .toList();
+  } catch (_) {
+    return const [];
+  }
+}
+
+/// Persiste les entrées EDT dans le cache Drift (upsert par id).
+Future<void> _saveScheduleToLocal(
+    Ref ref, List<WeeklyScheduleDto> entries) async {
+  try {
+    final db = ref.read(databaseProvider);
+    await db.batch((batch) {
+      for (final e in entries) {
+        batch.replace(
+          db.weeklySchedules,
+          WeeklySchedulesCompanion.insert(
+            id: d.Value(e.id),
+            classroomId: d.Value(e.classroomId),
+            subjectId: d.Value(e.subjectId),
+            teacherId: d.Value(e.teacherId),
+            timeSlotId: e.timeSlotId,
+            dayOfWeek: e.dayOfWeek,
+            startTime: d.Value(e.startTime),
+            endTime: d.Value(e.endTime),
+            room: d.Value(e.room),
+            weekType: d.Value(e.weekTypeRaw ?? 'A'),
+            syncedAt: d.Value(DateTime.now()),
+          ),
+        );
+      }
+    });
+  } catch (_) {
+    // Best-effort : le cache ne doit jamais casser l'affichage.
+  }
+}
 
 /// Compatibilité : emploi du temps d'une classe filtré par semaine
 /// (utilisé par le module Présence et l'onglet EDT du détail de classe).
@@ -111,10 +235,14 @@ final weeklyScheduleProvider = FutureProvider.autoDispose
 
 /// Emploi du temps d'un enseignant : `GET /schedule?teacher_id=Y`
 /// (vue admin « Par enseignant »).
+///
+/// [Fix-OFFLINE] Repli cache Drift si le serveur ne répond pas.
 final teacherScheduleByIdProvider = FutureProvider.autoDispose
     .family<List<WeeklyScheduleDto>, int>((ref, teacherId) async {
   final conn = ref.watch(connectionProvider);
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return _teacherScheduleFromLocal(ref, teacherId);
+  }
   final dio = ref.watch(dioProvider);
   try {
     final resp = await dio.get(
@@ -126,10 +254,47 @@ final teacherScheduleByIdProvider = FutureProvider.autoDispose
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
-    if (api.statusCode == 403 || api.statusCode == 404) return const [];
-    rethrow;
+    if (api.statusCode == 403 || api.statusCode == 404) {
+      return _teacherScheduleFromLocal(ref, teacherId);
+    }
+    return _teacherScheduleFromLocal(ref, teacherId);
+  } catch (_) {
+    return _teacherScheduleFromLocal(ref, teacherId);
   }
 });
+
+/// EDT d'un enseignant depuis le cache Drift local.
+Future<List<WeeklyScheduleDto>> _teacherScheduleFromLocal(
+    Ref ref, int teacherId) async {
+  try {
+    final db = ref.read(databaseProvider);
+    final rows = await (db.select(db.weeklySchedules)
+          ..where((t) => t.teacherId.equals(teacherId))
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    if (rows.isEmpty) return const [];
+    final subjects = {
+      for (final s in await db.select(db.subjects).get()) s.id: s.name,
+    };
+    return rows
+        .map((r) => WeeklyScheduleDto(
+              id: r.id,
+              classroomId: r.classroomId,
+              subjectId: r.subjectId,
+              subjectName: subjects[r.subjectId],
+              teacherId: r.teacherId,
+              timeSlotId: r.timeSlotId,
+              dayOfWeek: r.dayOfWeek,
+              startTime: r.startTime ?? '',
+              endTime: r.endTime ?? '',
+              room: r.room,
+              weekTypeRaw: r.weekType,
+            ))
+        .toList();
+  } catch (_) {
+    return const [];
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Parsing

@@ -14,6 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../app.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/config/app_config.dart';
+import '../../core/notifications/notification_service.dart';
 import '../connections/connection_state.dart';
 import '../connections/connections_controller.dart' show serverInfoProvider;
 import '../../shared/models/classroom_dto.dart' show PeriodDto;
@@ -35,6 +36,8 @@ class SettingsPage extends ConsumerWidget {
           const _ProfileSection(),
           const SizedBox(height: 16),
           const _AppearanceSection(),
+          const SizedBox(height: 16),
+          const _NotificationsSection(),
           const SizedBox(height: 16),
           const _SyncSection(),
           const SizedBox(height: 16),
@@ -191,6 +194,80 @@ class _AppearanceSection extends ConsumerWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Section Notifications : activation/désactivation des familles de
+/// notifications utiles (rappels de cours, suivi validation des notes,
+/// résultats de synchronisation).
+class _NotificationsSection extends ConsumerWidget {
+  const _NotificationsSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settingsAsync = ref.watch(notificationSettingsProvider);
+    final theme = Theme.of(context);
+
+    return Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Text('Notifications',
+                style: theme.textTheme.titleSmall
+                    ?.copyWith(fontWeight: FontWeight.bold)),
+          ),
+          settingsAsync.when(
+            data: (settings) => Column(
+              children: [
+                SwitchListTile(
+                  secondary: const Icon(Icons.school_outlined),
+                  title: const Text('Rappels de cours'),
+                  subtitle: const Text(
+                      'Avant le début et la fin de vos créneaux (enseignants)'),
+                  value: settings.courseReminders,
+                  onChanged: (v) async {
+                    await settings.save(courseReminders: v);
+                    ref.invalidate(notificationSettingsProvider);
+                  },
+                ),
+                SwitchListTile(
+                  secondary: const Icon(Icons.grading_outlined),
+                  title: const Text('Validation des notes'),
+                  subtitle: const Text(
+                      'Nouvelles propositions à valider, décisions reçues'),
+                  value: settings.gradesValidation,
+                  onChanged: (v) async {
+                    await settings.save(gradesValidation: v);
+                    ref.invalidate(notificationSettingsProvider);
+                  },
+                ),
+                SwitchListTile(
+                  secondary: const Icon(Icons.sync_outlined),
+                  title: const Text('Résultats de synchronisation'),
+                  subtitle: const Text(
+                      'Données reçues/envoyées après chaque synchronisation'),
+                  value: settings.syncUpdates,
+                  onChanged: (v) async {
+                    await settings.save(syncUpdates: v);
+                    ref.invalidate(notificationSettingsProvider);
+                  },
+                ),
+              ],
+            ),
+            loading: () => const Padding(
+              padding: EdgeInsets.all(16),
+              child: Center(child: CircularProgressIndicator()),
+            ),
+            error: (_, __) => const ListTile(
+              leading: Icon(Icons.notifications_off_outlined),
+              title: Text('Notifications indisponibles'),
+            ),
+          ),
+        ],
       ),
     );
   }

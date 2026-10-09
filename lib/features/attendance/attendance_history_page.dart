@@ -8,7 +8,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/utils/formatters.dart';
-import '../../features/connections/connection_state.dart';
 import '../../shared/models/student_dto.dart';
 import '../../shared/widgets/widgets.dart';
 import 'attendance_controller.dart';
@@ -20,17 +19,8 @@ class AttendanceHistoryPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final conn = ref.watch(connectionProvider);
-    if (!conn.canReachServer && !conn.isChecking) {
-      return Scaffold(
-        appBar: AppBar(title: const Text('Historique d\'absences')),
-        body: const EmptyState(
-          title: 'Hors-ligne',
-          message: 'L\'historique nécessite une connexion au serveur.',
-          icon: Icons.cloud_off,
-        ),
-      );
-    }
+    // [Fix-OFFLINE] Plus de garde bloquante : l'historique est servi depuis
+    // le cache Drift (dernière synchro) quand le serveur ne répond pas.
     if (studentId == null) {
       return const _StudentPicker();
     }

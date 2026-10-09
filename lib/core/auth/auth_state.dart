@@ -4,9 +4,12 @@
 /// Dio le lit via `ref.read(authProvider).token` à chaque requête.
 library;
 
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../shared/models/auth_dto.dart'
     show ChangePasswordRequest, LoginRequest, LoginResponse, MeResponse, UserDto;
@@ -95,6 +98,16 @@ final authProvider =
 class AuthNotifier extends Notifier<AuthState> {
   @override
   AuthState build() {
+    // [Fix-SESSION-RESTORE] Régression v2 corrigée : au démarrage à froid,
+    // le registre multi-serveurs n'est PAS encore chargé (bootstrap async)
+    // donc `activeProfileIdProvider` vaut null et l'ancien code sortait
+    // immédiatement de _restoreSession → l'utilisateur était renvoyé au
+    // login à CHAQUE lancement de l'app (et bloqué hors-ligne).
+    // On SURVEILLE le profil actif : dès que le bootstrap le pose, ce
+    // provider se reconstruit et restaure la session.
+    // select(profileId) : ne pas se reconstruire au heartbeat 30 s.
+    ref.watch(activeProfileIdProvider);
+    ref.watch(connectionProvider.select((c) => c.profileId));
     _restoreSession();
     return const AuthState();
   }
@@ -106,15 +119,90 @@ class AuthNotifier extends Notifier<AuthState> {
 
   /// Restaure la session JWT du serveur ACTIF (clé par profil) au démarrage
   /// ou après une bascule de serveur.
+  ///
+  /// [Fix-OFFLINE-SESSION] Un instantané de session (utilisateur,
+  /// permissions, rôles, établissement) est persisté par profil : il est
+  /// réhydraté AVANT l'appel réseau → l'app reste utilisable hors-ligne
+  /// (modules + données locales). `/auth/me` n'est plus qu'un refresh
+  /// silencieux quand le serveur est joignable.
   Future<void> _restoreSession() async {
     final pid = ref.read(activeProfileIdProvider) ??
         ref.read(connectionProvider).profileId;
     if (pid == null) return;
     final token = await _storage.getJwtFor(pid);
     if (token == null || token.isEmpty) return;
-    state = state.copyWith(token: token);
-    // Vérifie la validité du token via /auth/me.
+
+    // 1) Réhydratation locale immédiate (hors-ligne OK).
+    final snap = await _readSnapshot(pid);
+    state = state.copyWith(
+      token: token,
+      user: snap?['user'],
+      permissions: (snap?['permissions'] as List<String>? ?? const []),
+      roles: (snap?['roles'] as List<String>? ?? const []),
+      establishmentId: snap?['establishmentId'] as int?,
+    );
+
+    // 2) Refresh silencieux si le serveur répond (les erreurs réseau
+    //    sont ignorées : la session locale reste valide).
     await fetchMe();
+  }
+
+  /// Clé de l'instantané de session pour un profil serveur.
+  static String _snapshotKey(String pid) => 'session_snapshot_$pid';
+
+  /// Lit l'instantané de session persisté pour [pid] (null si absent/corrompu).
+  Future<Map<String, dynamic>?> _readSnapshot(String pid) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_snapshotKey(pid));
+      if (raw == null || raw.isEmpty) return null;
+      final j = Map<String, dynamic>.from(
+          jsonDecode(raw) as Map<String, dynamic>);
+      return {
+        'user': UserDto.fromJson(
+            Map<String, dynamic>.from(j['user'] as Map<String, dynamic>)),
+        'permissions': (j['permissions'] as List?)
+                ?.map((e) => e.toString())
+                .toList() ??
+            const <String>[],
+        'roles': (j['roles'] as List?)
+                ?.map((e) => e.toString())
+                .toList() ??
+            const <String>[],
+        'establishmentId': j['establishmentId'] as int?,
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Persiste l'instantané de session courant pour [pid].
+  Future<void> _writeSnapshot(String pid) async {
+    try {
+      final user = state.user;
+      if (user == null) return;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _snapshotKey(pid),
+        jsonEncode({
+          'user': user.toJson(),
+          'permissions': state.permissions,
+          'roles': state.roles,
+          'establishmentId': state.establishmentId,
+        }),
+      );
+    } catch (_) {
+      // Best-effort : la persistance ne doit jamais casser la connexion.
+    }
+  }
+
+  /// Permissions effectives : un super-utilisateur dont le RBAC serveur
+  /// n'est pas seedé reçoit quand même tous les droits (le serveur envoie
+  /// normalement '*', ce repli couvre les serveurs non patchés).
+  List<String> _effectivePermissions(UserDto user, List<String> permissions) {
+    if (permissions.contains('*')) return permissions;
+    if (user.isSuperuser) return const ['*'];
+    return permissions;
   }
 
   /// Connexion : `POST /auth/login`.
@@ -152,11 +240,14 @@ class AuthNotifier extends Notifier<AuthState> {
       state = state.copyWith(
         token: login.accessToken,
         user: login.user,
-        permissions: login.permissions,
+        permissions: _effectivePermissions(
+            login.user, login.permissions),
         roles: login.roles.map((r) => r.code).toList(),
         establishmentId: login.establishment?.id,
         isLoading: false,
       );
+      // [Fix-OFFLINE-SESSION] persister l'instantané pour ce profil.
+      if (pid != null) await _writeSnapshot(pid);
       return true;
     } on DioException catch (e) {
       // [Fix-AUTH] Logger l'erreur complète pour diagnostic.
@@ -239,11 +330,15 @@ class AuthNotifier extends Notifier<AuthState> {
           Map<String, dynamic>.from(resp.data as Map));
       state = state.copyWith(
         user: me.user,
-        permissions: me.permissions,
+        permissions: _effectivePermissions(me.user, me.permissions),
         roles: me.roles.map((r) => r.code).toList(),
         establishmentId: me.establishment?.id,
         clearError: true,
       );
+      // [Fix-OFFLINE-SESSION] mettre à jour l'instantané persisté.
+      final pid = ref.read(activeProfileIdProvider) ??
+          ref.read(connectionProvider).profileId;
+      if (pid != null) await _writeSnapshot(pid);
     } on DioException catch (e) {
       // On ne déconnecte QUE si c'est une erreur 401 (token invalide/expiré).
       // Les erreurs réseau (503, timeout, etc.) ne doivent pas forcer le logout.
@@ -284,6 +379,11 @@ class AuthNotifier extends Notifier<AuthState> {
         ref.read(connectionProvider).profileId;
     if (pid != null) {
       await _storage.deleteJwtFor(pid);
+      // [Fix-OFFLINE-SESSION] effacer aussi l'instantané de session.
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove(_snapshotKey(pid));
+      } catch (_) {}
     } else {
       await _storage.deleteJwt();
     }
