@@ -7,7 +7,9 @@ import 'package:logger/logger.dart' as log_pkg;
 import 'package:uuid/uuid.dart';
 
 import '../../features/connections/connection_state.dart';
+import '../../features/students/student_controller.dart';
 import '../../shared/models/grade_dto.dart';
+import '../../shared/models/student_dto.dart';
 import '../../shared/models/sync_dto.dart';
 import '../database/database.dart';
 import '../network/api_endpoints.dart';
@@ -302,8 +304,26 @@ class SyncEngine {
     final submissions = pending
         .where((e) => e.tableNameColumn == 'grade_submission')
         .toList(growable: false);
+
+    // [Fix-STUDENT-DUP] Les mutations d'élèves (POST/PATCH hors-ligne)
+    // passent par les endpoints REST dédiés — `/sync/push` rejette la
+    // table `students` (lecture seule côté serveur), ce qui laissait les
+    // modifications hors-ligne partir en erreur « read-only » sans jamais
+    // atteindre le serveur.
+    final studentMutations = pending
+        .where((e) =>
+            e.tableNameColumn == 'students' &&
+            e.operation.toUpperCase() != 'DELETE')
+        .toList(growable: false);
+    final studentDeletes = pending
+        .where((e) =>
+            e.tableNameColumn == 'students' &&
+            e.operation.toUpperCase() == 'DELETE')
+        .toList(growable: false);
     final rest = pending
-        .where((e) => e.tableNameColumn != 'grade_submission')
+        .where((e) =>
+            e.tableNameColumn != 'grade_submission' &&
+            e.tableNameColumn != 'students')
         .toList(growable: false);
 
     for (final entry in submissions) {
@@ -321,6 +341,33 @@ class SyncEngine {
           );
         }
       }
+    }
+
+    // [Fix-STUDENT-DUP] Rejeu REST des mutations d'élèves.
+    for (final entry in studentMutations) {
+      try {
+        pushed += await _pushStudentMutation(entry, outbox);
+      } catch (e) {
+        _log.w('Mutation élève #${entry.id} échouée : $e');
+        errors.add('Élève hors-ligne : $e');
+        // Garde-fou anti-retry infini (miroir des soumissions de notes).
+        if (entry.attempts >= 4) {
+          await outbox.markProcessed(
+            entry.id,
+            error: 'Abandon après ${entry.attempts + 1} tentatives : $e',
+          );
+        }
+      }
+    }
+
+    // Les suppressions d'élèves n'ont pas d'endpoint serveur : marquées
+    // traitées avec une note explicite (le soft-delete local reste).
+    for (final entry in studentDeletes) {
+      await outbox.markProcessed(
+        entry.id,
+        error: 'Suppression d\'élève non synchropluggable — le serveur '
+            'n\'expose pas DELETE /students.',
+      );
     }
 
     if (rest.isEmpty) {
@@ -497,6 +544,66 @@ class SyncEngine {
     _log.i('Soumission notes #$assessmentId : ${body.savedCount} saved, '
         '${body.queuedCount} queued, ${body.skippedCount} unchanged');
     return body.savedCount + body.queuedCount + body.skippedCount;
+  }
+
+  /// [Fix-STUDENT-DUP] Pousse UNE mutation d'élève hors-ligne via l'endpoint
+  /// REST dédié (`POST /students` ou `PATCH /students/{id}`) et réconcilie
+  /// la ligne locale temporaire (id négatif) avec la réponse serveur.
+  Future<int> _pushStudentMutation(
+    OutboxEntry entry,
+    Outbox outbox,
+  ) async {
+    final conn = _ref.read(connectionProvider);
+    final dio = _ref.read(dioProvider);
+    final payload = entry.payloadMap;
+    final op = entry.operation.toUpperCase();
+    final recordId = entry.recordId;
+
+    // PATCH sur une ligne locale temporaire (id négatif — élève créé
+    // hors-ligne puis modifié) : le serveur ne connaît pas cet id → on
+    // rejoue une CRÉATION avec le payload le plus récent.
+    final isCreate = op == 'POST' || (recordId != null && recordId < 0);
+
+    if (isCreate) {
+      final url = buildUrl(conn.serverUrl!, ApiEndpoints.students);
+      final resp = await dio.post(url, data: payload);
+      if (resp.data is Map) {
+        final serverDto = StudentDto.fromJson(
+            Map<String, dynamic>.from(resp.data as Map));
+        // Réconcilie l'id local (négatif) avec l'id serveur — sinon la
+        // ligne locale ET la ligne serveure coexistaient (doublon).
+        if (recordId != null && recordId < 0) {
+          try {
+            await _ref
+                .read(studentRepositoryProvider)
+                .reconcileCreatedStudent(recordId, serverDto);
+          } catch (e) {
+            _log.w('Réconciliation élève #$recordId différée au pull : $e');
+          }
+        }
+        await outbox.markProcessed(entry.id);
+        _log.i('Création élève hors-ligne poussée : '
+            '${serverDto.matricule} (id ${serverDto.id})');
+        return 1;
+      }
+      throw const ApiException('Réponse serveur inattendue après création');
+    }
+
+    // PATCH d'un élève existant (id serveur positif).
+    if (recordId == null || recordId <= 0) {
+      await outbox.markProcessed(
+          entry.id, error: 'Modification sans identifiant serveur — ignorée');
+      return 0;
+    }
+    final url = buildUrl(conn.serverUrl!, ApiEndpoints.student(recordId));
+    await dio.patch(url, data: payload);
+    // La ligne locale redevient propre (les valeurs reviendront au pull).
+    await (_db.update(_db.students)..where((t) => t.id.equals(recordId))).write(
+      const StudentsCompanion(isDirty: Value(false)),
+    );
+    await outbox.markProcessed(entry.id);
+    _log.i('Modification élève #$recordId poussée');
+    return 1;
   }
 
   /// Applique les marques issues d'une soumission sur les lignes Drift

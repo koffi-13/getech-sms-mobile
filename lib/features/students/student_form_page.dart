@@ -146,7 +146,10 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
         _city.text = s.contact!.city ?? '';
       }
       if (s.medical != null) {
-        _bloodType = s.medical!.bloodType;
+        // [Fix-BLOODTYPE] inconnu → non renseigné (jamais une valeur du
+        // dropdown — sinon assertion au build).
+        final bt = s.medical!.bloodType;
+        _bloodType = (bt == null || bt == BloodType.inconnu) ? null : bt;
         _allergies.text = s.medical!.allergies ?? '';
         _doctor.text = s.medical!.doctor ?? '';
       }
@@ -348,7 +351,14 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
                   _section(context, 'Médical', Icons.medical_services_outlined,
                       [
                     DropdownButtonFormField<BloodType>(
-                      value: _bloodType,
+                      // [Fix-BLOODTYPE] Garde défensive : si une valeur
+                      // BloodType.inconnu subsistait (données corrompues),
+                      // on la traite comme « non renseignée » — l'assertion
+                      // DropdownButton exige exactement un item portant la
+                      // valeur, et « inconnu » n'est PAS dans les items.
+                      value: (_bloodType == null || _bloodType == BloodType.inconnu)
+                          ? null
+                          : _bloodType,
                       items: const [
                         DropdownMenuItem(value: null, child: Text('Inconnu')),
                         DropdownMenuItem(

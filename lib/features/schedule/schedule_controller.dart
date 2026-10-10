@@ -62,7 +62,10 @@ class ScheduleQuery {
 /// 403 (permissions insuffisantes).
 final classroomsForScheduleProvider =
     FutureProvider.autoDispose<List<ClassroomDto>>((ref) async {
-  final conn = ref.watch(connectionProvider);
+  // [Fix-HEARTBEAT-REBUILD] select : le heartbeat émet un nouvel état toutes
+  // les 30 s (latence) — ne pas invalider le sélecteur de classes pour autant.
+  final conn = ref.watch(connectionProvider
+      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
   if (!conn.isPaired || conn.serverUrl == null) {
     return _classroomsFromLocal(ref);
   }
@@ -77,7 +80,8 @@ final classroomsForScheduleProvider =
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
-    if (api.statusCode == 403) return const [];
+    // [Fix-TEACHER-CLASSES-403] 403 → cache local (plus de liste vide
+    // silencieuse).
     // Serveur injoignable → cache local.
     return _classroomsFromLocal(ref);
   }
@@ -121,7 +125,14 @@ Future<List<ClassroomDto>> _classroomsFromLocal(Ref ref) async {
 /// le serveur répond.
 final classroomScheduleProvider = FutureProvider.autoDispose
     .family<List<WeeklyScheduleDto>, int>((ref, classroomId) async {
-  final conn = ref.watch(connectionProvider);
+  // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForScheduleProvider.
+  // canReachServer/isChecking ne changent qu'aux transitions d'état.
+  final conn = ref.watch(connectionProvider.select((c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      )));
 
   // 1) Cache local immédiat (seule source hors-ligne).
   final local = await _scheduleFromLocal(ref, classroomId);
@@ -239,7 +250,9 @@ final weeklyScheduleProvider = FutureProvider.autoDispose
 /// [Fix-OFFLINE] Repli cache Drift si le serveur ne répond pas.
 final teacherScheduleByIdProvider = FutureProvider.autoDispose
     .family<List<WeeklyScheduleDto>, int>((ref, teacherId) async {
-  final conn = ref.watch(connectionProvider);
+  // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForScheduleProvider.
+  final conn = ref.watch(connectionProvider
+      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
   if (!conn.isPaired || conn.serverUrl == null) {
     return _teacherScheduleFromLocal(ref, teacherId);
   }
@@ -307,11 +320,16 @@ List<ClassroomDto> _parseClassroomList(dynamic data) {
         .map((e) => ClassroomDto.fromJson(Map<String, dynamic>.from(e)))
         .toList();
   }
-  if (data is Map && data['items'] is List) {
-    return (data['items'] as List)
-        .whereType<Map>()
-        .map((e) => ClassroomDto.fromJson(Map<String, dynamic>.from(e)))
-        .toList();
+  if (data is Map) {
+    // [Fix-TEACHER-CLASSES-403] Enveloppes acceptées : items / data /
+    // classrooms.
+    final rows = data['items'] ?? data['data'] ?? data['classrooms'];
+    if (rows is List) {
+      return rows
+          .whereType<Map>()
+          .map((e) => ClassroomDto.fromJson(Map<String, dynamic>.from(e)))
+          .toList();
+    }
   }
   return const [];
 }

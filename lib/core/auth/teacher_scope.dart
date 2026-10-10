@@ -140,7 +140,10 @@ class TeacherScope {
 final teacherScopeProvider =
     FutureProvider.autoDispose<TeacherScope>((ref) async {
   final auth = ref.watch(authProvider);
-  final conn = ref.watch(connectionProvider);
+  // [Fix-HEARTBEAT-REBUILD] select : le heartbeat émet un nouvel état toutes
+  // les 30 s (latence) — ne pas invalider le scope enseignant pour autant.
+  final conn = ref.watch(connectionProvider
+      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
 
   if (!auth.isAuthenticated || !conn.isPaired || conn.serverUrl == null) {
     return TeacherScope.empty;
@@ -302,8 +305,15 @@ Future<List<ClassroomDto>> _fetchClassrooms(
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
-    // 403 → pas la permission de lister : périmètre vide silencieux.
-    if (api.statusCode == 403) return const [];
+    // [Fix-TEACHER-CLASSES-403] Un 403 n'est plus avalé : on relance pour
+    // que l'appelant retombe sur le cache Drift (avant le fix serveur RBAC,
+    // l'enseignant voyait « aucune classe » sans aucune erreur).
+    if (api.statusCode == 403) {
+      throw const ApiException(
+        'Accès refusé (403) — vérifiez les permissions du compte côté serveur.',
+        statusCode: 403,
+      );
+    }
     rethrow;
   }
 }
@@ -315,11 +325,16 @@ List<ClassroomDto> _parseClassroomList(dynamic data) {
         .map((e) => ClassroomDto.fromJson(Map<String, dynamic>.from(e)))
         .toList();
   }
-  if (data is Map && data['items'] is List) {
-    return (data['items'] as List)
-        .whereType<Map>()
-        .map((e) => ClassroomDto.fromJson(Map<String, dynamic>.from(e)))
-        .toList();
+  if (data is Map) {
+    // [Fix-TEACHER-CLASSES-403] Enveloppes acceptées : items / data /
+    // classrooms.
+    final rows = data['items'] ?? data['data'] ?? data['classrooms'];
+    if (rows is List) {
+      return rows
+          .whereType<Map>()
+          .map((e) => ClassroomDto.fromJson(Map<String, dynamic>.from(e)))
+          .toList();
+    }
   }
   return const [];
 }

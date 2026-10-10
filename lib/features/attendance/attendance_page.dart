@@ -108,6 +108,9 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                     }
                     return DropdownButtonFormField<ClassroomDto>(
                       value: list.firstWhere((c) => c.id == _classroomId),
+                      // [Fix-OVERFLOW] isExpanded : contraint la valeur
+                      // sélectionnée à la largeur du champ.
+                      isExpanded: true,
                       decoration: const InputDecoration(
                         labelText: 'Classe',
                         border: OutlineInputBorder(),
@@ -116,7 +119,9 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                       items: list
                           .map((c) => DropdownMenuItem(
                                 value: c,
-                                child: Text(c.name),
+                                child: Text(c.name,
+                                    overflow: TextOverflow.ellipsis,
+                                    maxLines: 1),
                               ))
                           .toList(),
                       onChanged: _activeSession == null

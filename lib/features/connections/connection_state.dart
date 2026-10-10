@@ -227,19 +227,35 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
       stopwatch.stop();
 
       if (response.statusCode == 200) {
-        state = state.copyWith(
-          status: ServerStatus.online,
-          latency: stopwatch.elapsed,
-          clearError: true,
-        );
+        final prev = state;
+        // [Fix-HEARTBEAT-REBUILD] Le heartbeat tourne toutes les 30 s : ne
+        // ré-émettre QUE si l'état significatif change (transition de statut
+        // ou disparition d'une erreur). Avant, chaque battement produisait un
+        // nouvel objet (latence différente) → invalidation de TOUS les
+        // providers qui watchent la connexion → chargements brusques qui
+        // réinitialisaient les saisies en cours (notes notamment).
+        final isTransition = prev.status != ServerStatus.online ||
+            prev.errorMessage != null ||
+            prev.latency == null;
+        if (isTransition) {
+          state = prev.copyWith(
+            status: ServerStatus.online,
+            latency: stopwatch.elapsed,
+            clearError: true,
+          );
+        }
       } else {
-        state = state.copyWith(status: ServerStatus.offline);
+        if (state.status != ServerStatus.offline) {
+          state = state.copyWith(status: ServerStatus.offline);
+        }
       }
     } catch (e) {
-      state = state.copyWith(
-        status: ServerStatus.offline,
-        errorMessage: _humanizeTimeoutError(e),
-      );
+      if (state.status != ServerStatus.offline) {
+        state = state.copyWith(
+          status: ServerStatus.offline,
+          errorMessage: _humanizeTimeoutError(e),
+        );
+      }
     }
   }
 

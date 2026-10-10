@@ -55,6 +55,15 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+    // [Fix-PAIRING-KEYBOARD] Fermer le clavier au changement d'onglet :
+    // sinon le clavier restait ouvert en arrivant sur l'onglet scanner QR et
+    // le contenu fixe de cet onglet débordait verticalement (bandeau
+    // « RIGHT OVERFLOWED » jaune pendant la transition).
+    _tabController.addListener(() {
+      if (!_tabController.indexIsChanging) return;
+      final focus = FocusManager.instance.primaryFocus;
+      focus?.unfocus();
+    });
   }
 
   @override
@@ -440,6 +449,8 @@ class _ManualForm extends StatelessWidget {
       key: formKey,
       child: ListView(
         padding: const EdgeInsets.all(16),
+        // [Fix-PAIRING-KEYBOARD] Le dernier champ (token) restait masqué
+        // par le clavier : padding bas dynamique = hauteur du clavier.
         children: [
           const SectionHeader(
             title: 'Appairage manuel',
@@ -543,6 +554,9 @@ class _ManualForm extends StatelessWidget {
               color: theme.colorScheme.onSurfaceVariant,
             ),
           ),
+          // [Fix-PAIRING-KEYBOARD] Espace sous le contenu = clavier ouvert.
+          SizedBox(
+              height: MediaQuery.of(context).viewInsets.bottom),
         ],
       ),
     );
@@ -561,9 +575,12 @@ class _QrTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
+    // [Fix-PAIRING-KEYBOARD] Contenu scrollable : si le clavier restait
+    // ouvert au moment du passage à cet onglet, le Scaffold réduisait la
+    // hauteur du body et cette colonne fixe débordait (bandeau jaune).
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(24),
+      child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [

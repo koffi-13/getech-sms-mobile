@@ -14,6 +14,20 @@ String? _safeString(dynamic v) {
   return v.toString();
 }
 
+/// [Fix-TEACHER-CLASSES-403] Ids tolérants : num ou chaîne numérique.
+int _asId(dynamic v) {
+  if (v is num) return v.toInt();
+  if (v is String) return int.tryParse(v) ?? 0;
+  return 0;
+}
+
+int? _asIdNullable(dynamic v) {
+  if (v == null) return null;
+  if (v is num) return v.toInt();
+  if (v is String) return int.tryParse(v);
+  return null;
+}
+
 /// Classe (ClassroomResponse côté serveur).
 ///
 /// Champs serveur : {id, name, establishment_id, max_students, is_active,
@@ -99,17 +113,20 @@ class ClassroomDto {
       ].whereType<String>().where((s) => s.isNotEmpty).join(' · ');
 
   factory ClassroomDto.fromJson(Map<String, dynamic> j) => ClassroomDto(
-        id: (j['id'] as num).toInt(),
+        // [Fix-TEACHER-CLASSES-403] ids tolérants (num ou chaîne numérique —
+        // certaines sérialisations serveur renvoient des ids en string).
+        id: _asId(j['id']),
         name: j['name'] as String? ?? '',
-        establishmentId: (j['establishment_id'] as num?)?.toInt(),
-        maxStudents: (j['max_students'] as num?)?.toInt(),
+        establishmentId: _asIdNullable(j['establishment_id']),
+        maxStudents: _asIdNullable(j['max_students']),
         isActive: (j['is_active'] as bool?) ?? true,
-        headTeacherId: (j['head_teacher_id'] as num?)?.toInt(),
+        headTeacherId: _asIdNullable(j['head_teacher_id']),
         headTeacherName: j['head_teacher_name'] as String?,
         levelName: _safeString(j['level_name']),
         cycleName: _safeString(j['cycle_name']),
-        cycleId: (j['cycle_id'] as num?)?.toInt(),
-        currentStudentsCount: (j['current_students_count'] as num?)?.toInt(),
+        cycleId: _asIdNullable(j['cycle_id']),
+        currentStudentsCount:
+            _asIdNullable(j['current_students_count']),
         seriesName: j['series_name'] as String?,
       );
 

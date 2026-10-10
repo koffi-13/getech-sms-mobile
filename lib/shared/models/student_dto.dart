@@ -218,22 +218,68 @@ class StudentMedicalDto {
 
   factory StudentMedicalDto.fromJson(Map<String, dynamic> j) => StudentMedicalDto(
         id: (j['id'] as num?)?.toInt(),
+        // [Fix-BLOODTYPE] Le serveur stocke le CODE ('A+', 'O-'…) et non le
+        // nom d'enum Dart ('aPlus'). L'ancien matching par nom ne matchait
+        // JAMAIS → fallback BloodType.inconnu → assertion DropdownButton
+        // « There should be exactly one item with value: BloodType.inconnu »
+        // à l'ouverture du formulaire de modification.
         bloodType: j['blood_type'] == null
             ? null
-            : BloodType.values.firstWhere(
-                (b) => b.name == j['blood_type'],
-                orElse: () => BloodType.inconnu,
-              ),
+            : bloodTypeFromCode(j['blood_type'] as String?),
         allergies: j['allergies'] as String?,
         doctor: j['doctor'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
         'id': id,
-        'blood_type': bloodType?.name,
+        // [Fix-BLOODTYPE] Round-trip symétrique par code.
+        'blood_type': bloodTypeToCode(bloodType),
         'allergies': allergies,
         'doctor': doctor,
       };
+}
+
+/// Parse un groupe sanguin serveur ('A+', 'AB-'…) ou historique ('aPlus').
+/// Retourne null si inconnu/vide — JAMAIS BloodType.inconnu (qui n'existe
+/// pas dans les items du dropdown du formulaire).
+BloodType? bloodTypeFromCode(String? raw) {
+  final v = raw?.trim();
+  if (v == null || v.isEmpty) return null;
+  const byCode = {
+    'A+': BloodType.aPlus,
+    'A-': BloodType.aMoins,
+    'B+': BloodType.bPlus,
+    'B-': BloodType.bMoins,
+    'AB+': BloodType.abPlus,
+    'AB-': BloodType.abMoins,
+    'O+': BloodType.oPlus,
+    'O-': BloodType.oMoins,
+  };
+  final code = byCode[v.toUpperCase()];
+  if (code != null) return code;
+  // Compat : anciens enregistrements locaux stockés par nom d'enum.
+  for (final b in BloodType.values) {
+    if (b.name.toLowerCase() == v.toLowerCase()) {
+      return b == BloodType.inconnu ? null : b;
+    }
+  }
+  return null;
+}
+
+/// Sérialise un groupe sanguin en code serveur ('A+'…), null si inconnu.
+String? bloodTypeToCode(BloodType? t) {
+  if (t == null || t == BloodType.inconnu) return null;
+  const map = {
+    BloodType.aPlus: 'A+',
+    BloodType.aMoins: 'A-',
+    BloodType.bPlus: 'B+',
+    BloodType.bMoins: 'B-',
+    BloodType.abPlus: 'AB+',
+    BloodType.abMoins: 'AB-',
+    BloodType.oPlus: 'O+',
+    BloodType.oMoins: 'O-',
+  };
+  return map[t];
 }
 
 class StudentScholasticDto {

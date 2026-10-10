@@ -162,7 +162,9 @@ class _RankingBodyState extends ConsumerState<_RankingBody> {
                                   .entries
                                   .map((entry) => _RankingRow(
                                         row: entry.value,
-                                        rank: entry.key + 1,
+                                        rank: entry.value.rank != 0
+                                            ? entry.value.rank
+                                            : entry.key + 1,
                                         classroomId: _classroomId!,
                                         periodId: _periodId!,
                                       ))
@@ -372,6 +374,9 @@ class _FiltersCard extends StatelessWidget {
             list.firstWhereOrNull((c) => c.id == classroomId) ?? list.first;
         return DropdownButtonFormField<ClassroomDto>(
           value: selected,
+          // [Fix-OVERFLOW] isExpanded contraint la valeur sélectionnée à la
+          // largeur du champ (sinon « RIGHT OVERFLOWED BY ~45 PIXELS »).
+          isExpanded: true,
           decoration: const InputDecoration(
             labelText: 'Classe',
             border: OutlineInputBorder(),
@@ -380,7 +385,8 @@ class _FiltersCard extends StatelessWidget {
           items: list
               .map((c) => DropdownMenuItem(
                     value: c,
-                    child: Text(c.name, overflow: TextOverflow.ellipsis),
+                    child: Text(c.name,
+                        overflow: TextOverflow.ellipsis, maxLines: 1),
                   ))
               .toList(),
           onChanged: (c) => onClassroomChanged(c?.id),
@@ -401,6 +407,8 @@ class _FiltersCard extends StatelessWidget {
             list.firstWhereOrNull((p) => p.id == periodId) ?? list.first;
         return DropdownButtonFormField<PeriodDto>(
           value: selected,
+          // [Fix-OVERFLOW] voir _buildClassroomField.
+          isExpanded: true,
           decoration: const InputDecoration(
             labelText: 'Période',
             border: OutlineInputBorder(),
@@ -409,7 +417,8 @@ class _FiltersCard extends StatelessWidget {
           items: list
               .map((p) => DropdownMenuItem(
                     value: p,
-                    child: Text(p.name, overflow: TextOverflow.ellipsis),
+                    child: Text(p.name,
+                        overflow: TextOverflow.ellipsis, maxLines: 1),
                   ))
               .toList(),
           onChanged: (p) => onPeriodChanged(p?.id),
@@ -442,6 +451,9 @@ class _FiltersCard extends StatelessWidget {
         }
         return DropdownButtonFormField<ClassSubjectDto>(
           value: selected,
+          // [Fix-OVERFLOW] voir _buildClassroomField — le libellé
+          // « Matière (coef. X) » déborde sans isExpanded.
+          isExpanded: true,
           decoration: const InputDecoration(
             labelText: 'Matière',
             border: OutlineInputBorder(),
@@ -451,7 +463,7 @@ class _FiltersCard extends StatelessWidget {
               .map((s) => DropdownMenuItem(
                     value: s,
                     child: Text('${s.subjectName} (coef. ${s.coefficient})',
-                        overflow: TextOverflow.ellipsis),
+                        overflow: TextOverflow.ellipsis, maxLines: 1),
                   ))
               .toList(),
           onChanged: (s) => onSubjectChanged(s?.id),
@@ -558,7 +570,7 @@ class _RankingRowState extends State<_RankingRow> {
                     child: _medal != null
                         ? Text(_medal!, style: const TextStyle(fontSize: 20))
                         : Text(
-                            '${widget.rank}',
+                            widget.row.rankLabel ?? '${widget.rank}',
                             style: theme.textTheme.titleMedium?.copyWith(
                               fontWeight: FontWeight.w800,
                               color: rankColor,

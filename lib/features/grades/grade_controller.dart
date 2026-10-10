@@ -322,7 +322,11 @@ final gradeControllerProvider =
 /// - **Admin / headmaster** : toutes les classes.
 final classroomsForGradesProvider =
     FutureProvider.autoDispose<List<ClassroomDto>>((ref) async {
-  final conn = ref.watch(connectionProvider);
+  // [Fix-HEARTBEAT-REBUILD] select : le heartbeat émet un nouvel état toutes
+  // les 30 s (latence) — watcher l'état entier invalidait ce provider et
+  // réinitialisait les sélecteurs de la cascade Notes.
+  final conn = ref.watch(connectionProvider
+      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
   final auth = ref.watch(authProvider);
   if (!conn.isPaired || conn.serverUrl == null) {
     return _classroomsForGradesFromLocal(ref, auth);
@@ -341,7 +345,12 @@ final classroomsForGradesProvider =
       final api = (e.error is ApiException)
           ? e.error as ApiException
           : dioErrorToApiException(e);
-      if (api.statusCode == 403) return const [];
+      // [Fix-TEACHER-CLASSES-403] Un 403 n'est plus avalé en liste vide :
+      // on sert le cache Drift (avant le fix serveur RBAC, l'enseignant
+      // voyait « aucune classe » sans aucune erreur).
+      if (api.statusCode == 403) {
+        return _classroomsForGradesFromLocal(ref, auth);
+      }
       // [Fix-OFFLINE] serveur injoignable → cache Drift.
       return _classroomsForGradesFromLocal(ref, auth);
     }
@@ -434,7 +443,14 @@ Future<List<ClassroomDto>> _fetchClassrooms(
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
-    if (api.statusCode == 403) return const [];
+    if (api.statusCode == 403) {
+      // [Fix-TEACHER-CLASSES-403] Message explicite au lieu d'une liste vide
+      // silencieuse — l'appelant retombe sur le cache Drift.
+      throw const ApiException(
+        'Accès refusé (403) — vérifiez les permissions du compte côté serveur.',
+        statusCode: 403,
+      );
+    }
     rethrow;
   }
 }
@@ -446,11 +462,16 @@ List<ClassroomDto> _parseClassroomList(dynamic data) {
         .map((e) => ClassroomDto.fromJson(Map<String, dynamic>.from(e)))
         .toList();
   }
-  if (data is Map && data['items'] is List) {
-    return (data['items'] as List)
-        .whereType<Map>()
-        .map((e) => ClassroomDto.fromJson(Map<String, dynamic>.from(e)))
-        .toList();
+  if (data is Map) {
+    // [Fix-TEACHER-CLASSES-403] Enveloppes acceptees : items (contrat
+    // documente), data et classrooms (variantes serveur observees).
+    final rows = data['items'] ?? data['data'] ?? data['classrooms'];
+    if (rows is List) {
+      return rows
+          .whereType<Map>()
+          .map((e) => ClassroomDto.fromJson(Map<String, dynamic>.from(e)))
+          .toList();
+    }
   }
   return const [];
 }
@@ -458,7 +479,9 @@ List<ClassroomDto> _parseClassroomList(dynamic data) {
 /// Liste des périodes : `GET /settings/periods`.
 final periodsProvider =
     FutureProvider.autoDispose<List<PeriodDto>>((ref) async {
-  final conn = ref.watch(connectionProvider);
+  // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
+  final conn = ref.watch(connectionProvider
+      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
   if (!conn.isPaired || conn.serverUrl == null) {
     return _periodsFromLocal(ref);
   }
@@ -472,7 +495,9 @@ final periodsProvider =
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
-    if (api.statusCode == 403) return const [];
+    // [Fix-TEACHER-CLASSES-403] Un 403 n'est plus avalé en liste vide :
+    // on sert le cache Drift (avant le fix serveur RBAC, l'enseignant
+    // voyait « aucune classe » sans aucune erreur).
     // [Fix-OFFLINE] serveur injoignable → cache Drift.
     return _periodsFromLocal(ref);
   } catch (_) {
@@ -562,7 +587,9 @@ PeriodDto? activePeriodOf(List<PeriodDto> periods) {
 /// au seed de développement.
 final assessmentTypesProvider =
     FutureProvider.autoDispose<List<AssessmentTypeInfo>>((ref) async {
-  final conn = ref.watch(connectionProvider);
+  // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
+  final conn = ref.watch(connectionProvider
+      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
   if (!conn.isPaired || conn.serverUrl == null) {
     return CommonAssessmentTypes.defaults;
   }
@@ -603,7 +630,9 @@ final assessmentTypesProvider =
 /// Matières affectées à une classe : `GET /grades/class-subjects?classroom_id=`.
 final classSubjectsProvider = FutureProvider.autoDispose
     .family<List<ClassSubjectDto>, int>((ref, classroomId) async {
-  final conn = ref.watch(connectionProvider);
+  // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
+  final conn = ref.watch(connectionProvider
+      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
   if (!conn.isPaired || conn.serverUrl == null) {
     return _classSubjectsFromLocal(ref, classroomId);
   }
@@ -618,7 +647,9 @@ final classSubjectsProvider = FutureProvider.autoDispose
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
-    if (api.statusCode == 403) return const [];
+    // [Fix-TEACHER-CLASSES-403] Un 403 n'est plus avalé en liste vide :
+    // on sert le cache Drift (avant le fix serveur RBAC, l'enseignant
+    // voyait « aucune classe » sans aucune erreur).
     // [Fix-OFFLINE] serveur injoignable → cache Drift.
     return _classSubjectsFromLocal(ref, classroomId);
   } catch (_) {
@@ -685,7 +716,9 @@ List<ClassSubjectDto> _parseClassSubjectList(dynamic data) {
 /// `GET /grades/assessments?class_subject_id=X&period_id=Y`.
 final assessmentsProvider = FutureProvider.autoDispose
     .family<List<AssessmentDto>, AssessmentsQuery>((ref, q) async {
-  final conn = ref.watch(connectionProvider);
+  // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
+  final conn = ref.watch(connectionProvider
+      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
   if (!conn.isPaired || conn.serverUrl == null) {
     return _assessmentsFromLocal(ref, q);
   }
@@ -703,7 +736,9 @@ final assessmentsProvider = FutureProvider.autoDispose
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
-    if (api.statusCode == 403) return const [];
+    // [Fix-TEACHER-CLASSES-403] Un 403 n'est plus avalé en liste vide :
+    // on sert le cache Drift (avant le fix serveur RBAC, l'enseignant
+    // voyait « aucune classe » sans aucune erreur).
     // [Fix-OFFLINE] serveur injoignable → cache Drift.
     return _assessmentsFromLocal(ref, q);
   } catch (_) {
@@ -782,7 +817,14 @@ List<AssessmentDto> _parseAssessmentList(dynamic data) {
 /// l'outbox (notes nouvelles ou propositions pas encore poussées).
 final assessmentGradesProvider = FutureProvider.autoDispose
     .family<List<GradeEntryDto>, int>((ref, assessmentId) async {
-  final conn = ref.watch(connectionProvider);
+  // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
+  // canReachServer/isChecking ne changent qu'aux transitions d'état.
+  final conn = ref.watch(connectionProvider.select((c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      )));
   if (!conn.isPaired || conn.serverUrl == null) return const [];
 
   final definitelyOffline = !conn.canReachServer && !conn.isChecking;
@@ -803,7 +845,8 @@ final assessmentGradesProvider = FutureProvider.autoDispose
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
-    if (api.statusCode == 403) return const [];
+    // [Fix-TEACHER-CLASSES-403] 403 → repli local (liste vide silencieuse
+    // auparavant).
     // Réseau indisponible en cours de requête -> repli local.
     return _gradeEntriesFromLocal(ref, assessmentId);
   } catch (_) {
@@ -1008,7 +1051,9 @@ List<GradeEntryDto> _parseGradeEntryList(dynamic data) {
 /// `GET /grades/ranking?classroom_id=&period_id=&ranking_mode=&subject_id=`.
 final rankingProvider = FutureProvider.autoDispose
     .family<List<RankingRowDto>, RankingQuery>((ref, q) async {
-  final conn = ref.watch(connectionProvider);
+  // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
+  final conn = ref.watch(connectionProvider
+      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
   if (!conn.isPaired || conn.serverUrl == null) return const [];
   final dio = ref.watch(dioProvider);
   try {
@@ -1029,7 +1074,14 @@ final rankingProvider = FutureProvider.autoDispose
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
-    if (api.statusCode == 403) return const [];
+    if (api.statusCode == 403) {
+      // [Fix-TEACHER-CLASSES-403] Message explicite au lieu d'une liste vide
+      // silencieuse — l'appelant retombe sur le cache Drift.
+      throw const ApiException(
+        'Accès refusé (403) — vérifiez les permissions du compte côté serveur.',
+        statusCode: 403,
+      );
+    }
     rethrow;
   }
 });
@@ -1057,7 +1109,9 @@ List<RankingRowDto> _parseRankingList(dynamic data) {
 /// le serveur : on les passe systématiquement.
 final bulletinProvider = FutureProvider.autoDispose
     .family<BulletinDto, BulletinQuery>((ref, q) async {
-  final conn = ref.watch(connectionProvider);
+  // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
+  final conn = ref.watch(connectionProvider
+      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
   if (!conn.isPaired || conn.serverUrl == null) {
     throw const ApiException('Serveur non configuré');
   }

@@ -443,6 +443,9 @@ class _DropdownField<T> extends StatelessWidget {
         (value != null && items.any((e) => e == value)) ? value : null;
     return DropdownButtonFormField<T>(
       value: effectiveValue,
+      // [Fix-OVERFLOW] isExpanded : sans lui la valeur sélectionnée
+      // déborde à droite (~45 px) quand le libellé est long.
+      isExpanded: true,
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
@@ -452,7 +455,8 @@ class _DropdownField<T> extends StatelessWidget {
       items: items
           .map((e) => DropdownMenuItem<T>(
                 value: e,
-                child: Text(labelOf(e), overflow: TextOverflow.ellipsis),
+                child: Text(labelOf(e),
+                    overflow: TextOverflow.ellipsis, maxLines: 1),
               ))
           .toList(),
       onChanged: enabled ? onChanged : null,
@@ -491,6 +495,9 @@ class _ClassSubjectField extends ConsumerWidget {
         }
         return DropdownButtonFormField<ClassSubjectDto>(
           value: selected,
+          // [Fix-OVERFLOW] le libellé « Matière (coef. X) » déborde sans
+          // isExpanded.
+          isExpanded: true,
           decoration: const InputDecoration(
             labelText: 'Matière',
             border: OutlineInputBorder(),
@@ -502,6 +509,7 @@ class _ClassSubjectField extends ConsumerWidget {
                     child: Text(
                       '${c.subjectName} (coef. ${c.coefficient})',
                       overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
                     ),
                   ))
               .toList(),
@@ -794,6 +802,8 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
               else
                 DropdownButtonFormField<AssessmentTypeInfo>(
                   value: _type,
+                  // [Fix-OVERFLOW] voir _DropdownField.
+                  isExpanded: true,
                   decoration: const InputDecoration(
                     labelText: 'Type d\'évaluation *',
                     border: OutlineInputBorder(),
@@ -805,6 +815,7 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
                             child: Text(
                               '${t.name} (${t.category.label})',
                               overflow: TextOverflow.ellipsis,
+                              maxLines: 1,
                             ),
                           ))
                       .toList(),
@@ -1072,7 +1083,13 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
             ],
             const Divider(height: 24),
             Expanded(
+              // [Fix-HEARTBEAT-REBUILD] skipLoadingOnReload : pendant un
+              // re-fetch (invalidation, heartbeat), on garde la liste
+              // précédente affichée au lieu de la remplacer par un spinner —
+              // sinon les lignes étaient disposées et les saisies en cours
+              // (contrôleurs, focus, clavier) réinitialisées.
               child: async.when(
+                skipLoadingOnReload: true,
                 data: (grades) {
                   // Initialise paresseusement les brouillons sans écraser
                   // les modifications déjà effectuées par l'utilisateur.
@@ -1325,17 +1342,26 @@ class _GradeRowState extends State<_GradeRow> {
                   ),
                 ),
                 const SizedBox(width: 8),
+                // [Fix-GRADE-INPUT] Le « / 20 » était en PRÉFIXE à l'intérieur
+                // d'un champ de 90 px : la zone de frappe réelle ne laissait
+                // voir qu'un caractère et le « /20 » apparaissait AVANT la
+                // note. On passe le barème en SUFFIXE et on élargit le champ.
                 SizedBox(
-                  width: 90,
+                  width: 118,
                   child: TextField(
                     controller: _valueCtrl,
                     keyboardType: const TextInputType.numberWithOptions(
                         decimal: true),
                     enabled: !widget.grade.isAbsent && !disabled,
                     decoration: InputDecoration(
-                      prefixText: '/ ${widget.maxScore.toStringAsFixed(0)}  ',
+                      suffixText: '/ ${widget.maxScore.toStringAsFixed(0)}',
+                      suffixStyle: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
                       isDense: true,
                       border: const OutlineInputBorder(),
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 10),
                     ),
                     textAlign: TextAlign.center,
                   ),

@@ -147,6 +147,7 @@ List<StudentDto> _applyFilter(List<StudentDto> list, StudentFilter filter) {
 final studentDetailProvider = FutureProvider.autoDispose.family<StudentDto, int>((ref, id) async {
   final repo = ref.read(studentRepositoryProvider);
   return repo.getById(id);
+
 });
 
 // ---------------------------------------------------------------------------
@@ -180,6 +181,11 @@ class StudentController extends StateNotifier<AsyncValue<List<StudentDto>>> {
       final apiStudents = await _fetchFromApi();
       if (apiStudents.isNotEmpty) {
         await _saveToLocal(apiStudents);
+        // [Fix-STUDENT-DUP] Supprime les lignes locales temporaires (id
+        // négatif) dont le matricule existe déjà côté serveur : sans cela,
+        // la ligne locale ET la ligne serveure coexistaient dans Drift →
+        // l'élève apparaissait en double (même matricule).
+        await _dedupeLocalStudents(apiStudents);
       }
 
       // 3. Re-charger depuis le local (avec satellites et assignations)
@@ -383,9 +389,74 @@ class StudentController extends StateNotifier<AsyncValue<List<StudentDto>>> {
   /// assignations avec codes) en un seul batch atomique. Les assignations
   /// serveur de l'élève sont supprimées avant ré-insertion (pas d'id serveur
   /// dans StudentResponse).
-  Future<void> _saveToLocal(List<StudentDto> students) async {
-    final db = _ref.read(databaseProvider);
-    await db.batch((batch) {
+  Future<void> _saveToLocal(List<StudentDto> students) =>
+      saveStudentsToLocal(_ref, students);
+
+
+  /// [Fix-STUDENT-DUP] Déduplication best-effort : les lignes locales
+  /// temporaires (id négatif) dont le matricule correspond à un élève du
+  /// serveur sont supprimées, SAUF si une entrée outbox les référençant
+  /// est encore en attente (création pas encore poussée).
+  Future<void> _dedupeLocalStudents(List<StudentDto> apiStudents) async {
+    try {
+      final db = _ref.read(databaseProvider);
+      final serverMatricules = <String>{};
+      for (final s in apiStudents) {
+        final m = s.matricule.trim();
+        if (m.isNotEmpty) serverMatricules.add(m);
+      }
+      if (serverMatricules.isEmpty) return;
+
+      final locals = await (db.select(db.students)
+            ..where((t) => t.id.isSmallerThanValue(0)))
+          .get();
+      if (locals.isEmpty) return;
+
+      final pending = await _ref.read(outboxProvider).pending();
+      final pendingStudentIds = pending
+          .where((e) => e.tableNameColumn == 'students')
+          .map((e) => e.recordId)
+          .toSet();
+
+      for (final l in locals) {
+        final mat = l.matricule.trim();
+        if (mat.isEmpty || !serverMatricules.contains(mat)) continue;
+        if (pendingStudentIds.contains(l.id)) continue;
+        _log.i('Déduplication élève local #${l.id} (matricule $mat déjà '
+            'côté serveur)');
+        await db.transaction(() async {
+          await (db.delete(db.studentGuardians)
+                ..where((t) => t.studentId.equals(l.id)))
+              .go();
+          await (db.delete(db.studentParents)
+                ..where((t) => t.studentId.equals(l.id)))
+              .go();
+          await (db.delete(db.studentMedicals)
+                ..where((t) => t.studentId.equals(l.id)))
+              .go();
+          await (db.delete(db.studentContacts)
+                ..where((t) => t.studentId.equals(l.id)))
+              .go();
+          await (db.delete(db.studentScholastics)
+                ..where((t) => t.studentId.equals(l.id)))
+              .go();
+          await (db.delete(db.studentClassAssignments)
+                ..where((t) => t.studentId.equals(l.id)))
+              .go();
+          await (db.delete(db.students)..where((t) => t.id.equals(l.id))).go();
+        });
+      }
+    } catch (e) {
+      // Best-effort : ne jamais bloquer le refresh.
+      _log.w('Déduplication élèves locale ignorée : $e');
+    }
+  }
+
+}
+
+Future<void> saveStudentsToLocal(Ref ref, List<StudentDto> students) async {
+  final db = ref.read(databaseProvider);
+  await db.batch((batch) {
       for (final s in students) {
         batch.insert(
           db.students,
@@ -542,38 +613,17 @@ class StudentController extends StateNotifier<AsyncValue<List<StudentDto>>> {
       ),
     );
   }
-}
 
 /// Mapping groupe sanguin : la table Drift stocke un code texte
 /// (« A+ », « O- », …) alors que le DTO expose l'enum [BloodType].
+/// [Fix-BLOODTYPE] Délègue au parseur partagé (student_dto) — code inconnu
+/// → null (jamais BloodType.inconnu, absent des items du dropdown).
 cfg.BloodType? _bloodTypeFromCode(String? code) {
-  if (code == null || code.isEmpty) return null;
-  const map = {
-    'A+': cfg.BloodType.aPlus,
-    'A-': cfg.BloodType.aMoins,
-    'B+': cfg.BloodType.bPlus,
-    'B-': cfg.BloodType.bMoins,
-    'AB+': cfg.BloodType.abPlus,
-    'AB-': cfg.BloodType.abMoins,
-    'O+': cfg.BloodType.oPlus,
-    'O-': cfg.BloodType.oMoins,
-  };
-  return map[code] ?? cfg.BloodType.inconnu;
+  return bloodTypeFromCode(code);
 }
 
 String? _bloodTypeToCode(cfg.BloodType? t) {
-  if (t == null || t == cfg.BloodType.inconnu) return null;
-  const map = {
-    cfg.BloodType.aPlus: 'A+',
-    cfg.BloodType.aMoins: 'A-',
-    cfg.BloodType.bPlus: 'B+',
-    cfg.BloodType.bMoins: 'B-',
-    cfg.BloodType.abPlus: 'AB+',
-    cfg.BloodType.abMoins: 'AB-',
-    cfg.BloodType.oPlus: 'O+',
-    cfg.BloodType.oMoins: 'O-',
-  };
-  return map[t];
+  return bloodTypeToCode(t);
 }
 
 // ---------------------------------------------------------------------------
@@ -897,8 +947,13 @@ class StudentRepository {
           data: req.toJson(),
         );
         if (response.data is Map) {
-          return StudentDto.fromJson(
+          final serverDto = StudentDto.fromJson(
               Map<String, dynamic>.from(response.data as Map));
+          // [Fix-STUDENT-DUP] Réconcilie la ligne temporaire (id négatif)
+          // avec l'élève serveur : sans cela les DEUX lignes coexistaient
+          // après le prochain pull → doublon de même matricule.
+          await reconcileCreatedStudent(localId, serverDto);
+          return serverDto;
         }
       } catch (e) {
         // Endpoint absent (patch serveur requis) ou erreur réseau → outbox.
@@ -1109,6 +1164,39 @@ class StudentRepository {
       payload: data ?? {},
     );
   }
+
+  /// [Fix-STUDENT-DUP] Réconcilie une création locale (id négatif) avec la
+  /// réponse du serveur : supprime la ligne locale temporaire (et ses
+  /// satellites/assignations) puis persiste la version serveure via
+  /// [_saveToLocal]. Appelé après un POST réussi (en direct ou rejoué par
+  /// le moteur de synchro).
+  Future<void> reconcileCreatedStudent(int localId, StudentDto server) async {
+    if (localId == server.id) return;
+    final db = _ref.read(databaseProvider);
+    await db.transaction(() async {
+      await (db.delete(db.studentGuardians)
+            ..where((t) => t.studentId.equals(localId)))
+          .go();
+      await (db.delete(db.studentParents)
+            ..where((t) => t.studentId.equals(localId)))
+          .go();
+      await (db.delete(db.studentMedicals)
+            ..where((t) => t.studentId.equals(localId)))
+          .go();
+      await (db.delete(db.studentContacts)
+            ..where((t) => t.studentId.equals(localId)))
+          .go();
+      await (db.delete(db.studentScholastics)
+            ..where((t) => t.studentId.equals(localId)))
+          .go();
+      await (db.delete(db.studentClassAssignments)
+            ..where((t) => t.studentId.equals(localId)))
+          .go();
+      await (db.delete(db.students)..where((t) => t.id.equals(localId))).go();
+    });
+    await saveStudentsToLocal(_ref, [server]);
+  }
+
 }
 
 // ---------------------------------------------------------------------------
