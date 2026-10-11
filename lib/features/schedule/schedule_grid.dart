@@ -62,73 +62,83 @@ class ScheduleGridView extends StatelessWidget {
 
     final todayIndex = DateTime.now().weekday; // 1..7 (ISO)
 
+    // [Fix-OVERFLOW] La grille défile désormais aussi VERTICALEMENT.
+    // Avant, seul le défilement horizontal existait : dans les contextes à
+    // hauteur bornée (Expanded de l'onglet « Mes classes », vue admin par
+    // classe, onglet EDT du détail de classe), les colonnes-jours plus
+    // hautes que l'écran provoquaient « BOTTOM OVERFLOWED BY N PIXELS ».
+    // Le SingleChildScrollView vertical absorbe ces contraintes bornées ;
+    // dans les contextes à hauteur non bornée (ListView), il est inerte.
     return Scrollbar(
       child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.all(16),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: SchoolDay.values.map((d) {
-            final list = byDay[d] ?? const <WeeklyScheduleDto>[];
-            final isToday = d.dayIndex == todayIndex;
-            return Container(
-              width: compact ? 168 : 184,
-              margin: const EdgeInsets.only(right: 12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Card(
-                    color: isToday
-                        ? Theme.of(context).colorScheme.tertiaryContainer
-                        : Theme.of(context).colorScheme.primaryContainer,
-                    margin: EdgeInsets.zero,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 10),
-                      child: Text(
-                        d.label,
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context)
-                            .textTheme
-                            .titleSmall
-                            ?.copyWith(
-                              color: isToday
-                                  ? Theme.of(context)
-                                      .colorScheme
-                                      .onTertiaryContainer
-                                  : Theme.of(context)
-                                      .colorScheme
-                                      .onPrimaryContainer,
-                              fontWeight: FontWeight.w700,
-                            ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  if (list.isEmpty)
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: SchoolDay.values.map((d) {
+              final list = byDay[d] ?? const <WeeklyScheduleDto>[];
+              final isToday = d.dayIndex == todayIndex;
+              return Container(
+                width: compact ? 168 : 184,
+                margin: const EdgeInsets.only(right: 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
                     Card(
+                      color: isToday
+                          ? Theme.of(context).colorScheme.tertiaryContainer
+                          : Theme.of(context).colorScheme.primaryContainer,
                       margin: EdgeInsets.zero,
                       child: Padding(
-                        padding: const EdgeInsets.all(12),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 10),
                         child: Text(
-                          'Libre',
+                          d.label,
                           textAlign: TextAlign.center,
-                          style: Theme.of(context).textTheme.bodySmall,
+                          style: Theme.of(context)
+                              .textTheme
+                              .titleSmall
+                              ?.copyWith(
+                                color: isToday
+                                    ? Theme.of(context)
+                                        .colorScheme
+                                        .onTertiaryContainer
+                                    : Theme.of(context)
+                                        .colorScheme
+                                        .onPrimaryContainer,
+                                fontWeight: FontWeight.w700,
+                              ),
                         ),
                       ),
-                    )
-                  else
-                    ...list.map((s) => ScheduleEntryCard(
-                          entry: s,
-                          mode: mode,
-                          showWeekBadge: showWeekBadge,
-                          compact: compact,
-                          onTap: onEntryTap == null ? null : () => onEntryTap!(s),
-                        )),
-                ],
-              ),
-            );
-          }).toList(),
+                    ),
+                    const SizedBox(height: 8),
+                    if (list.isEmpty)
+                      Card(
+                        margin: EdgeInsets.zero,
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Text(
+                            'Libre',
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                      )
+                    else
+                      ...list.map((s) => ScheduleEntryCard(
+                            entry: s,
+                            mode: mode,
+                            showWeekBadge: showWeekBadge,
+                            compact: compact,
+                            onTap:
+                                onEntryTap == null ? null : () => onEntryTap!(s),
+                          )),
+                  ],
+                ),
+              );
+            }).toList(),
+          ),
         ),
       ),
     );

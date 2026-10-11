@@ -22,6 +22,7 @@ import 'package:drift/drift.dart' as d;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/auth/auth_state.dart';
+import '../../core/auth/teacher_scope.dart';
 import '../../core/database/database.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
@@ -314,11 +315,11 @@ final gradeControllerProvider =
 
 /// Classes accessibles pour le module Notes.
 ///
-/// - **Enseignant** : union des classes où il enseigne
-///   (`GET /classrooms?teacher_only=true`, scope serveur — miroir de
-///   `_teacher_subject_classroom_ids` du desktop) et des classes dont il est
-///   titulaire (`head_teacher_id == me`, miroir de
-///   `_teacher_head_classroom_ids` + accès bulletin étendu au titulaire).
+/// - **Enseignant** : périmètre du [TeacherScope] — union des classes où il
+///   enseigne (`/classrooms?teacher_only=true` + cours de son emploi du
+///   temps `GET /schedule/my`, [Fix-EDT-SCOPE]) et des classes dont il est
+///   titulaire (`head_teacher_id == me`). Repli direct par appels API si le
+///   scope n'a rien résolu.
 /// - **Admin / headmaster** : toutes les classes.
 final classroomsForGradesProvider =
     FutureProvider.autoDispose<List<ClassroomDto>>((ref) async {
@@ -354,6 +355,19 @@ final classroomsForGradesProvider =
       // [Fix-OFFLINE] serveur injoignable → cache Drift.
       return _classroomsForGradesFromLocal(ref, auth);
     }
+  }
+
+  // [Fix-EDT-SCOPE] Enseignant : d'abord le périmètre complet du
+  // TeacherScope (il fusionne déjà teacher_only + EDT + titulariat).
+  // S'il n'a rien trouvé (ex. serveur ancien sans /schedule/my), on retombe
+  // sur les appels directs historiques.
+  try {
+    final scope = await ref.watch(teacherScopeProvider.future);
+    if (scope.myClassrooms.isNotEmpty) {
+      return scope.myClassrooms;
+    }
+  } catch (_) {
+    // Scope en échec → poursuite avec les appels directs ci-dessous.
   }
 
   // Enseignant (ou profil restreint) : classes enseignées + classes titularisées.
@@ -406,13 +420,22 @@ Future<List<ClassroomDto>> _classroomsForGradesFromLocal(
             ))
         .toList();
 
-    // Enseignant : restreindre aux classes enseignées + titularisées.
+    // Enseignant : restreindre aux classes enseignées (+ EDT) + titularisées.
     final userId = auth.user?.id;
     if (!auth.isAdminOrHeadmaster && userId != null) {
       final csRows = await (db.select(db.classSubjects)
             ..where((t) => t.teacherId.equals(userId)))
           .get();
-      final teachingIds = csRows.map((r) => r.classroomId).toSet();
+      // [Fix-EDT-SCOPE] Cours planifiés (weekly_schedules) en plus des
+      // matières assignées.
+      final wsRows = await (db.select(db.weeklySchedules)
+            ..where((t) => t.teacherId.equals(userId))
+            ..where((t) => t.isDeleted.equals(false)))
+          .get();
+      final teachingIds = {
+        ...csRows.map((r) => r.classroomId),
+        ...wsRows.map((r) => r.classroomId),
+      };
       dtos = dtos
           .where((c) =>
               teachingIds.contains(c.id) || c.headTeacherId == userId)

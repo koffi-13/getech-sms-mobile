@@ -7,6 +7,8 @@
 /// `Image.network` — on passe toujours par l'endpoint dédié via Dio (bytes).
 library;
 
+import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -17,10 +19,22 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../core/network/api_endpoints.dart';
+import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
 import '../connections/connection_state.dart';
 
 /// Cache des photos d'élèves (une instance par serveur actif / session).
+///
+/// [Fix-PHOTO-BURST] Une liste d'élèves déclenche autant de téléchargements
+/// simultanés — la rafale sature le serveur et les requêtes en surnombre
+/// échouaient, puis étaient mémorisées À JAMAIS comme « sans photo » : seul
+/// le premier élève gardait sa miniature. Désormais :
+/// - les téléchargements passent par une file à concurrence limitée
+///   ([maxConcurrentDownloads]) ;
+/// - seul un 404 franc (« aucune photo ») mémorise l'absence de façon
+///   permanente ;
+/// - les erreurs réseau/serveur (timeout, 5xx, connexion) sont réessayables
+///   après un court délai ([_transientRetryAfter]).
 class StudentPhotoCache {
   StudentPhotoCache({required Dio dio, required this.serverUrl})
       : _dio = dio;
@@ -31,13 +45,47 @@ class StudentPhotoCache {
 
   final Dio _dio;
 
+  /// Téléchargements simultanés maximum (évite la rafale qui saturait le
+  /// serveur à l'ouverture d'une liste de plusieurs dizaines d'élèves).
+  static const int maxConcurrentDownloads = 3;
+
+  /// Délai avant de retenter un élève dont le téléchargement a échoué pour
+  /// une raison transitoire (réseau, serveur momentanément saturé).
+  static const Duration _transientRetryAfter = Duration(seconds: 20);
+
   /// Futures en cours / résolues par élève (déduplique les téléchargements :
   /// liste + détail d'un même élève partagent une seule requête).
   final Map<int, Future<ImageProvider?>> _inFlight = {};
 
-  /// Mémo négatif en mémoire : élèves sans photo (404) ou en échec réseau —
-  /// on ne retente PAS pendant la session.
+  /// Mémo négatif PERMANENT : élèves sans photo (404 explicite du serveur).
   final Set<int> _knownMissing = {};
+
+  /// Mémo négatif TEMPORAIRE (échecs transitoires, réessayables) :
+  /// élève → instant du dernier échec.
+  final Map<int, DateTime> _transientFailures = {};
+
+  /// File de téléchargement : au plus [maxConcurrentDownloads] en vol, le
+  /// reste attend dans [_queue].
+  final Queue<void Function()> _queue = Queue<void Function()>();
+  int _activeDownloads = 0;
+
+  void _enqueue(void Function() task) {
+    _queue.add(task);
+    _drainQueue();
+  }
+
+  void _drainQueue() {
+    while (_activeDownloads < maxConcurrentDownloads && _queue.isNotEmpty) {
+      final task = _queue.removeFirst();
+      _activeDownloads++;
+      task();
+    }
+  }
+
+  void _downloadDone() {
+    _activeDownloads--;
+    _drainQueue();
+  }
 
   /// Retourne l'image de profil d'un élève (cache disque → réseau), ou `null`
   /// si aucune photo n'est disponible (l'appelant affiche les initiales).
@@ -45,10 +93,19 @@ class StudentPhotoCache {
     if (_knownMissing.contains(studentId)) {
       return Future<ImageProvider?>.value(null);
     }
+    final lastTransient = _transientFailures[studentId];
+    if (lastTransient != null) {
+      if (DateTime.now().isBefore(lastTransient.add(_transientRetryAfter))) {
+        return Future<ImageProvider?>.value(null);
+      }
+      _transientFailures.remove(studentId);
+    }
     return _inFlight.putIfAbsent(studentId, () => _resolve(studentId));
   }
 
   Future<ImageProvider?> _resolve(int studentId) async {
+    // [Fix-PHOTO-BURST] La partie réseau passe par la file à concurrence
+    // limitée ; le cache disque, lui, est consulté immédiatement.
     try {
       // 1. Cache disque : image déjà téléchargée pour CE serveur.
       final cached = await _cachedFile(studentId);
@@ -59,16 +116,16 @@ class StudentPhotoCache {
         return null;
       }
 
-      // 2. Endpoint dédié : octets bruts (auth injectée par dioProvider).
-      final url = buildUrl(serverUrl!, '/students/$studentId/photo');
-      final response = await _dio.get<List<int>>(
-        url,
-        options: Options(responseType: ResponseType.bytes),
-      );
-      final bytes = response.data;
+      // 2. Endpoint dédié : octets bruts (auth injectée par dioProvider),
+      //    à travers la file (concurrence limitée).
+      final bytes = await _downloadQueued(studentId);
       if (bytes == null || bytes.isEmpty) {
-        _knownMissing.add(studentId);
-        return null;
+        // Échec transitoire → on oublie le future résolu pour qu'un nouvel
+        // appel (après le délai de réessai) relance le téléchargement.
+        if (_transientFailures.containsKey(studentId)) {
+          _inFlight.remove(studentId);
+        }
+        return null; // Le statut a déjà été mémorisé par _downloadQueued.
       }
 
       // 3. Persiste sur disque (offline-first) puis sert le fichier.
@@ -81,10 +138,57 @@ class StudentPhotoCache {
         return MemoryImage(Uint8List.fromList(bytes));
       }
     } catch (_) {
-      // 404 (pas de photo), erreur réseau, stockage KO… → initiales.
-      _knownMissing.add(studentId);
+      // Erreur inattendue → traitée comme transitoire (réessayable).
+      _markTransient(studentId);
+      _inFlight.remove(studentId);
       return null;
     }
+  }
+
+  /// Télécharge les octets de la photo en passant par la file. Retourne
+  /// `null` et mémorise l'absence (permanente sur 404, temporaire sinon).
+  Future<Uint8List?> _downloadQueued(int studentId) {
+    final completer = Completer<Uint8List?>();
+    _enqueue(() async {
+      try {
+        final url = buildUrl(serverUrl!, '/students/$studentId/photo');
+        final response = await _dio.get<List<int>>(
+          url,
+          options: Options(responseType: ResponseType.bytes),
+        );
+        final bytes = response.data;
+        if (bytes == null || bytes.isEmpty) {
+          // Réponse vide considérée comme « sans photo » (permanente).
+          _knownMissing.add(studentId);
+          completer.complete(null);
+          return;
+        }
+        completer.complete(Uint8List.fromList(bytes));
+      } on DioException catch (e) {
+        final api = (e.error is ApiException)
+            ? e.error as ApiException
+            : dioErrorToApiException(e);
+        if (api.statusCode == 404) {
+          // 404 explicite : l'élève n'a VRAIMENT pas de photo → permanent.
+          _knownMissing.add(studentId);
+          completer.complete(null);
+        } else {
+          // Réseau/serveur transitoire (timeout, 5xx, 403…) → réessayable.
+          _markTransient(studentId);
+          completer.complete(null);
+        }
+      } catch (_) {
+        _markTransient(studentId);
+        completer.complete(null);
+      } finally {
+        _downloadDone();
+      }
+    });
+    return completer.future;
+  }
+
+  void _markTransient(int studentId) {
+    _transientFailures[studentId] = DateTime.now();
   }
 
   /// Fichier cache existant (non vide) pour cet élève sur CE serveur.

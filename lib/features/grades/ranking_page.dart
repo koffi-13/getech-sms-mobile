@@ -17,6 +17,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/auth/auth_state.dart';
+import '../../core/auth/teacher_scope.dart';
 import '../../core/config/constants.dart';
 import '../../core/utils/permissions.dart';
 import '../../features/connections/connection_state.dart';
@@ -32,7 +33,15 @@ class RankingPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(authProvider);
-    if (!hasPermission(auth.permissions, RbacPermissions.gradeRead)) {
+    final canRead = hasPermission(auth.permissions, RbacPermissions.gradeRead);
+    // [Fix-TEACHER-GUARD] Repli enseignant (miroir de la saisie des notes) :
+    // un enseignant dont le RBAC serveur est incomplet garde accès au
+    // classement — sinon il voyait l'onglet mais se heurtait à « Permission
+    // insuffisante ».
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final teacherish = auth.hasDeclaredTeacherRole ||
+        scopeAsync.maybeWhen(data: (s) => s.isTeacher, orElse: () => false);
+    if (!canRead && !teacherish && !auth.isSuperuser) {
       return Scaffold(
         appBar: AppBar(title: const Text('Classement')),
         body: const EmptyState(
@@ -62,6 +71,7 @@ class _RankingBodyState extends ConsumerState<_RankingBody> {
   @override
   Widget build(BuildContext context) {
     final conn = ref.watch(connectionProvider);
+    final auth = ref.watch(authProvider);
     final classrooms = ref.watch(classroomsForGradesProvider);
     // Périodes filtrées par le cycle de la classe sélectionnée (corrige le
     // mélange collège/lycée — miroir du desktop).
@@ -71,6 +81,20 @@ class _RankingBodyState extends ConsumerState<_RankingBody> {
     final subjects = _classroomId == null
         ? null
         : ref.watch(classSubjectsProvider(_classroomId!));
+
+    // [Fix-RANKING-TEACHER] Règles d'accès au classement :
+    // - admin / headmaster : tous les modes, toutes les classes ;
+    // - prof principal (titulaire) de la classe : classement par matière
+    //   (TOUTES les matières de la classe) ET moyenne globale ;
+    // - enseignant simple : classement UNIQUEMENT par les matières qu'il
+    //   enseigne dans la classe.
+    final userId = auth.user?.id;
+    final isHeadOfClassroom = _classroomId != null &&
+        userId != null &&
+        (classrooms.valueOrNull ?? const <ClassroomDto>[])
+            .any((c) => c.id == _classroomId && c.headTeacherId == userId);
+    final canUseGlobalRanking =
+        auth.isAdminOrHeadmaster || isHeadOfClassroom;
 
     // Auto-sélection de la première classe, puis de la période active.
     classrooms.whenData((list) {
@@ -89,6 +113,15 @@ class _RankingBodyState extends ConsumerState<_RankingBody> {
         });
       }
     });
+
+    // Un enseignant simple ne peut pas rester en mode « Moyenne globale ».
+    if (!canUseGlobalRanking && _mode == RankingMode.period) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _mode == RankingMode.period) {
+          setState(() => _mode = RankingMode.subject);
+        }
+      });
+    }
 
     final query = (_classroomId != null && _periodId != null)
         ? RankingQuery(
@@ -118,6 +151,7 @@ class _RankingBodyState extends ConsumerState<_RankingBody> {
                   periodId: _periodId,
                   mode: _mode,
                   subjectId: _subjectId,
+                  canUseGlobalRanking: canUseGlobalRanking,
                   onClassroomChanged: (id) => setState(() {
                     _classroomId = id;
                     _subjectId = null;
@@ -291,6 +325,10 @@ class _SummaryStat extends StatelessWidget {
 }
 
 /// Carte des filtres : classe + période + mode + matière (si SUBJECT).
+///
+/// [Fix-OVERFLOW] Classe et période sont empilées verticalement (plus de
+/// côte-à-côte qui débordait sur les petits écrans) et les dropdowns sont
+/// `isExpanded` (texte long tronqué proprement, flèche toujours visible).
 class _FiltersCard extends StatelessWidget {
   const _FiltersCard({
     required this.classrooms,
@@ -300,6 +338,7 @@ class _FiltersCard extends StatelessWidget {
     required this.periodId,
     required this.mode,
     required this.subjectId,
+    required this.canUseGlobalRanking,
     required this.onClassroomChanged,
     required this.onPeriodChanged,
     required this.onModeChanged,
@@ -313,6 +352,12 @@ class _FiltersCard extends StatelessWidget {
   final int? periodId;
   final RankingMode mode;
   final int? subjectId;
+
+  /// Vrai pour admin/headmaster et prof principal de la classe sélectionnée
+  /// ([Fix-RANKING-TEACHER]) — sinon seul le classement par matière est
+  /// proposé (matières enseignées).
+  final bool canUseGlobalRanking;
+
   final ValueChanged<int?> onClassroomChanged;
   final ValueChanged<int?> onPeriodChanged;
   final ValueChanged<RankingMode> onModeChanged;
@@ -326,37 +371,43 @@ class _FiltersCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: _buildClassroomField(),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _buildPeriodField(),
-                ),
-              ],
-            ),
+            _buildClassroomField(),
             const SizedBox(height: 12),
-            SegmentedButton<RankingMode>(
-              segments: const [
-                ButtonSegment(
-                  value: RankingMode.period,
-                  label: Text('Moyenne globale'),
-                  icon: Icon(Icons.calendar_view_week, size: 16),
-                ),
-                ButtonSegment(
-                  value: RankingMode.subject,
-                  label: Text('Par matière'),
-                  icon: Icon(Icons.book, size: 16),
-                ),
-              ],
-              selected: {mode},
-              onSelectionChanged: (s) => onModeChanged(s.first),
-            ),
-            if (mode == RankingMode.subject) ...[
+            _buildPeriodField(),
+            const SizedBox(height: 12),
+            if (canUseGlobalRanking) ...[
+              SegmentedButton<RankingMode>(
+                segments: const [
+                  ButtonSegment(
+                    value: RankingMode.period,
+                    label: Text('Moyenne globale'),
+                    icon: Icon(Icons.calendar_view_week, size: 16),
+                  ),
+                  ButtonSegment(
+                    value: RankingMode.subject,
+                    label: Text('Par matière'),
+                    icon: Icon(Icons.book, size: 16),
+                  ),
+                ],
+                selected: {mode},
+                onSelectionChanged: (s) => onModeChanged(s.first),
+              ),
               const SizedBox(height: 12),
+            ],
+            if (mode == RankingMode.subject) ...[
               _buildSubjectField(),
+              if (!canUseGlobalRanking)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    'Classement limité aux matières que vous enseignez dans '
+                    'cette classe. Les profs principaux voient toutes les '
+                    'matières et la moyenne globale.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
             ],
           ],
         ),

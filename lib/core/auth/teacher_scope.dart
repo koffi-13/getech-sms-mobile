@@ -13,12 +13,16 @@
 ///
 /// Données exposées par [TeacherScope] :
 /// - [teachingClassrooms] : classes où l'utilisateur enseigne ≥ 1 matière
-///   (endpoint `/classrooms?teacher_only=true`, scope serveur).
+///   (endpoint `/classrooms?teacher_only=true`, scope serveur) **union** les
+///   classes de ses cours dans l'emploi du temps (`GET /schedule/my` —
+///   [Fix-EDT-SCOPE] : l'EDT est la source de vérité, certaines matières
+///   peuvent être inactives ou d'une autre année scolaire).
 /// - [headClassrooms] : classes dont il est titulaire
 ///   (`ClassroomResponse.head_teacher_id == me`, filtrage client).
 /// - [mySchedule] : ses cours planifiés (`GET /schedule/my`).
 library;
 
+import 'package:collection/collection.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -194,6 +198,27 @@ final teacherScopeProvider =
       ? const <ClassroomDto>[]
       : all.where((c) => c.headTeacherId == userId).toList();
 
+  // [Fix-EDT-SCOPE] Une classe où l'enseignant a un cours dans l'EDT
+  // (`GET /schedule/my`) compte comme classe enseignée, même si
+  // `/classrooms?teacher_only=true` ne la renvoie pas (matière inactive ou
+  // rattachée à une autre année côté serveur). On complète depuis `all`
+  // (toutes les classes), et on synthétise une carte minimale si la classe
+  // n'est même pas listée là.
+  final byId = <int, ClassroomDto>{
+    for (final c in teaching) c.id: c,
+  };
+  for (final s in schedule) {
+    final cid = s.classroomId;
+    if (cid == null || byId.containsKey(cid)) continue;
+    final fromAll = all.where((c) => c.id == cid).firstOrNull;
+    byId[cid] = fromAll ??
+        ClassroomDto(
+          id: cid,
+          name: s.classroomName ?? 'Classe $cid',
+        );
+  }
+  teaching = byId.values.toList()..sort((a, b) => a.name.compareTo(b.name));
+
   // Enseignant = rôle déclaré OU relations détectées.
   final isTeacher = auth.hasDeclaredTeacherRole ||
       teaching.isNotEmpty ||
@@ -235,10 +260,19 @@ Future<_LocalTeacherScope> _localTeacherScope(Ref ref, int? userId) async {
 
   List<ClassroomDto> teaching = const [];
   if (userId != null) {
+    // [Fix-EDT-SCOPE] Union : matières assignées (class_subjects) + cours
+    // planifiés (weekly_schedules, rempli par la synchro de l'EDT).
     final csRows = await (db.select(db.classSubjects)
           ..where((t) => t.teacherId.equals(userId)))
         .get();
-    final teachingIds = csRows.map((r) => r.classroomId).toSet();
+    final wsRows = await (db.select(db.weeklySchedules)
+          ..where((t) => t.teacherId.equals(userId))
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    final teachingIds = {
+      ...csRows.map((r) => r.classroomId),
+      ...wsRows.map((r) => r.classroomId),
+    };
     teaching =
         all.where((c) => teachingIds.contains(c.id)).toList();
   }

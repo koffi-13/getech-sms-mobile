@@ -635,47 +635,48 @@ class _TeacherClassroomsTab extends StatelessWidget {
         classrooms.firstWhereOrNull((c) => c.id == effective) ??
             classrooms.first;
 
+    // [Fix-OVERFLOW] Le sélecteur reste en tête et la grille occupe le
+    // reste de l'écran (Expanded) — avant, la grille vivait dans une Column
+    // sans contrainte → « BOTTOM OVERFLOWED BY N PIXELS ». La grille elle-
+    // même défile en vertical + horizontal (ScheduleGridView).
     return Column(
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-          child: Column(
-            children: [
-              DropdownButtonFormField<int>(
-                value: effective,
-                isExpanded: true,
-                decoration: InputDecoration(
-                  labelText: 'Classe',
-                  border: const OutlineInputBorder(),
-                  isDense: true,
-                  suffixIcon: scope.headClassrooms.any((c) => c.id == effective)
-                      ? const Tooltip(
-                          message: 'Vous êtes titulaire de cette classe',
-                          child: Icon(Icons.star, size: 18),
-                        )
-                      : null,
-                ),
-                items: classrooms
-                    .map((c) => DropdownMenuItem(
-                          value: c.id,
-                          child: Text(
-                            c.name +
-                                (scope.headClassrooms.any((h) => h.id == c.id)
-                                    ? '  (titulaire)'
-                                    : ''),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ))
-                    .toList(),
-                onChanged: (v) => onClassroomChanged(v),
-              ),
-              const SizedBox(height: 8),
-              _ClassroomEdtReader(
-                classroomId: selected.id,
-                weekFilter: weekFilter,
-                compact: true,
-              ),
-            ],
+          child: DropdownButtonFormField<int>(
+            value: effective,
+            isExpanded: true,
+            decoration: InputDecoration(
+              labelText: 'Classe',
+              border: const OutlineInputBorder(),
+              isDense: true,
+              suffixIcon: scope.headClassrooms.any((c) => c.id == effective)
+                  ? const Tooltip(
+                      message: 'Vous êtes titulaire de cette classe',
+                      child: Icon(Icons.star, size: 18),
+                    )
+                  : null,
+            ),
+            items: classrooms
+                .map((c) => DropdownMenuItem(
+                      value: c.id,
+                      child: Text(
+                        c.name +
+                            (scope.headClassrooms.any((h) => h.id == c.id)
+                                ? '  (titulaire)'
+                                : ''),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ))
+                .toList(),
+            onChanged: (v) => onClassroomChanged(v),
+          ),
+        ),
+        Expanded(
+          child: _ClassroomEdtReader(
+            classroomId: selected.id,
+            weekFilter: weekFilter,
+            compact: true,
           ),
         ),
       ],

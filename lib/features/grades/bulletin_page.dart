@@ -194,14 +194,19 @@ class _BulletinSelectors extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // [Fix-OVERFLOW] Classe et période empilées verticalement (l'ancienne
+    // Row de deux dropdowns côte à côte débordait — les deux champs se
+    // disputaient ~150 px de large) + isExpanded pour tronquer proprement
+    // les noms longs.
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Expanded(child: _buildClassroomField()),
-            const SizedBox(width: 12),
-            Expanded(child: _buildPeriodField()),
+            _buildClassroomField(),
+            const SizedBox(height: 12),
+            _buildPeriodField(),
           ],
         ),
       ),
@@ -218,6 +223,7 @@ class _BulletinSelectors extends StatelessWidget {
             list.firstWhereOrNull((c) => c.id == classroomId) ?? list.first;
         return DropdownButtonFormField<ClassroomDto>(
           value: selected,
+          isExpanded: true,
           decoration: const InputDecoration(
             labelText: 'Classe',
             border: OutlineInputBorder(),
@@ -247,6 +253,7 @@ class _BulletinSelectors extends StatelessWidget {
             list.firstWhereOrNull((p) => p.id == periodId) ?? list.first;
         return DropdownButtonFormField<PeriodDto>(
           value: selected,
+          isExpanded: true,
           decoration: const InputDecoration(
             labelText: 'Période',
             border: OutlineInputBorder(),

@@ -579,6 +579,8 @@ class RankingRowDto {
         if (ppa[i] is num) ppaMap[i + 1] = (ppa[i] as num).toDouble();
       }
     }
+    // [Fix-RANK-PARSE] Résolu côté V5 utilisateur : `_parseRank` (rank_number
+    // en priorité, puis rank num/chaîne « 3 B ») + `rankLabel` pour l'ex-æquo.
     return RankingRowDto(
       rank: _parseRank(j),
       rankLabel: _rankLabel(j),
