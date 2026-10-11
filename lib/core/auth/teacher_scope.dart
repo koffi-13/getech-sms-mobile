@@ -164,25 +164,58 @@ final teacherScopeProvider =
   // Appels parallèles : classes enseignées, toutes les classes (titulariat),
   // emploi du temps personnel.
   //
-  // [Fix-SCOPE-OFFLINE] Les erreurs réseau (serveur injoignable, 500…)
-  // ne remontent PLUS en erreur : repli sur les données locales Drift.
-  // L'ancien comportement affichait « Impossible de déterminer votre
-  // profil enseignant » + une erreur brute dès que le serveur tombait.
+  // [Fix-FAILL-SOFT] Chaque appel est tolérant à l'échec individuellement :
+  // un 403 sur `/classrooms` (serveur ancien au RBAC incomplet) ne doit PAS
+  // faire perdre les données de `/schedule/my` — l'ancien `Future.wait`
+  // échouait EN BLOC dès qu'un seul des trois appels renvoyait une erreur,
+  // et le repli Drift écrasait alors des cours pourtant disponibles.
+  // C'était une cause directe de « aucune amélioration » côté enseignant
+  // quand le serveur n'était pas encore à jour.
+  var anyCallFailed = false;
   List<ClassroomDto> teaching = const [];
   List<ClassroomDto> all = const [];
   List<WeeklyScheduleDto> schedule = const [];
-  try {
-    final results = await Future.wait([
-      _fetchClassrooms(dio, serverUrl, teacherOnly: true),
-      _fetchClassrooms(dio, serverUrl, teacherOnly: false),
-      _fetchMySchedule(dio, serverUrl),
-    ]);
-    teaching = results[0] as List<ClassroomDto>;
-    all = results[1] as List<ClassroomDto>;
-    schedule = results[2] as List<WeeklyScheduleDto>;
-  } catch (e) {
-    // Repli local : classes (titulariat + enseignement via class_subjects)
-    // et cours planifiés depuis le cache de synchro.
+
+  Future<List<ClassroomDto>> guardedTeaching() => _fetchClassrooms(
+        dio,
+        serverUrl,
+        teacherOnly: true,
+      ).catchError((_) {
+        anyCallFailed = true;
+        return const <ClassroomDto>[];
+      });
+
+  Future<List<ClassroomDto>> guardedAll() => _fetchClassrooms(
+        dio,
+        serverUrl,
+        teacherOnly: false,
+      ).catchError((_) {
+        anyCallFailed = true;
+        return const <ClassroomDto>[];
+      });
+
+  Future<List<WeeklyScheduleDto>> guardedSchedule() => _fetchMySchedule(
+        dio,
+        serverUrl,
+      ).catchError((_) {
+        anyCallFailed = true;
+        return const <WeeklyScheduleDto>[];
+      });
+
+  final results = await Future.wait([
+    guardedTeaching(),
+    guardedAll(),
+    guardedSchedule(),
+  ]);
+  teaching = results[0] as List<ClassroomDto>;
+  all = results[1] as List<ClassroomDto>;
+  schedule = results[2] as List<WeeklyScheduleDto>;
+
+  // [Fix-SCOPE-OFFLINE] Tous les appels en échec et aucune donnée → repli
+  // sur le cache Drift local (les erreurs réseau ne remontent PLUS en
+  // erreur : l'ancien comportement affichait « Impossible de déterminer
+  // votre profil enseignant » + une erreur brute dès que le serveur tombait).
+  if (anyCallFailed && teaching.isEmpty && all.isEmpty && schedule.isEmpty) {
     try {
       final local = await _localTeacherScope(ref, auth.user?.id);
       teaching = local.teachingClassrooms;
