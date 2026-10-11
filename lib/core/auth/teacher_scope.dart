@@ -24,6 +24,7 @@ library;
 
 import 'package:collection/collection.dart';
 import 'package:dio/dio.dart';
+import 'package:drift/drift.dart' as d;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../features/connections/connection_state.dart';
@@ -211,18 +212,34 @@ final teacherScopeProvider =
   all = results[1] as List<ClassroomDto>;
   schedule = results[2] as List<WeeklyScheduleDto>;
 
-  // [Fix-SCOPE-OFFLINE] Tous les appels en échec et aucune donnée → repli
-  // sur le cache Drift local (les erreurs réseau ne remontent PLUS en
-  // erreur : l'ancien comportement affichait « Impossible de déterminer
-  // votre profil enseignant » + une erreur brute dès que le serveur tombait).
-  if (anyCallFailed && teaching.isEmpty && all.isEmpty && schedule.isEmpty) {
+  // [Fix-DASHBOARD-ZERO] Persister l'EDT personnel dans le cache Drift
+  // (best-effort) : le périmètre enseignant est AUSSI la source de l'Accueil
+  // (« Mes cours aujourd'hui », « Mes matières »). Sans cette écriture, le
+  // cache local ne se remplissait que si l'enseignant visitait l'onglet EDT
+  // classe par classe — et l'Accueil montrait 0 dès que le serveur ne
+  // répondait pas.
+  if (schedule.isNotEmpty) {
+    await _persistScheduleToLocal(ref, schedule);
+  }
+
+  // [Fix-SCOPE-OFFLINE] Repli sur le cache Drift local CHAMP PAR CHAMP dès
+  // que le réseau n'a rien fourni — pas seulement quand un appel a échoué
+  // (un serveur ancien peut répondre 200 avec des listes vides : sans EDT
+  // union côté serveur, un enseignant « EDT uniquement » obtenait un scope
+  // vide sans aucun échec détectable, d'où l'Accueil à 0 alors que les
+  // données existaient localement). Le cache local ne COMPLÈTE que les
+  // champs vides : il ne contredit jamais une réponse réseau exploitable.
+  // Les erreurs réseau ne remontent PLUS en erreur UI : l'ancien
+  // comportement affichait « Impossible de déterminer votre profil
+  // enseignant » dès que le serveur tombait.
+  if (teaching.isEmpty || all.isEmpty || schedule.isEmpty) {
     try {
       final local = await _localTeacherScope(ref, auth.user?.id);
-      teaching = local.teachingClassrooms;
-      all = local.allClassrooms;
-      schedule = local.mySchedule;
+      if (teaching.isEmpty) teaching = local.teachingClassrooms;
+      if (all.isEmpty) all = local.allClassrooms;
+      if (schedule.isEmpty) schedule = local.mySchedule;
     } catch (_) {
-      // Données locales indisponibles → périmètre vide (pas d'erreur UI).
+      // Données locales indisponibles → périmètre tel quel (pas d'erreur UI).
     }
   }
 
@@ -416,8 +433,15 @@ Future<List<WeeklyScheduleDto>> _fetchMySchedule(
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
-    // 403/404 → pas d'emploi du temps personnel (droits ou serveur ancien).
-    if (api.statusCode == 403 || api.statusCode == 404) return const [];
+    // [Fix-DASHBOARD-ZERO] 403/404 → on RELANCE (au lieu d'avaler en liste
+    // vide) : l'appelant marque l'échec et le repli Drift peut s'appliquer.
+    // Un serveur ancien sans `/schedule/my` (404) ou un compte sans
+    // GRADE_READ (403) produisait un périmètre EDT VIDE silencieux —
+    // l'Accueil affichait « Mes matières : 0 » / « Cours aujourd'hui : 0 »
+    // sans aucun indice pour l'utilisateur.
+    if (api.statusCode == 403 || api.statusCode == 404) {
+      throw api;
+    }
     rethrow;
   }
 }
@@ -440,6 +464,42 @@ List<WeeklyScheduleDto> _parseScheduleList(dynamic data) {
     }
   }
   return const [];
+}
+
+/// [Fix-DASHBOARD-ZERO] Persiste l'EDT personnel (`GET /schedule/my`) dans
+/// le cache Drift `weekly_schedules` (upsert par id, best-effort).
+///
+/// Miroir de `_saveScheduleToLocal` du schedule_controller (que l'on ne
+/// peut pas importer ici — dépendance circulaire). Ce cache alimente :
+/// - le repli hors-ligne du périmètre enseignant (Accueil à 0 sinon) ;
+/// - l'onglet EDT hors-ligne (le contrôleur EDT sert ce même cache).
+Future<void> _persistScheduleToLocal(
+    Ref ref, List<WeeklyScheduleDto> entries) async {
+  try {
+    final db = ref.read(databaseProvider);
+    await db.batch((batch) {
+      for (final e in entries) {
+        batch.replace(
+          db.weeklySchedules,
+          WeeklySchedulesCompanion.insert(
+            id: d.Value(e.id),
+            classroomId: d.Value(e.classroomId),
+            subjectId: d.Value(e.subjectId),
+            teacherId: d.Value(e.teacherId),
+            timeSlotId: e.timeSlotId,
+            dayOfWeek: e.dayOfWeek,
+            startTime: d.Value(e.startTime),
+            endTime: d.Value(e.endTime),
+            room: d.Value(e.room),
+            weekType: d.Value(e.weekTypeRaw ?? 'A'),
+            syncedAt: d.Value(DateTime.now()),
+          ),
+        );
+      }
+    });
+  } catch (_) {
+    // Best-effort : le cache ne doit jamais casser le périmètre.
+  }
 }
 
 /// Semaine alternée courante (A ou B) calculée depuis l'année scolaire active

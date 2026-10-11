@@ -855,7 +855,13 @@ class SyncEngine {
                   levelId: Value(_rIntN(row, 'level_id')),
                   streamId: Value(_rIntN(row, 'stream_id')),
                   seriesId: Value(_rIntN(row, 'series_id')),
-                  teacherId: Value(_rIntN(row, 'teacher_id')),
+                  // [Fix-SYNC-FIELD-MAP] Le serveur envoie `head_teacher_id`
+                  // (colonne Classroom) — l'ancienne lecture `teacher_id`
+                  // était TOUJOURS nulle : le titulaire local était perdu,
+                  // et le repli Drift du périmètre enseignant (Accueil,
+                  // Notes, EDT) ne détectait aucune classe de titulariat.
+                  teacherId: Value(
+                      _rIntN(row, 'head_teacher_id') ?? _rIntN(row, 'teacher_id')),
                   capacity: Value(_rInt(row, 'capacity', d: 0)),
                   schoolYearId: Value(_rIntN(row, 'school_year_id')),
                   syncedAt: Value(syncedAt),
@@ -889,7 +895,14 @@ class SyncEngine {
                   classroomId: _rInt(row, 'classroom_id'),
                   subjectId: _rInt(row, 'subject_id'),
                   coefficient: Value(_rDbl(row, 'coefficient', d: 1.0)),
-                  teacherId: Value(_rIntN(row, 'teacher_id')),
+                  // [Fix-SYNC-FIELD-MAP] Le serveur envoie
+                  // `assigned_teacher_id` (colonne ClassSubject) — l'ancienne
+                  // lecture `teacher_id` était TOUJOURS nulle : aucune matière
+                  // locale n'était rattachée à l'enseignant, et le repli Drift
+                  // du périmètre enseignant (classes « enseignées ») était
+                  // définitivement vide — cause directe de l'Accueil à 0.
+                  teacherId: Value(_rIntN(row, 'assigned_teacher_id') ??
+                      _rIntN(row, 'teacher_id')),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
                   isDeleted: const Value(false),

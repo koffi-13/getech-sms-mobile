@@ -1,15 +1,21 @@
 /// Page « Saisie des notes » : sélection classe → période → matière (cascade),
 /// liste des évaluations (avec progress + maxScore), création d'évaluation
-/// (GRADE_EDIT, type via [CommonAssessmentTypes.defaults]), saisie des notes
-/// par élève ([GradeEntryDto]) avec champ absent + commentaire + **verrouillage**
-/// (is_locked) : si la note est verrouillée, l'input et la case « Absent » sont
-/// désactivés et un badge « Verrouillée » s'affiche. Le serveur ignore les
-/// notes verrouillées dans le bulk_save (skipped_count).
+/// (GRADE_EDIT ou enseignant détecté ; compositions/examens — catégorie
+/// EXAM — réservés aux administrateurs), saisie des notes par élève
+/// ([GradeEntryDto]) avec champ absent + commentaire.
+///
+/// [Grade-Validation] La modification d'une note EXISTANTE par un enseignant
+/// devient une PROPOSITION (file grade_modifications) : l'admin accorde ou
+/// rejette ; tant qu'elle n'est pas accordée, le bulletin utilise l'ancienne
+/// note. Les lignes portent une marque de statut (_GradeMarkChip).
 ///
 /// RBAC :
-/// - GRADE_READ  → lecture seule (sheet ouverte en consultation, bouton
-///   « Enregistrer » masqué).
-/// - GRADE_EDIT  → création / suppression d'évaluations + saisie des notes.
+/// - GRADE_READ (ou enseignant détecté) → consultation.
+/// - GRADE_EDIT (ou enseignant détecté — [Fix-TEACHER-GRADE-ENTRY]) →
+///   création d'évaluations + saisie des notes ; le serveur reste
+///   l'autorité finale.
+/// - Suppression d'une évaluation → administrateurs uniquement (miroir du
+///   serveur : « Only admins can delete assessments »).
 ///
 /// Aligné sur le contrat desktop :
 /// - Évaluations : `GET /grades/assessments?class_subject_id=&period_id=`
@@ -95,7 +101,21 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
   @override
   Widget build(BuildContext context) {
     final auth = ref.watch(authProvider);
-    final canEdit = hasPermission(auth.permissions, RbacPermissions.gradeEdit);
+    // [Fix-TEACHER-GRADE-ENTRY] La saisie des notes n'est PLUS en lecture
+    // seule pour un enseignant dont la liste RBAC est incomplète : le repli
+    // « enseignant détecté » (rôle déclaré OU relations du périmètre, miroir
+    // de la barre de navigation) ouvre l'édition — le serveur reste
+    // l'autorité finale (403 explicite si le compte est vraiment refusé).
+    // Retour utilisateur : « la notation des élèves est en lecture seule,
+    // il faut permettre la notation des élèves aux enseignants ».
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final teacherish = !auth.isAdminOrHeadmaster &&
+        (auth.hasDeclaredTeacherRole ||
+            scopeAsync.maybeWhen(
+                data: (s) => s.isTeacher, orElse: () => false));
+    final canEdit =
+        hasPermission(auth.permissions, RbacPermissions.gradeEdit) ||
+            teacherish;
     // Les admins (superuser / ADMIN / HEADMASTER) ne sont PAS soumis au
     // verrouillage des notes déjà saisies (is_locked) — ils peuvent corriger
     // une note existante (miroir de l'upsert admin du desktop).
@@ -286,7 +306,12 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
                                 canEdit: canEdit,
                                 onTap: () =>
                                     _openGradeEntry(a, canEdit, isAdmin),
-                                onDelete: canEdit
+                                // [Fix-TEACHER-ASSESSMENT] La suppression
+                                // d'une évaluation est réservée aux ADMIN
+                                // côté serveur (« Only admins can delete
+                                // assessments ») — ne plus proposer le
+                                // bouton à un enseignant (403 inévitable).
+                                onDelete: isAdmin
                                     ? () => _confirmDelete(a)
                                     : null,
                               ))
@@ -352,6 +377,9 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
       builder: (_) => _CreateAssessmentSheet(
         classSubjectId: _classSubjectId!,
         periodId: _periodId!,
+        // [Fix-TEACHER-ASSESSMENT] Compositions et examens (catégorie
+        // EXAM) : création réservée aux administrateurs.
+        isAdmin: ref.read(authProvider).isAdminOrHeadmaster,
       ),
     );
   }
@@ -679,10 +707,17 @@ class _CreateAssessmentSheet extends ConsumerStatefulWidget {
   const _CreateAssessmentSheet({
     required this.classSubjectId,
     required this.periodId,
+    this.isAdmin = false,
   });
 
   final int classSubjectId;
   final int periodId;
+
+  /// [Fix-TEACHER-ASSESSMENT] Faux pour un enseignant simple : les types
+  /// de catégorie EXAM (compositions, examens) sont filtrés du dropdown —
+  /// leur création est réservée aux administrateurs (appliqué aussi côté
+  /// serveur, 403).
+  final bool isAdmin;
 
   @override
   ConsumerState<_CreateAssessmentSheet> createState() =>
@@ -744,6 +779,17 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
         }
       }
       if (derived.isNotEmpty) types = derived.values.toList();
+    }
+
+    // [Fix-TEACHER-ASSESSMENT] Enseignant simple : masquer les types de
+    // catégorie EXAM (compositions et examens) — création réservée aux
+    // administrateurs, appliquée aussi côté serveur (403).
+    final examTypesHidden =
+        !widget.isAdmin && types.any((t) => t.category == AssessmentCategory.examen);
+    if (examTypesHidden) {
+      types = types
+          .where((t) => t.category != AssessmentCategory.examen)
+          .toList();
     }
 
     // Auto-sélection du premier type.
@@ -822,6 +868,31 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
                   onChanged: _onTypeChanged,
                 ),
               const SizedBox(height: 8),
+              // [Fix-TEACHER-ASSESSMENT] Note explicite pour l'enseignant :
+              // compositions et examens restent créés par l'administration.
+              if (examTypesHidden)
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.info_outline,
+                        size: 16,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'Compositions et examens : créés par '
+                        'l\'administration uniquement.',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(
+                              color:
+                                  Theme.of(context).colorScheme.onSurfaceVariant,
+                            ),
+                      ),
+                    ),
+                  ],
+                ),
               if (identical(types, CommonAssessmentTypes.defaults))
                 Text(
                   'Astuce : les types sont chargés depuis le serveur si le patch '
