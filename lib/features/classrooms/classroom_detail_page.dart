@@ -1,10 +1,20 @@
 /// Page de détail d'une classe : onglets Infos, Élèves, Emploi du temps.
+///
+/// [Fix-TEACHER-SCOPE] Règles d'accès enseignant :
+/// - un enseignant n'accède qu'aux CRÉNEAUX qui lui appartiennent dans
+///   l'onglet Emploi du temps, SAUF s'il est titulaire (prof. principal)
+///   de la classe → tous les créneaux ;
+/// - la LISTE des élèves est visible pour toutes ses classes, mais les
+///   DÉTAILS d'un élève ne sont accessibles que dans sa classe de
+///   titulariat.
 library;
 
 import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/auth/auth_state.dart';
+import '../../core/auth/teacher_scope.dart';
 import '../../core/config/constants.dart' hide Sexe;
 import '../../core/utils/permissions.dart';
 import '../../shared/models/attendance_dto.dart';
@@ -60,7 +70,7 @@ class _ClassroomDetailPageState extends ConsumerState<ClassroomDetailPage> with 
           controller: _tabController,
           children: [
             _InfoTab(classroom: classroom),
-            _StudentsTab(classroomId: classroom.id),
+            _StudentsTab(classroom: classroom),
             _ScheduleTab(classroom: classroom),
           ],
         ),
@@ -133,12 +143,12 @@ class _InfoTab extends StatelessWidget {
 }
 
 class _StudentsTab extends ConsumerWidget {
-  final int classroomId;
-  const _StudentsTab({required this.classroomId});
+  final ClassroomDto classroom;
+  const _StudentsTab({required this.classroom});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final filter = StudentFilter(classroomId: classroomId);
+    final filter = StudentFilter(classroomId: classroom.id);
     final async = ref.watch(studentsListProvider(filter));
 
     return RefreshIndicator(
@@ -174,7 +184,7 @@ class _StudentsTab extends ConsumerWidget {
                   ].join(' • '),
                 ),
                 trailing: const Icon(Icons.chevron_right),
-                onTap: () => context.push('/students/${s.id}'),
+                onTap: () => _openStudent(context, ref, s.id),
               );
             },
           );
@@ -184,11 +194,40 @@ class _StudentsTab extends ConsumerWidget {
       ),
     );
   }
+
+  /// [Fix-TEACHER-SCOPE] Les détails d'un élève ne sont accessibles qu'au
+  /// titulaire (prof. principal) de la classe — un enseignant simple voit
+  /// la liste mais pas les fiches détaillées.
+  void _openStudent(BuildContext context, WidgetRef ref, int studentId) {
+    final auth = ref.read(authProvider);
+    final scope = ref.read(teacherScopeProvider).valueOrNull;
+    final isTeacher =
+        (scope?.isTeacher ?? false) && !(scope?.isAdminOrHeadmaster ?? false);
+    final isHead = auth.user != null &&
+        (classroom.headTeacherId == auth.user!.id ||
+            (scope?.headClassrooms.any((c) => c.id == classroom.id) ?? false));
+    if (isTeacher && !isHead) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              'Les détails des élèves sont réservés au professeur principal '
+              'de la classe.'),
+          duration: Duration(seconds: 3),
+        ),
+      );
+      return;
+    }
+    context.push('/students/$studentId');
+  }
 }
 
 /// Onglet Emploi du temps : grille hebdomadaire complète de la classe
 /// (toutes semaines), lecture seule — l'édition se fait dans le module
 /// Emploi du temps (admins uniquement).
+///
+/// [Fix-TEACHER-SCOPE] Un enseignant (non titulaire de cette classe) ne
+/// voit que SES créneaux ; le titulaire (prof. principal) voit tous les
+/// créneaux de sa classe ; l'admin voit tout.
 class _ScheduleTab extends ConsumerWidget {
   final ClassroomDto classroom;
   const _ScheduleTab({required this.classroom});
@@ -198,23 +237,65 @@ class _ScheduleTab extends ConsumerWidget {
     // [Fix-OFFLINE] Plus de garde bloquante : classroomScheduleProvider est
     // local-first (cache Drift) — l'onglet EDT reste consultable hors-ligne.
     final async = ref.watch(classroomScheduleProvider(classroom.id));
+    final auth = ref.watch(authProvider);
+    final scope = ref.watch(teacherScopeProvider).valueOrNull;
+    final myUserId = auth.user?.id;
+    final isTeacher =
+        (scope?.isTeacher ?? false) && !(scope?.isAdminOrHeadmaster ?? false);
+    final isHead = myUserId != null &&
+        (classroom.headTeacherId == myUserId ||
+            (scope?.headClassrooms.any((c) => c.id == classroom.id) ?? false));
+    // Titulaire ou admin → tous les créneaux ; enseignant simple → ses
+    // créneaux uniquement (l'entrée porte teacher_id = enseignant assigné).
+    final onlyMine = isTeacher && !isHead;
+
     return async.when(
       data: (list) {
-        if (list.isEmpty) {
-          return const Center(
+        final visible = onlyMine
+            ? list.where((s) => s.teacherId == myUserId).toList()
+            : list;
+        if (visible.isEmpty) {
+          return Center(
             child: EmptyState(
               icon: Icons.event_busy,
-              title: 'Aucun cours programmé',
-              message:
-                  'L\'emploi du temps de cette classe n\'a pas encore été défini.',
+              title: onlyMine ? 'Aucun de vos créneaux' : 'Aucun cours programmé',
+              message: onlyMine
+                  ? 'Vous n\'avez pas de créneau dans cette classe. Seuls vos '
+                      'créneaux sont affichés ; le professeur principal voit '
+                      'l\'emploi du temps complet.'
+                  : 'L\'emploi du temps de cette classe n\'a pas encore été '
+                      'défini.',
             ),
           );
         }
         return Column(
           children: [
+            if (onlyMine)
+              Material(
+                color: Theme.of(context)
+                    .colorScheme
+                    .secondaryContainer
+                    .withValues(alpha: 0.6),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 6),
+                  child: Row(
+                    children: const [
+                      Icon(Icons.info_outline, size: 16),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Seuls vos créneaux sont affichés dans cette classe.',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             Expanded(
               child: ScheduleGridView(
-                schedule: list,
+                schedule: visible,
                 mode: ScheduleDisplayMode.classroom,
                 compact: true,
                 onEntryTap: (e) => showScheduleEntryDetails(context, e),

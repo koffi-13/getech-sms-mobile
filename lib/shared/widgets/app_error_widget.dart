@@ -73,6 +73,15 @@ class AppErrorWidget extends StatelessWidget {
           'champs puis réessayez.';
     }
 
+    // [Fix-CLASSROOM-DETAIL-ERROR] « Classe #X introuvable » → message
+    // actionnable (tirer pour rafraîchir) plutôt que donnée inattendue.
+    // ⚠️ AVANT les exceptions Dart génériques : « Bad state: Classe #12
+    // introuvable » contient aussi « bad state: ».
+    if (m.contains('introuvable')) {
+      return 'L\'élément demandé est introuvable. Tirez la liste pour la '
+          'rafraîchir, puis réessayez.';
+    }
+
     // Exceptions Dart courantes.
     if (m.contains('null check operator') ||
         m.contains('nullcheckerror') ||

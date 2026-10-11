@@ -1392,23 +1392,23 @@ class _GradeRowState extends State<_GradeRow> {
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                          // [Grade-Validation] Marque de statut de la note
-                          // (proposition en attente / validée / rejetée /
-                          // synchronisation différée) au lieu de l'ancien
-                          // badge « Verrouillée ».
-                          _GradeMarkChip(grade: widget.grade),
                           if (readOnly)
-                            Padding(
-                              padding: const EdgeInsets.only(left: 4),
-                              child: Icon(Icons.visibility_outlined,
-                                  size: 14,
-                                  color: theme.colorScheme.onSurfaceVariant),
-                            ),
+                            Icon(Icons.visibility_outlined,
+                                size: 14,
+                                color:
+                                    theme.colorScheme.onSurfaceVariant),
                         ],
                       ),
                       if (widget.grade.studentMatricule.isNotEmpty)
                         Text(widget.grade.studentMatricule,
                             style: theme.textTheme.bodySmall),
+                      // [Fix-GRADE-CHIP-OVERFLOW] La marque de statut passe
+                      // sur sa PROPRE ligne (largeur bornée par la colonne,
+                      // texte sur 2 lignes max) : l'ancienne position — dans
+                      // la Row du nom, sans contrainte — débordait de 88 px
+                      // (« En attente de validation (14 → 16) ») et MASQUAIT
+                      // le nom de l'élève et le champ de la note.
+                      _GradeMarkChip(grade: widget.grade),
                     ],
                   ),
                 ),
@@ -1539,7 +1539,12 @@ class _GradeMarkChip extends StatelessWidget {
         return const SizedBox.shrink();
     }
 
+    // [Fix-GRADE-CHIP-OVERFLOW] Le conteneur est désormais placé SOUS le
+    // nom (largeur bornée par la colonne parente) : la Row interne reçoit
+    // des contraintes finies, son Flexible peut rétrécir et le texte se
+    // replie sur 2 lignes au lieu de déborder de 88/13 px.
     return Container(
+      margin: const EdgeInsets.only(top: 4),
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
         color: bg,
@@ -1547,17 +1552,23 @@ class _GradeMarkChip extends StatelessWidget {
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 11, color: fg),
-          const SizedBox(width: 2),
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Icon(icon, size: 12, color: fg),
+          ),
+          const SizedBox(width: 4),
           Flexible(
             child: Text(
               label,
-              maxLines: 1,
+              maxLines: 2,
               overflow: TextOverflow.ellipsis,
+              softWrap: true,
               style: theme.textTheme.labelSmall?.copyWith(
                 color: fg,
                 fontWeight: FontWeight.w600,
+                height: 1.2,
               ),
             ),
           ),

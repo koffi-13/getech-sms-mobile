@@ -223,6 +223,15 @@ class _NotificationsSection extends ConsumerWidget {
           settingsAsync.when(
             data: (settings) => Column(
               children: [
+                // [Notif-V8] Accès direct au centre (historique persisté).
+                ListTile(
+                  leading: const Icon(Icons.notifications_none),
+                  title: const Text('Centre de notifications'),
+                  subtitle: const Text(
+                      'Historique des notifications reçues, non lues'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => context.push('/notifications'),
+                ),
                 SwitchListTile(
                   secondary: const Icon(Icons.school_outlined),
                   title: const Text('Rappels de cours'),

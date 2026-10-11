@@ -34,6 +34,7 @@ import '../network/api_exceptions.dart';
 import '../network/dio_client.dart';
 import '../sync/sync_engine.dart' show SyncResult;
 import '../../shared/models/grade_dto.dart';
+import 'notification_store.dart';
 
 /// Intervalle minimal entre deux vérifications de modifications (5 min).
 const Duration _modsCheckThrottle = Duration(minutes: 5);
@@ -104,6 +105,11 @@ class NotificationService {
   bool _timezoneReady = false;
   bool _initialized = false;
 
+  /// [Notif-V8] Ids des rappels de cours actuellement programmés —
+  /// `scheduleTodayCourseReminders` n'annule QUE ceux-là (l'ancien
+  /// `cancelAll()` tuait aussi les notifications immédiates en attente).
+  final List<int> _scheduledCourseIds = [];
+
   /// Initialise le plugin, les fuseaux horaires et les permissions.
   Future<bool> init() async {
     if (_initialized) return _plugin != null;
@@ -170,7 +176,14 @@ class NotificationService {
 
     final ready = await init();
     if (!ready || _plugin == null) return 0;
-    await _plugin!.cancelAll();
+    // [Notif-V8] Annulation ciblée : uniquement les rappels de cours
+    // précédemment programmés (plus de cancelAll() global).
+    for (final id in _scheduledCourseIds) {
+      try {
+        await _plugin!.cancel(id);
+      } catch (_) {}
+    }
+    _scheduledCourseIds.clear();
 
     final now = DateTime.now();
     final today = now.weekday; // 1 = lundi … 7 = dimanche
@@ -239,8 +252,10 @@ class NotificationService {
     }
 
     for (final r in scheduled) {
+      final id = _stableId(r.when, r.title);
+      _scheduledCourseIds.add(id);
       await _zonedSchedule(
-        id: _stableId(r.when, r.title),
+        id: id,
         title: r.title,
         body: r.body,
         when: r.when,
@@ -415,6 +430,8 @@ class NotificationService {
             '$newOnes nouvelle(s) proposition(s) de note(s) à valider '
             '($pending au total). Ouvrez le module Notes du serveur pour '
             'les accorder ou les rejeter.',
+            category: NotificationCategory.grades,
+            route: '/grades',
           );
         }
       } else if (approved > 0 || rejected > 0) {
@@ -427,6 +444,8 @@ class NotificationService {
           'Vos modifications de notes',
           'Mise à jour : ${parts.join(' et ')}. '
           'Consultez le module Notes pour le détail.',
+          category: NotificationCategory.grades,
+          route: '/grades',
         );
       }
     } on ApiException catch (_) {
@@ -458,6 +477,7 @@ class NotificationService {
         '${result.errors.length} erreur(s) pendant la synchronisation. '
         'Vos modifications locales sont conservées et seront renvoyées '
         'à la prochaine tentative.',
+        category: NotificationCategory.sync,
       );
       return;
     }
@@ -470,12 +490,38 @@ class NotificationService {
         'sync-done',
         'Synchronisation terminée',
         'Vos données sont à jour (${parts.join(' · ')}).',
+        category: NotificationCategory.sync,
       );
     }
   }
 
   /// Affiche une notification immédiate (hors rappels programmés).
-  Future<void> showNow(String tag, String title, String body) async {
+  ///
+  /// [Notif-V8] Chaque notification est AUSSI persistée dans le Centre de
+  /// notifications ([NotificationStore]) avec sa catégorie et la route à
+  /// ouvrir au clic.
+  Future<void> showNow(
+    String tag,
+    String title,
+    String body, {
+    NotificationCategory category = NotificationCategory.system,
+    String? route,
+  }) async {
+    // Historique du centre (même si la permission système est refusée,
+    // l'utilisateur retrouve l'information dans l'application).
+    try {
+      await _ref.read(notificationCenterProvider.notifier).add(
+            NotificationEntry(
+              id: tag.hashCode & 0x7fffffff,
+              title: title,
+              body: body,
+              category: category,
+              route: route,
+              createdAt: DateTime.now(),
+            ),
+          );
+    } catch (_) {}
+
     final ready = await init();
     if (!ready || _plugin == null) return;
     const details = NotificationDetails(

@@ -18,10 +18,12 @@ import '../../core/auth/auth_state.dart';
 import '../../core/auth/teacher_scope.dart';
 import '../../core/config/constants.dart';
 import '../../core/notifications/notification_service.dart';
+import '../../core/notifications/notification_store.dart';
 import '../../core/sync/sync_engine.dart';
 import '../../core/utils/formatters.dart';
 import '../../core/utils/permissions.dart';
 import '../connections/connection_state.dart';
+import '../../shared/models/attendance_dto.dart' show WeeklyScheduleDto;
 import '../../shared/models/sync_dto.dart';
 import '../../shared/widgets/widgets.dart';
 import 'dashboard_controller.dart';
@@ -63,6 +65,8 @@ class DashboardPage extends ConsumerWidget {
       appBar: AppBar(
         title: const Text('Tableau de bord'),
         actions: [
+          // [Notif-V8] Cloche du Centre de notifications (badge non-lus).
+          _NotificationBell(),
           _SyncButton(),
         ],
       ),
@@ -123,11 +127,34 @@ class DashboardPage extends ConsumerWidget {
   }
 }
 
+/// [Notif-V8] Cloche du Centre de notifications : badge du nombre de
+/// notifications non lues, ouvre /notifications.
+class _NotificationBell extends ConsumerWidget {
+  const _NotificationBell();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final unread =
+        ref.watch(notificationCenterProvider.select((s) => s.unreadCount));
+    return IconButton(
+      icon: Badge(
+        isLabelVisible: unread > 0,
+        label: Text(unread > 99 ? '99+' : '$unread'),
+        backgroundColor: theme.colorScheme.error,
+        textColor: theme.colorScheme.onError,
+        child: const Icon(Icons.notifications_outlined),
+      ),
+      tooltip: 'Centre de notifications',
+      onPressed: () => context.push('/notifications'),
+    );
+  }
+}
+
 /// Bouton "Synchroniser" de l'AppBar : déclenche [SyncEngine.syncNow] puis
 /// rafraîchit les KPIs.
 class _SyncButton extends ConsumerStatefulWidget {
   const _SyncButton();
-
   @override
   ConsumerState<_SyncButton> createState() => _SyncButtonState();
 }
@@ -295,6 +322,14 @@ class _TeacherDashboardContent extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final todayCourses = data.todayCourses;
+    // [Fix-DASHBOARD-TODAY] Quand la journée est libre, on affiche les
+    // PROCHAINS créneaux à venir (aujourd'hui inclus) — la section reste
+    // utile et l'enseignant voit tout de suite quand reprend son service.
+    final isSunday = DateTime.now().weekday > 6;
+    final upcoming = todayCourses.isEmpty
+        ? data.scope.upcomingCourses(DateTime.now(),
+            currentWeek: data.currentWeek, limit: 3)
+        : const <WeeklyScheduleDto>[];
 
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
@@ -357,18 +392,45 @@ class _TeacherDashboardContent extends StatelessWidget {
                   title: 'Mes cours aujourd\'hui',
                   icon: Icons.today_outlined,
                   subtitle: todayCourses.isEmpty
-                      ? 'Aucun cours programmé aujourd\'hui'
+                      ? (isSunday
+                          ? 'Pas de cours le dimanche'
+                          : 'Aucun cours programmé aujourd\'hui')
                       : '${todayCourses.length} cours',
                 ),
                 const SizedBox(height: 4),
                 if (todayCourses.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 8),
-                    child: EmptyState(
-                      title: 'Journée libre',
-                      message:
-                          'Aucun cours planifié pour aujourd\'hui.',
-                      icon: Icons.event_available,
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Column(
+                      children: [
+                        EmptyState(
+                          title: isSunday
+                              ? 'Dimanche — journée de repos'
+                              : 'Journée libre',
+                          message: isSunday
+                              ? 'Aucun cours n\'est programmé le dimanche.'
+                              : 'Aucun cours planifié pour aujourd\'hui.',
+                          icon: Icons.event_available,
+                        ),
+                        // [Fix-DASHBOARD-TODAY] Prochains créneaux à venir
+                        // (y compris aujourd\'hui après maintenant).
+                        if (upcoming.isNotEmpty) ...[
+                          const Divider(),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              'Prochains cours',
+                              style: theme.textTheme.titleSmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                          ...upcoming.map((c) => _UpcomingCourseTile(
+                                course: c,
+                                currentWeek: data.currentWeek,
+                              )),
+                        ],
+                      ],
                     ),
                   )
                 else
@@ -464,6 +526,63 @@ class _TeacherDashboardContent extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Tuile « prochain cours » (jour + créneau) de la section de repli
+/// [Fix-DASHBOARD-TODAY] : affichée quand la journée est libre.
+class _UpcomingCourseTile extends StatelessWidget {
+  const _UpcomingCourseTile({required this.course, this.currentWeek});
+
+  final WeeklyScheduleDto course;
+  final WeekType? currentWeek;
+
+  static const _days = ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'];
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final today = DateTime.now();
+    final isToday = course.dayOfWeek == today.weekday;
+    final dayLabel = isToday
+        ? "Aujourd'hui"
+        : (course.dayOfWeek >= 1 && course.dayOfWeek <= 6
+            ? _days[course.dayOfWeek - 1]
+            : '');
+    final weekLabel = course.isAllWeeks
+        ? ''
+        : ' (semaine ${course.weekType == WeekType.a ? 'A' : 'B'})';
+    return ListTile(
+      dense: true,
+      contentPadding: const EdgeInsets.symmetric(vertical: 2),
+      leading: CircleAvatar(
+        radius: 16,
+        backgroundColor: theme.colorScheme.secondaryContainer,
+        child: Text(
+          dayLabel.isNotEmpty ? dayLabel[0] : '?',
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            color: theme.colorScheme.onSecondaryContainer,
+          ),
+        ),
+      ),
+      title: Text(
+        course.subjectName ?? 'Cours',
+        style: theme.textTheme.bodyMedium,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text(
+        [
+          '$dayLabel$weekLabel',
+          '${course.startTime} – ${course.endTime}',
+          if (course.classroomName != null) course.classroomName!,
+        ].join(' • '),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
     );
   }
 }

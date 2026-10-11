@@ -4,6 +4,12 @@
 ///
 /// La liste rendue consomme [studentsListProvider] avec le filtre courant —
 /// la recherche et tous les chips filtrent réellement les données.
+///
+/// [Fix-TEACHER-STUDENTS-SCOPE] Un enseignant (non-admin) ne voit que les
+/// élèves des classes dans lesquelles il intervient (périmètre
+/// [TeacherScope]), combinés ou filtrés par les filtres du haut — mêmes
+/// contraintes que la page Classes. Les détails d'un élève ne sont
+/// accessibles que dans sa classe de titulariat (prof. principal).
 library;
 
 import 'package:flutter/material.dart';
@@ -11,6 +17,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/auth/auth_state.dart';
+import '../../core/auth/teacher_scope.dart';
 import '../../core/config/constants.dart';
 import '../../core/utils/permissions.dart';
 import '../../shared/models/classroom_dto.dart';
@@ -46,7 +53,12 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
   }
 
   Future<void> _refresh() async {
+    // [Fix-PHOTO-RETRY] Les mémos négatifs des photos (élève « sans photo »
+    // après un échec transitoire ou un 404 serveur) sont purgés : un
+    // pull-to-refresh relance les téléchargements.
+    resetStudentPhotoCache(ref);
     ref.invalidate(studentControllerProvider);
+    ref.invalidate(teacherScopeProvider);
     ref.invalidate(classroomsProvider);
   }
 
@@ -71,6 +83,9 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
     // ⚠️ La liste est FILTRÉE via studentsListProvider (le bug historique
     // était de consommer la liste brute — recherche et filtres no-ops).
     final studentsAsync = ref.watch(studentsListProvider(_filter));
+    // [Fix-TEACHER-STUDENTS-SCOPE] Périmètre enseignant : filtrage des
+    // élèves ET du sélecteur de classe aux classes où il intervient.
+    final scopeAsync = ref.watch(teacherScopeProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -91,7 +106,7 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
       body: RefreshIndicator(
         onRefresh: _refresh,
         child: CustomScrollView(
-          slivers: _buildSlivers(studentsAsync, classroomsAsync),
+          slivers: _buildSlivers(studentsAsync, classroomsAsync, scopeAsync),
         ),
       ),
       floatingActionButton: canCreate
@@ -107,7 +122,17 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
   List<Widget> _buildSlivers(
     AsyncValue<List<StudentDto>> studentsAsync,
     AsyncValue<List<ClassroomDto>> classroomsAsync,
+    AsyncValue<TeacherScope> scopeAsync,
   ) {
+    // [Fix-TEACHER-STUDENTS-SCOPE] Un enseignant attend le verdict du scope
+    // avant d'afficher (sinon les élèves de TOUTES les classes seraient
+    // visibles une fraction de seconde avant filtrage).
+    final scope = scopeAsync.valueOrNull;
+    final auth = ref.read(authProvider);
+    final restricted =
+        scope != null && scope.isTeacher && !scope.isAdminOrHeadmaster;
+    final scopeReady = auth.isAdminOrHeadmaster || scopeAsync.hasValue;
+
     final slivers = <Widget>[
       const SliverToBoxAdapter(child: _OfflineBanner()),
       // Barre de recherche.
@@ -128,10 +153,11 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
           child: Row(
             children: [
               _FilterChip(
-                label: _classroomLabel(classroomsAsync),
+                label: _classroomLabel(classroomsAsync, scope),
                 icon: Icons.school_outlined,
                 selected: _filter.classroomId != null,
-                onTap: () => _openClassroomPicker(context, classroomsAsync),
+                onTap: () =>
+                    _openClassroomPicker(context, classroomsAsync, scope),
               ),
               const SizedBox(width: 8),
               _FilterChip(
@@ -172,7 +198,7 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
       const SliverToBoxAdapter(child: SizedBox(height: 8)),
     ];
 
-    if (studentsAsync.isLoading) {
+    if (!scopeReady || studentsAsync.isLoading) {
       slivers.add(const SliverFillRemaining(
         hasScrollBody: false,
         child: AppLoading(label: 'Chargement des élèves…'),
@@ -193,7 +219,16 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
 
     final allStudents = studentsAsync.value ?? [];
     // [Fix-FILTER] Appliquer le filtre côté client (recherche + classe + sexe + statut).
+    //
+    // [Fix-TEACHER-STUDENTS-SCOPE] Enseignant : seuls les élèves de SES
+    // classes (enseignement ∪ titulariat) sont visibles, combinés ou
+    // filtrés par le filtre de classe (restreint à ses classes).
+    final myClassroomIds = restricted ? scope!.myClassroomIds : null;
     final students = allStudents.where((s) {
+      if (myClassroomIds != null) {
+        final cid = s.classroomId;
+        if (cid == null || !myClassroomIds.contains(cid)) return false;
+      }
       if (_filter.search.isNotEmpty) {
         final q = _filter.search.toLowerCase();
         final fullName = s.fullName.toLowerCase();
@@ -220,7 +255,10 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
           icon: Icons.person_search,
           title: 'Aucun élève trouvé',
           message: _filter == StudentFilter.empty
-              ? 'Aucun élève synchronisé. Tirez pour rafraîchir.'
+              ? (restricted
+                  ? 'Aucun élève dans vos classes. Synchronisez ou contactez '
+                      'l\'administration.'
+                  : 'Aucun élève synchronisé. Tirez pour rafraîchir.')
               : 'Essayez d\'ajuster vos filtres ou votre recherche.',
         ),
       ));
@@ -232,7 +270,12 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
       sliver: SliverList.separated(
         itemCount: students.length,
         separatorBuilder: (_, __) => const SizedBox(height: 4),
-        itemBuilder: (context, i) => _StudentTile(student: students[i]),
+        itemBuilder: (context, i) => _StudentTile(
+          student: students[i],
+          canOpenDetails: !restricted ||
+              scope!.headClassrooms
+                  .any((c) => c.id == students[i].classroomId),
+        ),
       ),
     ));
 
@@ -240,8 +283,13 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
     return slivers;
   }
 
-  String _classroomLabel(AsyncValue<List<ClassroomDto>> async) {
-    if (_filter.classroomId == null) return 'Classe';
+  String _classroomLabel(AsyncValue<List<ClassroomDto>> async,
+      TeacherScope? scope) {
+    if (_filter.classroomId == null) {
+      final restricted =
+          scope != null && scope.isTeacher && !scope.isAdminOrHeadmaster;
+      return restricted ? 'Mes classes' : 'Classe';
+    }
     return async.maybeWhen(
       data: (list) =>
           list.where((c) => c.id == _filter.classroomId).firstOrNullName,
@@ -249,8 +297,22 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
     );
   }
 
-  void _openClassroomPicker(BuildContext context, AsyncValue<List<ClassroomDto>> async) {
-    final list = async.value ?? [];
+  void _openClassroomPicker(BuildContext context,
+      AsyncValue<List<ClassroomDto>> async, TeacherScope? scope) {
+    // [Fix-TEACHER-STUDENTS-SCOPE] Un enseignant ne filtre que parmi SES
+    // classes ; « toutes » signifie « toutes SES classes ».
+    final restricted =
+        scope != null && scope.isTeacher && !scope.isAdminOrHeadmaster;
+    var list = async.value ?? [];
+    if (restricted) {
+      final byId = <int, ClassroomDto>{
+        for (final c in list) c.id: c,
+      };
+      for (final c in scope!.myClassrooms) {
+        byId.putIfAbsent(c.id, () => c);
+      }
+      list = byId.values.toList()..sort((a, b) => a.name.compareTo(b.name));
+    }
     showModalBottomSheet(
       context: context,
       showDragHandle: true,
@@ -259,7 +321,8 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
           shrinkWrap: true,
           children: [
             ListTile(
-              title: const Text('Toutes les classes'),
+              title: Text(
+                  restricted ? 'Toutes mes classes' : 'Toutes les classes'),
               onTap: () {
                 setState(() => _filter = _filter.copyWith(clearClassroom: true));
                 Navigator.pop(ctx);
@@ -436,8 +499,12 @@ class _FilterChip extends StatelessWidget {
 }
 
 class _StudentTile extends StatelessWidget {
+  const _StudentTile({required this.student, this.canOpenDetails = true});
   final StudentDto student;
-  const _StudentTile({required this.student});
+
+  /// [Fix-TEACHER-STUDENTS-SCOPE] Faux pour un enseignant simple : la fiche
+  /// détaillée est réservée au professeur principal de la classe.
+  final bool canOpenDetails;
 
   @override
   Widget build(BuildContext context) {
@@ -463,8 +530,23 @@ class _StudentTile extends StatelessWidget {
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
         ),
-        trailing: const Icon(Icons.chevron_right),
-        onTap: () => context.push('/students/${student.id}'),
+        trailing: canOpenDetails
+            ? const Icon(Icons.chevron_right)
+            : const Icon(Icons.lock_outline, size: 18),
+        onTap: () {
+          if (!canOpenDetails) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                    'Les détails des élèves sont réservés au professeur '
+                    'principal de la classe.'),
+                duration: Duration(seconds: 3),
+              ),
+            );
+            return;
+          }
+          context.push('/students/${student.id}');
+        },
       ),
     );
   }

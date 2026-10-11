@@ -191,6 +191,30 @@ class StudentPhotoCache {
     _transientFailures[studentId] = DateTime.now();
   }
 
+  /// [Fix-PHOTO-RETRY] Purge les mémos négatifs (« sans photo » et échecs
+  /// transitoires) ainsi que les futures résolus : le prochain accès
+  /// relance le téléchargement. Appelé par le pull-to-refresh des listes
+  /// — après un correctif serveur (chemin de photo réparé), les miniatures
+  /// reviennent sans redémarrer l'application.
+  void resetMemos() {
+    _knownMissing.clear();
+    _transientFailures.clear();
+    _inFlight.clear();
+  }
+
+  /// [Fix-PHOTO-DECODE] Supprime le fichier cache d'un élève dont les
+  /// octets ne se décodent pas (réponse non-image cachée par erreur, fichier
+  /// tronqué…) — sinon l'avatar resterait sur les initiales à chaque
+  /// session tant que le fichier invalide traîne sur le disque.
+  Future<void> deleteCached(int studentId) async {
+    try {
+      final file = await _targetFile(studentId);
+      if (await file.exists()) await file.delete();
+    } catch (_) {}
+    _knownMissing.remove(studentId);
+    _transientFailures.remove(studentId);
+  }
+
   /// Fichier cache existant (non vide) pour cet élève sur CE serveur.
   Future<File?> _cachedFile(int studentId) async {
     try {
@@ -223,14 +247,36 @@ class StudentPhotoCache {
   }
 }
 
+/// [Fix-PHOTO-RETRY] Époque du cache photo : incrémentée par
+/// [StudentPhotoCache.resetMemos] via le provider — chaque incrément crée
+/// une NOUVELLE instance de cache (les avatars se relient et les photos
+/// échouées sont retéléchargées).
+final _photoCacheEpochProvider = StateProvider<int>((ref) => 0);
+
 /// Provider du cache de photos. Il ne surveille QUE l'URL du serveur actif
 /// (pas le statut heartbeat qui change toutes les 30 s) : le cache — et donc
-/// le mémo négatif — est réinitialisé uniquement quand on change de serveur.
+/// le mémo négatif — est réinitialisé uniquement quand on change de serveur
+/// ou qu'on purge les mémos (pull-to-refresh).
 final studentPhotoCacheProvider = Provider<StudentPhotoCache>((ref) {
   final dio = ref.watch(dioProvider);
   final serverUrl = ref.watch(connectionProvider.select((c) => c.serverUrl));
+  // L'époque force une nouvelle instance quand les mémos sont purgés.
+  ref.watch(_photoCacheEpochProvider);
   return StudentPhotoCache(dio: dio, serverUrl: serverUrl);
 });
+
+/// [Fix-PHOTO-RETRY] Purge les mémos négatifs ET force une nouvelle
+/// instance de cache (incrément d'époque) : tous les avatars se relient et
+/// retéléchargent leur photo. À appeler sur le pull-to-refresh des listes
+/// d'élèves (après réparation serveur, les miniatures reviennent sans
+/// redémarrer l'application).
+///
+/// [ref] accepte aussi bien un `Ref` (provider) qu'un `WidgetRef` (page) —
+/// les deux exposent `read`, sans supertype commun en Riverpod 2.x.
+void resetStudentPhotoCache(dynamic ref) {
+  (ref as dynamic).read(studentPhotoCacheProvider).resetMemos();
+  (ref as dynamic).read(_photoCacheEpochProvider.notifier).state++;
+}
 
 /// Avatar élève autonome : photo en miniature si disponible (endpoint dédié +
 /// cache disque), initiales en fallback (pas de photo, 404, réseau KO ou
@@ -280,12 +326,25 @@ class _StudentAvatarState extends ConsumerState<StudentAvatar> {
     _future = cache.providerFor(widget.studentId);
   }
 
+  /// [Fix-PHOTO-DECODE] Purge le fichier cache invalide au premier échec
+  /// de décodage : le prochain refresh re-téléchargera des octets propres.
+  void _onDecodeError() {
+    setState(() => _decodeFailed = true);
+    _cacheUsed?.deleteCached(widget.studentId);
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    // Suit un changement de serveur (nouvelle instance de cache).
+    // Suit un changement de serveur OU une purge des mémos
+    // ([Fix-PHOTO-RETRY] nouvelle instance de cache → re-téléchargement).
     final cache = ref.watch(studentPhotoCacheProvider);
-    if (!identical(cache, _cacheUsed)) _bind(cache);
+    if (!identical(cache, _cacheUsed)) {
+      _bind(cache);
+    } else if (_future == null) {
+      // Cas défensif (rebuild après dispose du future) — rebind.
+      _bind(cache);
+    }
 
     return FutureBuilder<ImageProvider?>(
       future: _future,
@@ -297,9 +356,7 @@ class _StudentAvatarState extends ConsumerState<StudentAvatar> {
           backgroundColor: theme.colorScheme.primaryContainer,
           foregroundColor: theme.colorScheme.onPrimaryContainer,
           foregroundImage: hasImage ? provider : null,
-          onForegroundImageError: hasImage
-              ? (_, __) => setState(() => _decodeFailed = true)
-              : null,
+          onForegroundImageError: hasImage ? (_, __) => _onDecodeError() : null,
           // Initiales visibles uniquement sans photo — sinon elles se
           // superposeraient à l'image (le child est peint PAR-DESSUS).
           child: hasImage ? null : _initialsText(),

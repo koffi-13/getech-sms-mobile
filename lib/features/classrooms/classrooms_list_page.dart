@@ -1,11 +1,17 @@
 /// Page "Classes" : liste avec effectif, titulaire et taux d'occupation
 /// (LinearProgressIndicator). Pull-to-refresh + bannière hors-ligne.
+///
+/// [Fix-TEACHER-CLASSES-SCOPE] Un enseignant (non-admin) ne voit QUE les
+/// classes dans lesquelles il intervient (enseignement + titulariat) —
+/// périmètre [TeacherScope]. L'admin/directeur voit toutes les classes.
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/auth/auth_state.dart';
+import '../../core/auth/teacher_scope.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
 import '../../shared/widgets/widgets.dart';
@@ -20,12 +26,22 @@ class ClassroomsListPage extends ConsumerStatefulWidget {
 
 class _ClassroomsListPageState extends ConsumerState<ClassroomsListPage> {
   Future<void> _refresh() async {
+    ref.invalidate(teacherScopeProvider);
     ref.invalidate(classroomsProvider);
   }
 
   @override
   Widget build(BuildContext context) {
+    final auth = ref.watch(authProvider);
     final async = ref.watch(classroomsProvider);
+    // [Fix-TEACHER-CLASSES-SCOPE] Résolution du périmètre enseignant : un
+    // non-admin attend le verdict du scope AVANT d'afficher quoi que ce
+    // soit (sinon toutes les classes de l'établissement seraient visibles
+    // une fraction de seconde avant filtrage).
+    final scopeAsync = ref.watch(teacherScopeProvider);
+
+    final isTeacherish = !auth.isAdminOrHeadmaster;
+    final scopeReady = !isTeacherish || scopeAsync.hasValue;
 
     return Scaffold(
       appBar: AppBar(
@@ -43,43 +59,75 @@ class _ClassroomsListPageState extends ConsumerState<ClassroomsListPage> {
         child: CustomScrollView(
           slivers: [
             SliverToBoxAdapter(child: _OfflineBanner()),
-            async.when(
-              data: (classrooms) {
-                if (classrooms.isEmpty) {
-                  return const SliverFillRemaining(
-                    hasScrollBody: false,
-                    child: EmptyState(
-                      icon: Icons.school_outlined,
-                      title: 'Aucune classe',
-                      message:
-                          'Aucune classe disponible localement. Synchronisez pour récupérer les données du serveur.',
+            if (!scopeReady)
+              const SliverFillRemaining(
+                hasScrollBody: false,
+                child: AppLoading(label: 'Chargement de vos classes…'),
+              )
+            else
+              async.when(
+                data: (classrooms) {
+                  final scope = scopeAsync.valueOrNull;
+                  final restricted = scope != null &&
+                      scope.isTeacher &&
+                      !scope.isAdminOrHeadmaster;
+                  var visible = classrooms;
+                  var headIds = const <int>{};
+                  if (restricted) {
+                    // L'enseignant ne voit que SES classes (enseignement ∪
+                    // titulariat) ; les données du scope complètent les
+                    // classes synthétisées depuis l'EDT (absentes de
+                    // /classrooms quand la matière est inactive).
+                    final byId = <int, ClassroomDto>{
+                      for (final c in classrooms) c.id: c,
+                    };
+                    for (final c in scope.myClassrooms) {
+                      byId.putIfAbsent(c.id, () => c);
+                    }
+                    headIds = scope.headClassrooms.map((c) => c.id).toSet();
+                    visible = byId.values.toList()
+                      ..sort((a, b) => a.name.compareTo(b.name));
+                  }
+                  if (visible.isEmpty) {
+                    return SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: EmptyState(
+                        icon: Icons.school_outlined,
+                        title: 'Aucune classe',
+                        message: restricted
+                            ? 'Vous n\'intervenez dans aucune classe. Contactez '
+                                'l\'administration de l\'établissement.'
+                            : 'Aucune classe disponible localement. Synchronisez '
+                                'pour récupérer les données du serveur.',
+                      ),
+                    );
+                  }
+                  return SliverPadding(
+                    padding: const EdgeInsets.all(12),
+                    sliver: SliverList.separated(
+                      itemCount: visible.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (context, i) {
+                        final c = visible[i];
+                        final isHead = headIds.contains(c.id);
+                        return _ClassroomTile(
+                            classroom: c, isHeadTeacher: isHead);
+                      },
                     ),
                   );
-                }
-                return SliverPadding(
-                  padding: const EdgeInsets.all(12),
-                  sliver: SliverList.separated(
-                    itemCount: classrooms.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 8),
-                    itemBuilder: (context, i) {
-                      final c = classrooms[i];
-                      return _ClassroomTile(classroom: c);
-                    },
+                },
+                loading: () => const SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: AppLoading(label: 'Chargement des classes…'),
+                ),
+                error: (e, _) => SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: AppErrorWidget(
+                    message: e.toString(),
+                    onRetry: _refresh,
                   ),
-                );
-              },
-              loading: () => const SliverFillRemaining(
-                hasScrollBody: false,
-                child: AppLoading(label: 'Chargement des classes…'),
-              ),
-              error: (e, _) => SliverFillRemaining(
-                hasScrollBody: false,
-                child: AppErrorWidget(
-                  message: e.toString(),
-                  onRetry: _refresh,
                 ),
               ),
-            ),
             const SliverToBoxAdapter(child: SizedBox(height: 24)),
           ],
         ),
@@ -130,8 +178,12 @@ class _OfflineBanner extends ConsumerWidget {
 // ---------------------------------------------------------------------------
 
 class _ClassroomTile extends StatelessWidget {
-  const _ClassroomTile({required this.classroom});
+  const _ClassroomTile({required this.classroom, this.isHeadTeacher = false});
   final ClassroomDto classroom;
+
+  /// Vrai si l'utilisateur connecté est titulaire (prof. principal) de
+  /// cette classe → badge étoile.
+  final bool isHeadTeacher;
 
   @override
   Widget build(BuildContext context) {
@@ -162,11 +214,18 @@ class _ClassroomTile extends StatelessWidget {
                     width: 44,
                     height: 44,
                     decoration: BoxDecoration(
-                      color: theme.colorScheme.primaryContainer,
+                      color: isHeadTeacher
+                          ? Colors.amber.withValues(alpha: 0.25)
+                          : theme.colorScheme.primaryContainer,
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: Icon(Icons.school,
-                        color: theme.colorScheme.primary, size: 22),
+                    child: Icon(
+                      isHeadTeacher ? Icons.star : Icons.school,
+                      color: isHeadTeacher
+                          ? Colors.amber.shade800
+                          : theme.colorScheme.primary,
+                      size: 22,
+                    ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -196,6 +255,16 @@ class _ClassroomTile extends StatelessWidget {
                                 color: theme.colorScheme.onSurfaceVariant),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                        if (isHeadTeacher) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            'Votre classe (vous êtes titulaire)',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: Colors.amber.shade800,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                         ],
                       ],

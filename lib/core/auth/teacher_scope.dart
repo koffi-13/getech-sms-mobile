@@ -221,7 +221,6 @@ final teacherScopeProvider =
   if (schedule.isNotEmpty) {
     await _persistScheduleToLocal(ref, schedule);
   }
-
   // [Fix-SCOPE-OFFLINE] Repli sur le cache Drift local CHAMP PAR CHAMP dès
   // que le réseau n'a rien fourni — pas seulement quand un appel a échoué
   // (un serveur ancien peut répondre 200 avec des listes vides : sans EDT
@@ -274,6 +273,14 @@ final teacherScopeProvider =
       teaching.isNotEmpty ||
       schedule.isNotEmpty ||
       head.isNotEmpty;
+
+  // [Fix-CLASSROOM-DETAIL-ERROR] Les classes synthétisées depuis l'EDT
+  // (matière inactive → absente de /classrooms) sont persistées dans le
+  // cache Drift : sans cela, le clic sur « Mes classes » → détail échouait
+  // (classe introuvable en local) dès que l'API était injoignable.
+  if (teaching.isNotEmpty) {
+    await _persistClassroomsToLocal(ref, teaching);
+  }
 
   return TeacherScope(
     isTeacher: isTeacher,
@@ -348,7 +355,8 @@ Future<_LocalTeacherScope> _localTeacherScope(Ref ref, int? userId) async {
               startTime: r.startTime ?? '',
               endTime: r.endTime ?? '',
               room: r.room,
-              weekTypeRaw: r.weekType,
+              // [Fix-WEEK-ALL] sentinel 'ALL' → null (cours toutes semaines).
+              weekTypeRaw: r.weekType == 'ALL' ? null : r.weekType,
             ))
         .toList();
   }
@@ -491,9 +499,47 @@ Future<void> _persistScheduleToLocal(
             startTime: d.Value(e.startTime),
             endTime: d.Value(e.endTime),
             room: d.Value(e.room),
-            weekType: d.Value(e.weekTypeRaw ?? 'A'),
+            // [Fix-WEEK-ALL] null (toutes semaines) → sentinel 'ALL' :
+            // la colonne Drift n'est pas nullable et l'ancien repli 'A'
+            // faisait disparaître les cours hebdomadaires des semaines B.
+            weekType: d.Value(e.weekTypeRaw ?? 'ALL'),
             syncedAt: d.Value(DateTime.now()),
           ),
+        );
+      }
+    });
+  } catch (_) {
+    // Best-effort : le cache ne doit jamais casser le périmètre.
+  }
+}
+
+/// [Fix-CLASSROOM-DETAIL-ERROR] Persiste les cartes de classes du périmètre
+/// (notamment celles synthétisées depuis l'EDT) dans le cache Drift
+/// `classrooms` — upsert par id, best-effort, sans jamais écraser les champs
+/// déjà renseignés (le cache complet de ClassroomController reste
+/// prioritaire : on ne fait qu'ASSURER la présence de la ligne).
+Future<void> _persistClassroomsToLocal(
+    Ref ref, List<ClassroomDto> classrooms) async {
+  try {
+    final db = ref.read(databaseProvider);
+    await db.batch((batch) {
+      for (final c in classrooms) {
+        batch.insert(
+          db.classrooms,
+          ClassroomsCompanion.insert(
+            id: d.Value(c.id),
+            name: c.name,
+            teacherId: d.Value(c.headTeacherId),
+            establishmentId: d.Value(c.establishmentId),
+            headTeacherName: d.Value(c.headTeacherName),
+            levelName: d.Value(c.levelName),
+            cycleName: d.Value(c.cycleName),
+            cycleId: d.Value(c.cycleId),
+            seriesName: d.Value(c.seriesName),
+            currentStudentsCount: d.Value(c.currentStudentsCount),
+            isDirty: const d.Value(false),
+          ),
+          mode: d.InsertMode.insertOrIgnore,
         );
       }
     });

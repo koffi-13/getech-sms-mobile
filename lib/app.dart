@@ -2,6 +2,8 @@
 /// thème clair/sombre, localisation française.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -12,6 +14,7 @@ import 'core/auth/auth_state.dart';
 import 'core/auth/teacher_scope.dart';
 import 'core/config/theme.dart';
 import 'core/notifications/notification_service.dart';
+import 'core/notifications/notification_store.dart';
 import 'features/attendance/attendance_history_page.dart';
 import 'features/attendance/attendance_page.dart';
 import 'features/auth/login_page.dart';
@@ -27,6 +30,7 @@ import 'features/grades/bulletin_page.dart';
 import 'features/grades/grade_entry_page.dart';
 import 'features/grades/ranking_page.dart';
 import 'features/schedule/schedule_page.dart';
+import 'features/settings/notification_center_page.dart';
 import 'features/settings/profile_page.dart';
 import 'features/settings/settings_page.dart';
 import 'features/students/student_detail_page.dart';
@@ -210,6 +214,11 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/settings',
         builder: (context, state) => const SettingsPage(),
+      ),
+      // [Notif-V8] Centre de notifications (historique persisté).
+      GoRoute(
+        path: '/notifications',
+        builder: (context, state) => const NotificationCenterPage(),
       ),
       GoRoute(
         path: '/settings/profile',
@@ -485,16 +494,64 @@ class _MoreItem {
 }
 
 /// Widget racine de l'application.
-class GeTechApp extends ConsumerWidget {
+///
+/// [Notif-V8] Re-programmation des rappels de cours au retour d'arrière-plan
+/// (l'app restée ouverte toute la nuit reprogramme au petit matin sans
+/// redémarrage) et toutes les 15 minutes (changement de journée).
+class GeTechApp extends ConsumerStatefulWidget {
   const GeTechApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<GeTechApp> createState() => _GeTechAppState();
+}
+
+class _GeTechAppState extends ConsumerState<GeTechApp>
+    with WidgetsBindingObserver {
+  Timer? _remindersTimer;
+  int _lastScheduledDay = -1;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _remindersTimer = Timer.periodic(const Duration(minutes: 15), (_) {
+      _rescheduleRemindersIfNeeded();
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _remindersTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      // Retour au premier plan : re-programmer les rappels du jour +
+      // recharger l'historique du centre de notifications.
+      _rescheduleRemindersIfNeeded();
+      ref.read(notificationCenterProvider.notifier).reload();
+    }
+  }
+
+  void _rescheduleRemindersIfNeeded() {
+    final today = DateTime.now().day;
+    if (today == _lastScheduledDay) return;
+    _lastScheduledDay = today;
+    ref.invalidate(courseRemindersSchedulerProvider);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final router = ref.watch(goRouterProvider);
     final themeMode = ref.watch(themeModeProvider);
     // [Notifications] Programme les rappels de cours du jour dès que le
     // profil enseignant + l'emploi du temps sont résolus (cache local).
     ref.watch(courseRemindersSchedulerProvider);
+    _lastScheduledDay = DateTime.now().day;
     return MaterialApp.router(
       title: 'GeTech-SMS',
       debugShowCheckedModeBanner: false,

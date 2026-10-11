@@ -13,8 +13,10 @@ import 'package:drift/drift.dart' as d;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart' as log_pkg;
 
+import '../../core/auth/teacher_scope.dart';
 import '../../core/database/database.dart';
 import '../../core/network/api_endpoints.dart';
+import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
@@ -90,36 +92,63 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
 
   Future<ClassroomDto> getById(int id) async {
     final conn = _ref.read(connectionProvider);
+    final serverUrl = conn.serverUrl;
     final definitivelyOffline =
         !conn.canReachServer && !conn.isChecking;
-    if (!definitivelyOffline) {
+    if (!definitivelyOffline && serverUrl != null) {
       try {
         final dio = _ref.read(dioProvider);
         final response = await dio.get(
-          buildUrl(_ref.read(connectionProvider).serverUrl!,
-              ApiEndpoints.classroom(id)),
+          buildUrl(serverUrl, ApiEndpoints.classroom(id)),
         );
-        final remote = ClassroomDto.fromJson(
-            Map<String, dynamic>.from(response.data as Map));
-        // Fusion avec l'état local (effectif rattrapé par le comptage local).
-        final local = (state.value ?? const <ClassroomDto>[])
-            .where((c) => c.id == id)
-            .firstOrNull;
-        if (local != null &&
-            (remote.currentStudentsCount ?? 0) < (local.currentStudentsCount ?? 0)) {
-          return remote.copyWith(
-              currentStudentsCount: local.currentStudentsCount);
+        if (response.data is Map) {
+          final remote = ClassroomDto.fromJson(
+              Map<String, dynamic>.from(response.data as Map));
+          // Fusion avec l'état local (effectif rattrapé par le comptage local).
+          final local = (state.value ?? const <ClassroomDto>[])
+              .where((c) => c.id == id)
+              .firstOrNull;
+          if (local != null &&
+              (remote.currentStudentsCount ?? 0) <
+                  (local.currentStudentsCount ?? 0)) {
+            return remote.copyWith(
+                currentStudentsCount: local.currentStudentsCount);
+          }
+          return remote;
         }
-        return remote;
       } catch (e) {
         _log.w('Détail classe #$id : API indisponible, repli local ($e)');
       }
     }
-    // Repli local (jamais d'exception brute vers l'UI).
-    final classrooms = state.value ?? await _fetchFromLocal();
-    return classrooms.firstWhere(
-      (c) => c.id == id,
-      orElse: () => throw StateError('Classe #$id introuvable en local.'),
+    // [Fix-CLASSROOM-DETAIL-ERROR] Chaîne de repli SANS exception brute :
+    // 1. état en mémoire (liste déjà chargée) ;
+    // 2. cache Drift local ;
+    // 3. périmètre enseignant (les classes « Mes classes » de l'Accueil
+    //    peuvent être synthétisées depuis l'EDT et absentes du cache) ;
+    // 4. sinon message clair (plus jamais « donnée inattendue »).
+    final inMemory = (state.value ?? const <ClassroomDto>[])
+        .where((c) => c.id == id)
+        .firstOrNull;
+    if (inMemory != null) return inMemory;
+
+    final localList = await _fetchFromLocal();
+    final local = localList.where((c) => c.id == id).firstOrNull;
+    if (local != null) return local;
+
+    try {
+      final scope = await _ref.read(teacherScopeProvider.future)
+          .timeout(const Duration(seconds: 3));
+      final fromScope = scope.myClassrooms
+          .where((c) => c.id == id)
+          .firstOrNull;
+      if (fromScope != null) return fromScope;
+    } catch (_) {
+      // Scope indisponible (hors-ligne complet) — on continue.
+    }
+
+    throw const ApiException(
+      'Classe introuvable. Tirez pour rafraîchir la liste des classes '
+      'puis réessayez.',
     );
   }
 

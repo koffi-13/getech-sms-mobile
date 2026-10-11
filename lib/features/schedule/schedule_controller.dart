@@ -198,13 +198,24 @@ Future<List<WeeklyScheduleDto>> _scheduleFromLocal(
               startTime: r.startTime ?? '',
               endTime: r.endTime ?? '',
               room: r.room,
-              weekTypeRaw: r.weekType,
+              weekTypeRaw: _weekTypeFromLocal(r.weekType),
             ))
         .toList();
   } catch (_) {
     return const [];
   }
 }
+
+/// Sentinel de cache local : la colonne Drift `week_type` n'est PAS
+/// nullable (défaut 'A') — on y stocke 'ALL' pour les cours « toutes
+/// semaines » (week_type NULL côté serveur), et on reconvertit en null à
+/// la lecture. Sans cela, un cours hebdomadaire était réduit à « semaine A »
+/// et disparaissait des semaines B en mode hors-ligne.
+const String kWeekTypeAllSentinel = 'ALL';
+
+/// Lit `week_type` du cache Drift → valeur brute serveur ('A' | 'B' | null).
+String? _weekTypeFromLocal(String? raw) =>
+    (raw == null || raw == kWeekTypeAllSentinel) ? null : raw;
 
 /// Persiste les entrées EDT dans le cache Drift (upsert par id).
 Future<void> _saveScheduleToLocal(
@@ -225,7 +236,8 @@ Future<void> _saveScheduleToLocal(
             startTime: d.Value(e.startTime),
             endTime: d.Value(e.endTime),
             room: d.Value(e.room),
-            weekType: d.Value(e.weekTypeRaw ?? 'A'),
+            weekType: d.Value(
+                e.weekTypeRaw ?? kWeekTypeAllSentinel),
             syncedAt: d.Value(DateTime.now()),
           ),
         );
@@ -301,7 +313,7 @@ Future<List<WeeklyScheduleDto>> _teacherScheduleFromLocal(
               startTime: r.startTime ?? '',
               endTime: r.endTime ?? '',
               room: r.room,
-              weekTypeRaw: r.weekType,
+              weekTypeRaw: _weekTypeFromLocal(r.weekType),
             ))
         .toList();
   } catch (_) {

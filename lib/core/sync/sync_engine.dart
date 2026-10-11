@@ -862,7 +862,12 @@ class SyncEngine {
                   // Notes, EDT) ne détectait aucune classe de titulariat.
                   teacherId: Value(
                       _rIntN(row, 'head_teacher_id') ?? _rIntN(row, 'teacher_id')),
-                  capacity: Value(_rInt(row, 'capacity', d: 0)),
+                  // [Fix-SYNC-FIELD-MAP] Le serveur envoie `max_students`
+                  // (colonne réelle de Classroom) — l'ancienne lecture
+                  // `capacity` était TOUJOURS nulle : la capacité des classes
+                  // était perdue hors-ligne (barre d'occupation à 0).
+                  capacity: Value(
+                      _rInt(row, 'max_students', d: _rInt(row, 'capacity', d: 0))),
                   schoolYearId: Value(_rIntN(row, 'school_year_id')),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
@@ -918,9 +923,14 @@ class SyncEngine {
                   id: Value(_rId(row)),
                   classSubjectId: _rInt(row, 'class_subject_id'),
                   periodId: Value(_rIntN(row, 'period_id')),
-                  title: _rStr(row, 'title'),
+                  // [Fix-SYNC-FIELD-MAP] Le serveur envoie `name` /
+                  // `date_taken` (colonnes réelles du modèle Assessment) —
+                  // l'ancienne lecture `title` / `date` était TOUJOURS vide.
+                  title:
+                      _rStrN(row, 'title') ?? _rStrN(row, 'name') ?? '',
                   type: Value(_rStr(row, 'type', d: 'DEVOIR')),
-                  date: Value(_rDt(row, 'date')),
+                  date: Value(
+                      _rDt(row, 'date') ?? _rDt(row, 'date_taken')),
                   maxScore: Value(_rDbl(row, 'max_score', d: 20.0)),
                   coefficient: Value(_rDbl(row, 'coefficient', d: 1.0)),
                   syncedAt: Value(syncedAt),
@@ -1158,7 +1168,10 @@ class SyncEngine {
                   subjectId: Value(_rIntN(row, 'subject_id')),
                   teacherId: Value(_rIntN(row, 'teacher_id')),
                   date: _rDt(row, 'date') ?? DateTime.now(),
-                  startTime: Value(_rStrN(row, 'start_time')),
+                  // [Fix-SYNC-FIELD-MAP] Colonne réelle :
+                  // scheduled_start_time (miroir de CourseSession).
+                  startTime: Value(_rStrN(row, 'start_time') ??
+                      _rStrN(row, 'scheduled_start_time')),
                   endTime: Value(_rStrN(row, 'end_time')),
                   state: Value(_rStr(row, 'state', d: 'PENDING')),
                   lessonRecordId: Value(_rIntN(row, 'lesson_record_id')),
