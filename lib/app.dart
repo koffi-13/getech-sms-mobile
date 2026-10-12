@@ -514,6 +514,14 @@ class _GeTechAppState extends ConsumerState<GeTechApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // [Notif-V9] Pont de navigation : un clic sur une notification SYSTÈME
+    // (rappel de cours…) ouvre la route portée par son payload
+    // (ex. '/attendance') via le GoRouter de l'application.
+    NotificationService.onOpenRoute = (route) {
+      final router = ref.read(goRouterProvider);
+      if (router.canPop()) router.pop();
+      router.push(route);
+    };
     _remindersTimer = Timer.periodic(const Duration(minutes: 15), (_) {
       _rescheduleRemindersIfNeeded();
     });

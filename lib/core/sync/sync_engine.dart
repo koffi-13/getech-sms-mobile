@@ -223,47 +223,89 @@ class SyncEngine {
     final url = buildUrl(conn.serverUrl!, ApiEndpoints.syncPull);
 
     try {
-      _log.i('Pull depuis $url (since=${since.toIso8601String()})');
-      final resp = await dio.getJson<Map<String, dynamic>>(
-        url,
-        query: {'since': since.toUtc().toIso8601String()},
-      );
-      final data = resp.data;
-      if (data == null) {
-        return SyncResult(
-          timestamp: DateTime.now(),
-          errors: ['Réponse vide du serveur'],
+      // [Fix-SYNC-PULL-SHAPE] Le serveur pagine à `limit_per_table`
+      // (défaut 400) et l'ancien client ne récupérait QUE la première
+      // page — pire, le curseur avançait ensuite à `server_time`, donc
+      // les lignes au-delà de la page 1 n'étaient JAMAIS répliquées.
+      // On demande maintenant le maximum serveur (2000) et on pagine
+      // tant qu'une table signale `has_more`.
+      const kPullLimit = 2000;
+      const kMaxPages = 30; // 2000×30 = 60 000 lignes/table max.
+      var pulled = 0;
+      SyncPullResponse? lastPage;
+      final pageErrors = <String>[];
+
+      for (var page = 0; page < kMaxPages; page++) {
+        _log.i('Pull depuis $url (since=${since.toIso8601String()}, '
+            'page=$page)');
+        final resp = await dio.getJson<Map<String, dynamic>>(
+          url,
+          query: {
+            'since': since.toUtc().toIso8601String(),
+            'limit_per_table': kPullLimit,
+            'reconcile': 'true',
+            if (page > 0) 'offset': page * kPullLimit,
+          },
         );
+        final data = resp.data;
+        if (data == null) {
+          return SyncResult(
+            timestamp: DateTime.now(),
+            errors: ['Réponse vide du serveur'],
+          );
+        }
+
+        final pullResp = SyncPullResponse.fromJson(data);
+        lastPage = pullResp;
+        _log.i('Pull reçu (page $page) : ${pullResp.totalChanges} '
+            'changements${pullResp.anyHasMore ? ' (pagination en cours)' : ''}');
+
+        final notifier = _ref.read(syncProgressProvider.notifier);
+        final total = pullResp.changes.length + 1;
+        var processed = 0;
+        for (final entry in pullResp.changes.entries) {
+          processed++;
+          notifier.update(SyncStatus.processing,
+              0.1 + (0.3 * (processed / total)), 'Traitement de ${entry.key}...');
+          await _applyTableChanges(entry.key, entry.value, pullResp.serverTime);
+        }
+        pulled += pullResp.totalChanges;
+
+        if (pullResp.deleted.isNotEmpty) {
+          await _applyDeletes(pullResp.deleted, pullResp.serverTime);
+        }
+
+        // Réconciliation des suppressions : ids actifs serveur vs cache
+        // local (uniquement pour les tables complètes — pas en pagination).
+        if (!pullResp.anyHasMore) {
+          await _reconcileDeletedRows(pullResp);
+        }
+
+        if (!pullResp.anyHasMore) break;
+        if (pullResp.totalChanges == 0) {
+          // Sécurité : has_more sans rien recevoir → on arrête pour éviter
+          // une boucle infinie (serveur ancien sans support d'offset).
+          pageErrors.add('Pagination interrompue (serveur sans offset ?)');
+          break;
+        }
       }
 
-      final pullResp = SyncPullResponse.fromJson(data);
-      _log.i('Pull reçu : ${pullResp.totalChanges} changements, '
-          '${pullResp.deleted.length} suppressions');
-
-      final notifier = _ref.read(syncProgressProvider.notifier);
-      int processed = 0;
-      final total = pullResp.changes.length + (pullResp.deleted.isNotEmpty ? 1 : 0);
-
-      for (final entry in pullResp.changes.entries) {
-        processed++;
-        notifier.update(SyncStatus.processing, 0.1 + (0.3 * (processed/total)), 'Traitement de ${entry.key}...');
-        await _applyTableChanges(entry.key, entry.value, pullResp.serverTime);
+      final pullResp = lastPage ??
+          SyncPullResponse(serverTime: DateTime.now().toUtc());
+      if (pageErrors.isNotEmpty) {
+        _log.w('Pull : ${pageErrors.join('; ')}');
       }
 
-      if (pullResp.deleted.isNotEmpty) {
-        notifier.update(SyncStatus.processing, 0.4, 'Traitement des suppressions...');
-        await _applyDeletes(pullResp.deleted, pullResp.serverTime);
-      }
+      await _ref.read(connectionProvider.notifier).recordSync(count: pulled);
 
-      await _ref
-          .read(connectionProvider.notifier)
-          .recordSync(count: pullResp.totalChanges);
-
-      await _updateSyncMetadata(pullResp.serverTime, pullResp.totalChanges);
+      // Le curseur n'avance qu'après la DERNIÈRE page (sinon les pages
+      // suivantes auraient filtré les lignes déjà reçues).
+      await _updateSyncMetadata(pullResp.serverTime, pulled);
 
       return SyncResult(
-        pulled: pullResp.totalChanges,
+        pulled: pulled,
         timestamp: pullResp.serverTime,
+        errors: pageErrors,
       );
     } on ApiException catch (e) {
       _log.w('Pull échoué (API) : ${e.message}');
@@ -271,6 +313,72 @@ class SyncEngine {
     } catch (e) {
       _log.e('Pull échoué (inattendu) : $e');
       return SyncResult(timestamp: DateTime.now(), errors: [e.toString()]);
+    }
+  }
+
+  /// [Fix-SYNC-PULL-SHAPE] Réconciliation des suppressions : pour chaque
+  /// table dont le serveur a renvoyé la liste COMPLÈTE des ids actifs
+  /// (`reconcile=true` + `has_more=false`), les lignes locales non sales
+  /// (`isDirty=false`) absentes de cette liste sont marquées supprimées.
+  ///
+  /// L'ancien code attendait un champ `deleted` que le serveur n'envoie
+  /// JAMAIS : les suppressions distantes n'étaient donc jamais répliquées.
+  Future<void> _reconcileDeletedRows(SyncPullResponse resp) async {
+    for (final entry in resp.activeIdsByTable.entries) {
+      final activeIds = entry.value;
+      if (activeIds == null) continue; // table incomplète (pagination).
+      final localIds = await _localIdsForTable(entry.key);
+      if (localIds == null) continue; // table non répliquée localement.
+      final active = activeIds.toSet();
+      final missing = localIds.where((id) => !active.contains(id)).toList();
+      if (missing.isEmpty) continue;
+      _log.i('Réconciliation ${entry.key} : ${missing.length} suppression(s)');
+      for (final id in missing) {
+        await _updateRowSyncState(entry.key, id, resp.serverTime,
+            deleted: true);
+      }
+    }
+  }
+
+  /// Ids locaux non sales d'une table répliquée (null si table inconnue).
+  Future<List<int>?> _localIdsForTable(String table) async {
+    try {
+      switch (table) {
+        case 'classrooms':
+          return (await (_db.select(_db.classrooms)
+                    ..where((t) => t.isDirty.equals(false)))
+                  .get())
+              .map((r) => r.id)
+              .toList();
+        case 'class_subjects':
+          return (await (_db.select(_db.classSubjects)
+                    ..where((t) => t.isDirty.equals(false)))
+                  .get())
+              .map((r) => r.id)
+              .toList();
+        case 'assessments':
+          return (await (_db.select(_db.assessments)
+                    ..where((t) => t.isDirty.equals(false)))
+                  .get())
+              .map((r) => r.id)
+              .toList();
+        case 'students':
+          return (await (_db.select(_db.students)
+                    ..where((t) => t.isDirty.equals(false)))
+                  .get())
+              .map((r) => r.id)
+              .toList();
+        case 'subjects':
+          return (await (_db.select(_db.subjects)
+                    ..where((t) => t.isDirty.equals(false)))
+                  .get())
+              .map((r) => r.id)
+              .toList();
+        default:
+          return null; // tables sans réconciliation locale (satellites…).
+      }
+    } catch (_) {
+      return null;
     }
   }
 

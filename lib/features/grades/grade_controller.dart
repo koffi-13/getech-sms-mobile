@@ -28,6 +28,7 @@ import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
 import '../../core/sync/outbox.dart';
+import '../../core/utils/formatters.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
 import '../../shared/models/grade_dto.dart';
@@ -665,7 +666,13 @@ final classSubjectsProvider = FutureProvider.autoDispose
       buildUrl(conn.serverUrl!, ApiEndpoints.gradesClassSubjects),
       queryParameters: {'classroom_id': classroomId},
     );
-    return _parseClassSubjectList(resp.data);
+    final list = _parseClassSubjectList(resp.data);
+    // [Fix-OFFLINE-GRADES-CACHE] Cache-aside : les matières par classe sont
+    // persistées dans Drift — sans cela, la chaîne offline de la saisie des
+    // notes (évaluation → matière → classe → élèves) cassait dès que le
+    // serveur devenait injoignable.
+    await _cacheClassSubjectsFromDtos(ref, classroomId, list);
+    return list;
   } on DioException catch (e) {
     final api = (e.error is ApiException)
         ? e.error as ApiException
@@ -754,7 +761,12 @@ final assessmentsProvider = FutureProvider.autoDispose
         'period_id': q.periodId,
       },
     );
-    return _parseAssessmentList(resp.data);
+    final list = _parseAssessmentList(resp.data);
+    // [Fix-OFFLINE-GRADES-CACHE] Cache-aside : les évaluations sont
+    // persistées dans Drift pour la consultation et la SAISIE hors-ligne
+    // (« Aucun élève à noter » venait d'une table assessments vide).
+    await _cacheAssessmentsFromDtos(ref, list);
+    return list;
   } on DioException catch (e) {
     final api = (e.error is ApiException)
         ? e.error as ApiException
@@ -863,6 +875,10 @@ final assessmentGradesProvider = FutureProvider.autoDispose
     final entries = _parseGradeEntryList(resp.data);
     // Réconcilie les marques serveur dans Drift (affichage hors-ligne).
     await _reconcileServerMarks(ref, assessmentId, entries);
+    // [Fix-OFFLINE-GRADES-CACHE] Cache-aside : lignes de notes + élèves
+    // référencés persistés — garantit la chaîne complète hors-ligne
+    // (évaluation → matière → classe → assignations → élèves → notes).
+    await _cacheGradeEntriesFromDtos(ref, assessmentId, entries);
     return entries;
   } on DioException catch (e) {
     final api = (e.error is ApiException)
@@ -941,6 +957,211 @@ Future<void> _reconcileServerMarks(
   }
 }
 
+/// [Fix-OFFLINE-GRADES-CACHE] Persiste les matières-par-classe (et leurs
+/// matières) issues de `GET /grades/class-subjects` dans Drift — upsert par
+/// id, best-effort, jamais bloquant pour l'affichage en ligne.
+Future<void> _cacheClassSubjectsFromDtos(
+    Ref ref, int classroomId, List<ClassSubjectDto> list) async {
+  if (list.isEmpty) return;
+  try {
+    final db = ref.read(databaseProvider);
+    final now = DateTime.now();
+    await db.batch((b) {
+      for (final cs in list) {
+        // Matière (carte minimale : le nom sert aux affichages offline).
+        if (cs.subjectId != 0 && cs.subjectName.isNotEmpty) {
+          b.insert(
+              db.subjects,
+              SubjectsCompanion.insert(
+                id: d.Value(cs.subjectId),
+                name: cs.subjectName,
+                code: d.Value(cs.subjectCode.isEmpty ? null : cs.subjectCode),
+                syncedAt: d.Value(now),
+                isDirty: const d.Value(false),
+                isDeleted: const d.Value(false),
+              ),
+              mode: d.InsertMode.insertOrIgnore);
+        }
+        b.insert(
+            db.classSubjects,
+            ClassSubjectsCompanion.insert(
+              id: d.Value(cs.id),
+              classroomId: cs.classroomId ?? classroomId,
+              subjectId: cs.subjectId,
+              coefficient: d.Value(cs.coefficient),
+              teacherId: d.Value(cs.assignedTeacherId),
+              syncedAt: d.Value(now),
+              isDirty: const d.Value(false),
+              isDeleted: const d.Value(false),
+            ),
+            mode: d.InsertMode.insertOrIgnore);
+      }
+    });
+  } catch (_) {
+    // Best-effort.
+  }
+}
+
+/// [Fix-OFFLINE-GRADES-CACHE] Persiste les évaluations issues de
+/// `GET /grades/assessments` dans Drift — la table `assessments` était
+/// uniquement remplie par /sync/pull (jamais fonctionnel) : hors-ligne,
+/// la liste ET la saisie tombaient sur « Aucun élève à noter ».
+Future<void> _cacheAssessmentsFromDtos(
+    Ref ref, List<AssessmentDto> list) async {
+  if (list.isEmpty) return;
+  try {
+    final db = ref.read(databaseProvider);
+    final now = DateTime.now();
+    await db.batch((b) {
+      for (final a in list) {
+        b.insert(
+            db.assessments,
+            AssessmentsCompanion.insert(
+              id: d.Value(a.id),
+              classSubjectId: a.classSubjectId ?? 0,
+              periodId: d.Value(a.periodId),
+              title: a.name,
+              type: d.Value(a.assessmentTypeName.isEmpty
+                  ? 'DEVOIR'
+                  : a.assessmentTypeName),
+              date: d.Value(DateFormatter.parse(a.dateTaken)),
+              maxScore: d.Value(a.maxScore),
+              coefficient: d.Value(a.coefficient),
+              syncedAt: d.Value(now),
+              isDirty: const d.Value(false),
+              isDeleted: const d.Value(false),
+            ),
+            mode: d.InsertMode.insertOrIgnore);
+      }
+    });
+  } catch (_) {
+    // Best-effort.
+  }
+}
+
+/// [Fix-OFFLINE-GRADES-CACHE] Persiste les lignes de notes d'une évaluation
+/// (ids serveur) + les élèves référencés (carte minimale, sans écraser les
+/// données locales plus riches).
+///
+/// Les lignes existantes sont mises à jour (valeur/absence/commentaire)
+/// UNIQUEMENT si elles ne portent pas de marque locale en cours
+/// (`syncStatus` null et non sales) — jamais d'écrasement d'une proposition.
+Future<void> _cacheGradeEntriesFromDtos(
+    Ref ref, int assessmentId, List<GradeEntryDto> entries) async {
+  if (entries.isEmpty) return;
+  try {
+    final db = ref.read(databaseProvider);
+    final now = DateTime.now();
+
+    // 1) Élèves référencés (insertOrIgnore : ne touche jamais aux fiches
+    //    existantes, plus riches, écrites par le module Élèves).
+    await db.batch((b) {
+      for (final e in entries) {
+        b.insert(
+            db.students,
+            StudentsCompanion.insert(
+              id: d.Value(e.studentId),
+              nom: e.studentName.isEmpty ? '—' : e.studentName,
+              matricule: e.studentMatricule,
+              syncedAt: d.Value(now),
+              isDirty: const d.Value(false),
+              isDeleted: const d.Value(false),
+            ),
+            mode: d.InsertMode.insertOrIgnore);
+      }
+    });
+
+    // 1bis) [Fix-OFFLINE-GRADES-ROSTER] Registre de classe : le serveur
+    // renvoie une ligne PAR ÉLÈVE de la classe — on persiste donc AUSSI le
+    // lien élève ↔ classe dans `student_class_assignments`. Sans cela, la
+    // chaîne hors-ligne (évaluation → matière → classe → assignations →
+    // élèves) cassait même après une consultation en ligne : la
+    // reconstruction tombait sur « Aucun élève à noter pour cette
+    // évaluation » alors que les élèves venaient d'être affichés.
+    // Best-effort, dans son propre try : ne bloque jamais le cache des notes.
+    try {
+      final assessmentRow = await (db.select(db.assessments)
+            ..where((t) => t.id.equals(assessmentId)))
+          .getSingleOrNull();
+      if (assessmentRow != null) {
+        final classroomId = await (db.selectOnly(db.classSubjects)
+              ..addColumns([db.classSubjects.classroomId])
+              ..where(db.classSubjects.id
+                  .equals(assessmentRow.classSubjectId)))
+            .map((row) => row.read(db.classSubjects.classroomId))
+            .getSingleOrNull();
+        if (classroomId != null) {
+          final existing = await (db.select(db.studentClassAssignments)
+                ..where((t) => t.classroomId.equals(classroomId))
+                ..where((t) => t.isDeleted.equals(false)))
+              .get();
+          final known = existing.map((a) => a.studentId).toSet();
+          final missing = entries
+              .map((e) => e.studentId)
+              .toSet()
+              .difference(known)
+              .toList();
+          if (missing.isNotEmpty) {
+            await db.batch((b) {
+              for (final sid in missing) {
+                b.insert(
+                  db.studentClassAssignments,
+                  StudentClassAssignmentsCompanion.insert(
+                    studentId: sid,
+                    classroomId: classroomId,
+                    syncedAt: d.Value(now),
+                    isDirty: const d.Value(false),
+                    isDeleted: const d.Value(false),
+                  ),
+                );
+              }
+            });
+          }
+        }
+      }
+    } catch (_) {
+      // Registre best-effort : jamais bloquant.
+    }
+
+    // 2) Lignes de notes (seulement celles avec un id serveur).
+    final withGradeId =
+        entries.where((e) => e.gradeId != null).toList(growable: false);
+    if (withGradeId.isEmpty) return;
+    for (final e in withGradeId) {
+      final existing = await (db.select(db.grades)
+            ..where((t) => t.id.equals(e.gradeId!)))
+          .getSingleOrNull();
+      if (existing == null) {
+        await db
+            .into(db.grades)
+            .insert(GradesCompanion.insert(
+              id: d.Value(e.gradeId!),
+              assessmentId: assessmentId,
+              studentId: e.studentId,
+              value: d.Value(e.value),
+              isAbsent: d.Value(e.isAbsent),
+              comments: d.Value(e.comment),
+              syncedAt: d.Value(now),
+              isDirty: const d.Value(false),
+              isDeleted: const d.Value(false),
+            ),
+                mode: d.InsertMode.insertOrIgnore);
+      } else if (!existing.isDirty && existing.syncStatus == null) {
+        // Mise à jour des valeurs serveur sans toucher aux marques.
+        await (db.update(db.grades)..where((t) => t.id.equals(e.gradeId!)))
+            .write(GradesCompanion(
+          value: d.Value(e.value),
+          isAbsent: d.Value(e.isAbsent),
+          comments: d.Value(e.comment),
+          syncedAt: d.Value(now),
+        ));
+      }
+    }
+  } catch (_) {
+    // Best-effort.
+  }
+}
+
 /// Reconstruction hors-ligne des lignes de notes d'une évaluation :
 /// Drift (notes répliquées + marques) + outbox (soumissions en attente).
 Future<List<GradeEntryDto>> _gradeEntriesFromLocal(
@@ -965,7 +1186,18 @@ Future<List<GradeEntryDto>> _gradeEntriesFromLocal(
         ..where((t) => t.classroomId.equals(classSubject.classroomId))
         ..where((t) => t.isDeleted.equals(false)))
       .get();
-  final studentIds = assignmentRows.map((a) => a.studentId).toSet();
+  var studentIds = assignmentRows.map((a) => a.studentId).toSet();
+  if (studentIds.isEmpty) {
+    // [Fix-OFFLINE-GRADES-ROSTER] Repli : aucune assignation en cache pour
+    // cette classe → on reconstruit la liste depuis les élèves référencés
+    // par les notes DÉJÀ répliquées de cette évaluation (consultée en
+    // ligne auparavant). Meilleur effort : liste partielle > liste vide.
+    final gradeOnlyRows = await (db.select(db.grades)
+          ..where((t) => t.assessmentId.equals(assessmentId))
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    studentIds = gradeOnlyRows.map((g) => g.studentId).toSet();
+  }
   if (studentIds.isEmpty) return const [];
   final studentRows = await (db.select(db.students)
         ..where((t) => t.id.isIn(studentIds))

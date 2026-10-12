@@ -26,7 +26,6 @@ import '../../shared/widgets/widgets.dart';
 import '../classrooms/classroom_controller.dart';
 import '../connections/connection_state.dart';
 import 'student_controller.dart';
-import 'student_export_dialog.dart';
 import 'student_photos.dart';
 
 class StudentsListPage extends ConsumerStatefulWidget {
@@ -96,11 +95,9 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
             tooltip: 'Rafraîchir',
             onPressed: _refresh,
           ),
-          IconButton(
-            icon: const Icon(Icons.file_upload_outlined),
-            tooltip: 'Export / Import',
-            onPressed: () => _openImportExport(context),
-          ),
+          // [Fix-ELEVES-EXPORT] Bouton « Export / Import » retiré sur demande
+          // utilisateur (retour V9) : l'import/export en masse reste
+          // disponible côté serveur desktop.
         ],
       ),
       body: RefreshIndicator(
@@ -299,16 +296,22 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
 
   void _openClassroomPicker(BuildContext context,
       AsyncValue<List<ClassroomDto>> async, TeacherScope? scope) {
-    // [Fix-TEACHER-STUDENTS-SCOPE] Un enseignant ne filtre que parmi SES
-    // classes ; « toutes » signifie « toutes SES classes ».
+    // [Fix-TEACHER-CLASSES-SCOPE-V9] Un enseignant ne filtre que parmi SES
+    // classes — l'ancien code partait de TOUTES les classes puis y AJOUTAIT
+    // celles du périmètre (union) : le filtre « Mes classes » listait donc
+    // toutes les classes de l'établissement. On fait maintenant une
+    // INTERSECTION : cartes riches de /classrooms limitées au périmètre,
+    // complétées par les cartes du scope (classes absentes du serveur).
     final restricted =
         scope != null && scope.isTeacher && !scope.isAdminOrHeadmaster;
     var list = async.value ?? [];
     if (restricted) {
+      final myIds = scope!.myClassroomIds;
       final byId = <int, ClassroomDto>{
-        for (final c in list) c.id: c,
+        for (final c in list)
+          if (myIds.contains(c.id)) c.id: c,
       };
-      for (final c in scope!.myClassrooms) {
+      for (final c in scope.myClassrooms) {
         byId.putIfAbsent(c.id, () => c);
       }
       list = byId.values.toList()..sort((a, b) => a.name.compareTo(b.name));
@@ -426,13 +429,6 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
           ],
         ),
       ),
-    );
-  }
-
-  void _openImportExport(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (ctx) => const StudentExportDialog(),
     );
   }
 }

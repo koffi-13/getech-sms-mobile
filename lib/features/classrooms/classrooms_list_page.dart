@@ -74,12 +74,18 @@ class _ClassroomsListPageState extends ConsumerState<ClassroomsListPage> {
                   var visible = classrooms;
                   var headIds = const <int>{};
                   if (restricted) {
-                    // L'enseignant ne voit que SES classes (enseignement ∪
-                    // titulariat) ; les données du scope complètent les
-                    // classes synthétisées depuis l'EDT (absentes de
-                    // /classrooms quand la matière est inactive).
+                    // [Fix-TEACHER-CLASSES-SCOPE-V9] INTERSECTION (l'ancien
+                    // code faisait une UNION : il partait de TOUTES les
+                    // classes puis y AJOUTAIT celles du périmètre →
+                    // l'enseignant voyait TOUTES les classes de
+                    // l'établissement). L'enseignant ne voit que SES classes
+                    // (enseignement ∪ titulariat) ; les cartes du scope
+                    // complètent celles absentes de /classrooms (matière
+                    // inactive → classe synthétisée depuis l'EDT).
+                    final myIds = scope.myClassroomIds;
                     final byId = <int, ClassroomDto>{
-                      for (final c in classrooms) c.id: c,
+                      for (final c in classrooms)
+                        if (myIds.contains(c.id)) c.id: c,
                     };
                     for (final c in scope.myClassrooms) {
                       byId.putIfAbsent(c.id, () => c);

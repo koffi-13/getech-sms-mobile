@@ -41,7 +41,7 @@ const Duration _modsCheckThrottle = Duration(minutes: 5);
 
 /// Réglages de notifications (persistés dans SharedPreferences).
 ///
-/// [Fix-NOTIFS] Les notifications « utiles et nécessaires » seulement :
+/// [Notif-V9] Les notifications « utiles et nécessaires » seulement :
 /// chaque famille peut être désactivée depuis Paramètres.
 class NotificationSettings {
   NotificationSettings._({
@@ -50,15 +50,19 @@ class NotificationSettings {
     required this.syncUpdates,
   });
 
-  /// Rappels de cours (enseignants) : 2 min avant, début, fin de créneau.
+  /// Rappels de cours (enseignants) : 2 min avant le début (appel /
+  /// présence) et 5 min avant la fin (cahier de texte).
   final bool courseReminders;
 
   /// Suivi de la validation des notes (admin : nouvelles propositions ;
   /// enseignant : décisions reçues).
   final bool gradesValidation;
 
-  /// Résultat des synchronisations (éléments reçus/envoyés, envoi de
-  /// l'outbox après une période hors-ligne).
+  /// Résultats des synchronisations (éléments reçus/envoyés).
+  ///
+  /// [Notif-V9] Désactivé PAR DÉFAUT : perçu comme des « notifications de
+  /// développement » (retour utilisateur) — la synchronisation est un
+  /// détail technique qui n'exige pas d'interrompre l'utilisateur.
   final bool syncUpdates;
 
   static const _kCourse = 'getech.notif.course_reminders';
@@ -70,7 +74,8 @@ class NotificationSettings {
     return NotificationSettings._(
       courseReminders: prefs.getBool(_kCourse) ?? true,
       gradesValidation: prefs.getBool(_kGrades) ?? true,
-      syncUpdates: prefs.getBool(_kSync) ?? true,
+      // [Notif-V9] OFF par défaut (voir docstring de [syncUpdates]).
+      syncUpdates: prefs.getBool(_kSync) ?? false,
     );
   }
 
@@ -100,6 +105,12 @@ class NotificationService {
   NotificationService(this._ref);
 
   final Ref _ref;
+
+  /// [Notif-V9] Pont de navigation pour les notifications SYSTÈME : le
+  /// service ne peut pas importer `app.dart` (dépendance circulaire) — la
+  /// racine de l'app enregistre ici un callback qui ouvre la route portée
+  /// par le payload (ex. '/attendance' pour un rappel de cours).
+  static void Function(String route)? onOpenRoute;
 
   FlutterLocalNotificationsPlugin? _plugin;
   bool _timezoneReady = false;
@@ -137,7 +148,18 @@ class NotificationService {
       android: androidInit,
       iOS: iosInit,
     );
-    final ok = await plugin.initialize(settings);
+    final ok = await plugin.initialize(
+      settings,
+      // [Notif-V9] Ouverture de la route portée par le payload (ex.
+      // '/attendance' pour un rappel de cours) via le pont statique
+      // enregistré par la racine de l'application.
+      onDidReceiveNotificationResponse: (resp) {
+        final route = resp.payload;
+        if (route != null && route.startsWith('/')) {
+          onOpenRoute?.call(route);
+        }
+      },
+    );
     if (ok != true) {
       _plugin = null;
       return false;
@@ -216,7 +238,11 @@ class NotificationService {
       final classroom = course.classroomName ?? '';
       final room = course.room;
 
-      // a) 2 min avant le début.
+      // [Notif-V9] Exactement DEUX rappels par créneau (retour
+      // utilisateur) :
+      // a) 2 min avant le début → PENSER À L'APPEL (présence) ;
+      // b) 5 min avant la fin → REMPLIR LE CAHIER DE TEXTE.
+      // L'ancien 3e rappel « à l'heure du début » faisait doublon avec (a).
       final t2 = startDt.subtract(const Duration(minutes: 2));
       if (t2.isAfter(now.add(const Duration(seconds: 60)))) {
         scheduled.add(_CourseReminder(
@@ -224,28 +250,20 @@ class NotificationService {
           'Cours dans 2 minutes',
           '$subject — $classroom'
           '${room != null && room.isNotEmpty ? ' (salle $room)' : ''}. '
-          'Au démarrage, pensez à vérifier la présence des élèves.',
+          'Au démarrage, pensez à faire l\'appel (Présence).',
+          route: '/attendance',
         ));
       }
 
-      // b) à l'heure : vérifier la présence.
-      if (startDt.isAfter(now.add(const Duration(seconds: 60)))) {
-        scheduled.add(_CourseReminder(
-          startDt,
-          'Le cours commence',
-          '$subject ($classroom) : vérifiez la présence des élèves avant '
-          'de démarrer.',
-        ));
-      }
-
-      // c) 5 min avant la fin.
       if (endDt != null) {
         final tEnd = endDt.subtract(const Duration(minutes: 5));
         if (tEnd.isAfter(now.add(const Duration(seconds: 60)))) {
           scheduled.add(_CourseReminder(
             tEnd,
-            'Créneau bientôt terminé',
-            'Votre créneau de $subject ($classroom) se termine dans 5 minutes.',
+            'Fin de cours dans 5 minutes',
+            'Pensez à remplir le cahier de texte de $subject ($classroom) '
+            'avant la fin du créneau.',
+            route: '/attendance',
           ));
         }
       }
@@ -259,6 +277,7 @@ class NotificationService {
         title: r.title,
         body: r.body,
         when: r.when,
+        route: r.route,
       );
     }
     return scheduled.length;
@@ -291,6 +310,7 @@ class NotificationService {
     required String title,
     required String body,
     required DateTime when,
+    String? route,
   }) async {
     final plugin = _plugin;
     if (plugin == null) return;
@@ -298,7 +318,8 @@ class NotificationService {
       android: AndroidNotificationDetails(
         'getech_sms_cours',
         'Rappels de cours',
-        channelDescription: 'Rappels avant le début et la fin de vos cours',
+        channelDescription:
+            'Appel (2 min avant le début) et cahier de texte (5 min avant la fin)',
         importance: Importance.high,
         priority: Priority.high,
       ),
@@ -314,6 +335,7 @@ class NotificationService {
         body,
         tzWhen,
         details,
+        payload: route,
         androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
@@ -326,6 +348,7 @@ class NotificationService {
           body,
           tzWhen,
           details,
+          payload: route,
           androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
           uiLocalNotificationDateInterpretation:
               UILocalNotificationDateInterpretation.absoluteTime,
@@ -535,16 +558,20 @@ class NotificationService {
       iOS: DarwinNotificationDetails(),
     );
     try {
-      await _plugin!.show(tag.hashCode, title, body, details);
+      await _plugin!.show(tag.hashCode, title, body, details, payload: route);
     } catch (_) {}
   }
 }
 
 class _CourseReminder {
-  const _CourseReminder(this.when, this.title, this.body);
+  const _CourseReminder(this.when, this.title, this.body, {this.route});
   final DateTime when;
   final String title;
   final String body;
+
+  /// [Notif-V9] Route à ouvrir au clic sur la notification système
+  /// (ex. '/attendance').
+  final String? route;
 }
 
 /// Provider du service de notifications.

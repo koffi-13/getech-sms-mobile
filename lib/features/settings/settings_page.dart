@@ -236,7 +236,8 @@ class _NotificationsSection extends ConsumerWidget {
                   secondary: const Icon(Icons.school_outlined),
                   title: const Text('Rappels de cours'),
                   subtitle: const Text(
-                      'Avant le début et la fin de vos créneaux (enseignants)'),
+                      '2 min avant le début (appel) et 5 min avant la fin '
+                      '(cahier de texte)'),
                   value: settings.courseReminders,
                   onChanged: (v) async {
                     await settings.save(courseReminders: v);
@@ -258,7 +259,8 @@ class _NotificationsSection extends ConsumerWidget {
                   secondary: const Icon(Icons.sync_outlined),
                   title: const Text('Résultats de synchronisation'),
                   subtitle: const Text(
-                      'Données reçues/envoyées après chaque synchronisation'),
+                      'Désactivé par défaut (technique) — activez pour suivre '
+                      'les données reçues/envoyées'),
                   value: settings.syncUpdates,
                   onChanged: (v) async {
                     await settings.save(syncUpdates: v);

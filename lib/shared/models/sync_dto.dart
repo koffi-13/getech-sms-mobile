@@ -199,32 +199,114 @@ class OverduePaymentDto {
 // --- Synchro ---
 
 /// Réponse du pull incrémental : `GET /sync/pull?since=<timestamp>`.
+///
+/// [Fix-SYNC-PULL-SHAPE] Le serveur (api/routers/sync.py `PullResponse`)
+/// renvoie RÉELLEMENT :
+/// ```json
+/// {
+///   "server_time": "...",
+///   "max_offline_days": 30,
+///   "tables": {
+///     "students": {"rows": [...], "ids": [1,2,3], "has_more": false},
+///     ...
+///   }
+/// }
+/// ```
+/// L'ancien parseur lisait `changes` / `deleted` — deux champs INEXISTANTS
+/// côté serveur : `changes` était TOUJOURS vide, donc AUCUNE table n'était
+/// jamais répliquée par /sync/pull (le cache Drift ne se remplissait que
+/// par les écritures cache-aside des contrôleurs) — cause directe du
+/// « Aucun élève à noter pour cette évaluation » hors-ligne (chaîne
+/// assessment → class_subject → assignments → students vide en base).
+///
+/// Le nouveau parseur :
+/// - accepte les DEUX formes (`tables` du serveur réel + `changes` legacy) ;
+/// - expose `hasMoreByTable` (pagination `limit_per_table`) ;
+/// - expose `activeIdsByTable` (mode `reconcile=true` : ids actifs serveur,
+///   pour détecter les suppressions côté client).
 class SyncPullResponse {
   final DateTime serverTime;
   final Map<String, List<Map<String, dynamic>>> changes;
   final List<String> deleted; // IDs supprimés côté serveur (soft-delete)
 
+  /// [Fix-SYNC-PULL-SHAPE] `has_more` par table — vrai tant qu'une table
+  /// dépasse `limit_per_table` lignes : le client DOIT paginer.
+  final Map<String, bool> hasMoreByTable;
+
+  /// [Fix-SYNC-PULL-SHAPE] Ids ACTIFS côté serveur (mode reconcile) —
+  /// null quand la table était encore en cours de pagination. Sert à
+  /// marquer localement les lignes disparues (tombstones).
+  final Map<String, List<int>?> activeIdsByTable;
+
   const SyncPullResponse({
     required this.serverTime,
     this.changes = const {},
     this.deleted = const [],
+    this.hasMoreByTable = const {},
+    this.activeIdsByTable = const {},
   });
 
   int get totalChanges =>
       changes.values.fold(0, (sum, list) => sum + list.length);
 
-  factory SyncPullResponse.fromJson(Map<String, dynamic> j) => SyncPullResponse(
-        serverTime: DateFormatter.parse(j['server_time'] as String?) ??
-            DateTime.now().toUtc(),
-        changes: (j['changes'] as Map?)?.map((k, v) => MapEntry(
-              k.toString(),
-              (v as List)
-                  .map((e) => Map<String, dynamic>.from(e as Map))
-                  .toList(),
-            )) ??
-            const {},
-        deleted: List<String>.from(j['deleted'] as List? ?? const []),
-      );
+  /// Au moins une table a encore des pages à récupérer.
+  bool get anyHasMore => hasMoreByTable.values.any((v) => v);
+
+  factory SyncPullResponse.fromJson(Map<String, dynamic> j) {
+    final changes = <String, List<Map<String, dynamic>>>{};
+    final hasMore = <String, bool>{};
+    final activeIds = <String, List<int>?>{};
+
+    // Forme RÉELLE du serveur : `tables: {name: {rows, ids, has_more}}`.
+    final tables = j['tables'];
+    if (tables is Map) {
+      tables.forEach((k, v) {
+        final name = k.toString();
+        if (v is Map) {
+          final rows = v['rows'];
+          changes[name] = (rows is List)
+              ? rows
+                  .whereType<Map>()
+                  .map((e) => Map<String, dynamic>.from(e))
+                  .toList()
+              : const <Map<String, dynamic>>[];
+          hasMore[name] = v['has_more'] == true;
+          // [Fix-SYNC-PULL-SHAPE] `ids` n'est exploitable (réconciliation
+          // des suppressions) QUE si la table est COMPLÈTE : le serveur ne
+          // l'envoie d'ailleurs que quand `has_more` est faux. Par
+          // défense, on ignore `ids` si la table est encore en pagination
+          // (une liste partielle marquerait des lignes saines comme
+          // supprimées).
+          final ids = v['has_more'] == true ? null : v['ids'];
+          activeIds[name] = ids is List
+              ? ids
+                  .map((e) => e is num ? e.toInt() : int.tryParse('$e'))
+                  .whereType<int>()
+                  .toList()
+              : null;
+        }
+      });
+    }
+
+    // Forme legacy (jamais vue en production, gardée par prudence).
+    final legacyChanges = j['changes'];
+    if (legacyChanges is Map && tables is! Map) {
+      legacyChanges.forEach((k, v) {
+        changes[k.toString()] = (v as List)
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+      });
+    }
+
+    return SyncPullResponse(
+      serverTime: DateFormatter.parse(j['server_time'] as String?) ??
+          DateTime.now().toUtc(),
+      changes: changes,
+      deleted: List<String>.from(j['deleted'] as List? ?? const []),
+      hasMoreByTable: hasMore,
+      activeIdsByTable: activeIds,
+    );
+  }
 }
 
 /// Requête de push : `POST /sync/push`.
