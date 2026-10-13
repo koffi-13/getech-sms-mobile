@@ -173,7 +173,13 @@ class GradeController {
           'grades': entries.map((e) => e.toJson()).toList(),
         },
       );
-      _ref.invalidate(assessmentGradesProvider(assessmentId));
+      // [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : clé de famille record —
+      // invalidation best-effort (l'instance regardée par le bas de page
+      // porte l'indice de matière, mais la feuille se ferme après
+      // enregistrement et l'autoDispose la nettoie).
+      _ref.invalidate(assessmentGradesProvider(
+        (assessmentId: assessmentId, classSubjectId: null, periodId: null),
+      ));
       return const SaveGradesResponse(
         offlineQueued: true,
         savedCount: 0,
@@ -198,7 +204,11 @@ class GradeController {
     // 4. Marques locales miroir de la réponse serveur (queued -> 'queued').
     await _mirrorResponseMarks(assessmentId, entries, result);
 
-    _ref.invalidate(assessmentGradesProvider(assessmentId));
+    // [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : clé de famille record (voir
+    // l'invalidation hors-ligne ci-dessus).
+    _ref.invalidate(assessmentGradesProvider(
+      (assessmentId: assessmentId, classSubjectId: null, periodId: null),
+    ));
     _invalidateAssessmentsFor(assessmentId);
     return result;
   }
@@ -293,7 +303,10 @@ class GradeController {
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
     await _dio.delete(buildUrl(url, ApiEndpoints.assessment(id)));
-    _ref.invalidate(assessmentGradesProvider(id));
+    // [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : clé de famille record.
+    _ref.invalidate(assessmentGradesProvider(
+      (assessmentId: id, classSubjectId: null, periodId: null),
+    ));
     _invalidateAssessmentsFor(id);
   }
 
@@ -765,7 +778,21 @@ final assessmentsProvider = FutureProvider.autoDispose
     // [Fix-OFFLINE-GRADES-CACHE] Cache-aside : les évaluations sont
     // persistées dans Drift pour la consultation et la SAISIE hors-ligne
     // (« Aucun élève à noter » venait d'une table assessments vide).
-    await _cacheAssessmentsFromDtos(ref, list);
+    //
+    // [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : la réponse du serveur ne
+    // contient PAS class_subject_id/period_id (champs additionnés côté
+    // serveur, mais le mobile doit aussi réparer les anciens serveurs).
+    // Le CONTEXTE de la requête (matière + période sélectionnées) est donc
+    // passé au cache : sans lui, l'évaluation était écrite avec
+    // classSubjectId=0 et la chaîne hors-ligne (évaluation → matière →
+    // classe → registre → élèves) cassait dès le premier maillon →
+    // « Aucun élève à noter pour cette évaluation ».
+    await _cacheAssessmentsFromDtos(
+      ref,
+      list,
+      classSubjectId: q.classSubjectId,
+      periodId: q.periodId,
+    );
     return list;
   } on DioException catch (e) {
     final api = (e.error is ApiException)
@@ -844,6 +871,11 @@ List<AssessmentDto> _parseAssessmentList(dynamic data) {
 
 /// Notes d'une évaluation (entrées par élève) — [Offline-First].
 ///
+/// Clé de famille : `(assessmentId, classSubjectId)` — l'indice de
+/// matière, connu de la page (matière sélectionnée), répare à chaud les
+/// évaluations mises en cache avec classSubjectId=0 par les versions
+/// précédentes (serveur sans le patch V10).
+///
 /// En ligne : `GET /grades/assessments/{id}/grades` (les marques serveur
 /// `modification_status` sont alors réconciliées dans Drift pour un
 /// affichage cohérent lors des prochaines consultations hors-ligne).
@@ -851,7 +883,10 @@ List<AssessmentDto> _parseAssessmentList(dynamic data) {
 /// queued/rejected) + superposition des soumissions en attente de
 /// l'outbox (notes nouvelles ou propositions pas encore poussées).
 final assessmentGradesProvider = FutureProvider.autoDispose
-    .family<List<GradeEntryDto>, int>((ref, assessmentId) async {
+    .family<List<GradeEntryDto>,
+        ({int assessmentId, int? classSubjectId, int? periodId})>(
+        (ref, q) async {
+  final assessmentId = q.assessmentId;
   // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
   // canReachServer/isChecking ne changent qu'aux transitions d'état.
   final conn = ref.watch(connectionProvider.select((c) => (
@@ -864,7 +899,8 @@ final assessmentGradesProvider = FutureProvider.autoDispose
 
   final definitelyOffline = !conn.canReachServer && !conn.isChecking;
   if (definitelyOffline) {
-    return _gradeEntriesFromLocal(ref, assessmentId);
+    return _gradeEntriesFromLocal(ref, assessmentId,
+        classSubjectIdHint: q.classSubjectId, periodIdHint: q.periodId);
   }
 
   final dio = ref.watch(dioProvider);
@@ -878,7 +914,8 @@ final assessmentGradesProvider = FutureProvider.autoDispose
     // [Fix-OFFLINE-GRADES-CACHE] Cache-aside : lignes de notes + élèves
     // référencés persistés — garantit la chaîne complète hors-ligne
     // (évaluation → matière → classe → assignations → élèves → notes).
-    await _cacheGradeEntriesFromDtos(ref, assessmentId, entries);
+    await _cacheGradeEntriesFromDtos(ref, assessmentId, entries,
+        classSubjectIdHint: q.classSubjectId);
     return entries;
   } on DioException catch (e) {
     final api = (e.error is ApiException)
@@ -887,9 +924,11 @@ final assessmentGradesProvider = FutureProvider.autoDispose
     // [Fix-TEACHER-CLASSES-403] 403 → repli local (liste vide silencieuse
     // auparavant).
     // Réseau indisponible en cours de requête -> repli local.
-    return _gradeEntriesFromLocal(ref, assessmentId);
+    return _gradeEntriesFromLocal(ref, assessmentId,
+        classSubjectIdHint: q.classSubjectId, periodIdHint: q.periodId);
   } catch (_) {
-    return _gradeEntriesFromLocal(ref, assessmentId);
+    return _gradeEntriesFromLocal(ref, assessmentId,
+        classSubjectIdHint: q.classSubjectId, periodIdHint: q.periodId);
   }
 });
 
@@ -1006,8 +1045,21 @@ Future<void> _cacheClassSubjectsFromDtos(
 /// `GET /grades/assessments` dans Drift — la table `assessments` était
 /// uniquement remplie par /sync/pull (jamais fonctionnel) : hors-ligne,
 /// la liste ET la saisie tombaient sur « Aucun élève à noter ».
+///
+/// [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 — `classSubjectId`/`periodId` de
+/// contexte : la réponse du serveur (avant le patch serveur V10) ne
+/// renvoie NI l'un NI l'autre ; l'évaluation était alors écrite avec
+/// classSubjectId=0, ce qui cassait TOUTE la reconstruction hors-ligne
+/// (évaluation → matière → classe → registre → élèves). En plus de
+/// l'écriture correcte des NOUVELLES lignes, un UPDATE ciblé RÉPARE les
+/// lignes déjà en cache portant classSubjectId=0 (empoisonnées par les
+/// versions précédentes) — sans jamais déclasser une valeur correcte.
 Future<void> _cacheAssessmentsFromDtos(
-    Ref ref, List<AssessmentDto> list) async {
+  Ref ref,
+  List<AssessmentDto> list, {
+  int? classSubjectId,
+  int? periodId,
+}) async {
   if (list.isEmpty) return;
   try {
     final db = ref.read(databaseProvider);
@@ -1018,8 +1070,8 @@ Future<void> _cacheAssessmentsFromDtos(
             db.assessments,
             AssessmentsCompanion.insert(
               id: d.Value(a.id),
-              classSubjectId: a.classSubjectId ?? 0,
-              periodId: d.Value(a.periodId),
+              classSubjectId: a.classSubjectId ?? classSubjectId ?? 0,
+              periodId: d.Value(a.periodId ?? periodId),
               title: a.name,
               type: d.Value(a.assessmentTypeName.isEmpty
                   ? 'DEVOIR'
@@ -1034,6 +1086,21 @@ Future<void> _cacheAssessmentsFromDtos(
             mode: d.InsertMode.insertOrIgnore);
       }
     });
+
+    // Réparation ciblée : uniquement les lignes dont la matière est
+    // inconnue (0). Une valeur déjà correcte (sync pull, consultation
+    // précédente) n'est jamais écrasée.
+    for (final a in list) {
+      final csId = a.classSubjectId ?? classSubjectId ?? 0;
+      if (csId == 0) continue;
+      await (db.update(db.assessments)
+            ..where((t) => t.id.equals(a.id))
+            ..where((t) => t.classSubjectId.equals(0)))
+          .write(AssessmentsCompanion(
+        classSubjectId: d.Value(csId),
+        periodId: d.Value(a.periodId ?? periodId),
+      ));
+    }
   } catch (_) {
     // Best-effort.
   }
@@ -1047,7 +1114,11 @@ Future<void> _cacheAssessmentsFromDtos(
 /// UNIQUEMENT si elles ne portent pas de marque locale en cours
 /// (`syncStatus` null et non sales) — jamais d'écrasement d'une proposition.
 Future<void> _cacheGradeEntriesFromDtos(
-    Ref ref, int assessmentId, List<GradeEntryDto> entries) async {
+  Ref ref,
+  int assessmentId,
+  List<GradeEntryDto> entries, {
+  int? classSubjectIdHint,
+}) async {
   if (entries.isEmpty) return;
   try {
     final db = ref.read(databaseProvider);
@@ -1079,15 +1150,21 @@ Future<void> _cacheGradeEntriesFromDtos(
     // reconstruction tombait sur « Aucun élève à noter pour cette
     // évaluation » alors que les élèves venaient d'être affichés.
     // Best-effort, dans son propre try : ne bloque jamais le cache des notes.
+    //
+    // [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : l'indice de matière de la page
+    // répare les lignes empoisonnées (classSubjectId=0, serveur sans le
+    // patch V10) — sans lui, le registre n'était JAMAIS écrit.
     try {
       final assessmentRow = await (db.select(db.assessments)
             ..where((t) => t.id.equals(assessmentId)))
           .getSingleOrNull();
-      if (assessmentRow != null) {
+      final csId = (assessmentRow?.classSubjectId ?? 0) != 0
+          ? assessmentRow!.classSubjectId
+          : classSubjectIdHint;
+      if (csId != null && csId != 0) {
         final classroomId = await (db.selectOnly(db.classSubjects)
               ..addColumns([db.classSubjects.classroomId])
-              ..where(db.classSubjects.id
-                  .equals(assessmentRow.classSubjectId)))
+              ..where(db.classSubjects.id.equals(csId)))
             .map((row) => row.read(db.classSubjects.classroomId))
             .getSingleOrNull();
         if (classroomId != null) {
@@ -1164,10 +1241,17 @@ Future<void> _cacheGradeEntriesFromDtos(
 
 /// Reconstruction hors-ligne des lignes de notes d'une évaluation :
 /// Drift (notes répliquées + marques) + outbox (soumissions en attente).
+///
+/// [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : `classSubjectIdHint` (matière
+/// sélectionnée dans la page) répare à chaud les évaluations mises en
+/// cache avec classSubjectId=0 — l'ancienne chaîne cassait dès le
+/// premier maillon (matière introuvable → « Aucun élève à noter »).
 Future<List<GradeEntryDto>> _gradeEntriesFromLocal(
   Ref ref,
-  int assessmentId,
-) async {
+  int assessmentId, {
+  int? classSubjectIdHint,
+  int? periodIdHint,
+}) async {
   final db = ref.read(databaseProvider);
 
   // Élèves de la classe de l'évaluation (chaîne Drift : assessment ->
@@ -1177,8 +1261,30 @@ Future<List<GradeEntryDto>> _gradeEntriesFromLocal(
       .getSingleOrNull();
   if (assessmentRow == null) return const [];
 
+  var csId = assessmentRow.classSubjectId;
+  if (csId == 0 && classSubjectIdHint != null && classSubjectIdHint != 0) {
+    // Ligne empoisonnée par une version précédente (serveur sans le patch
+    // V10) : l'indice de la page rétablit le lien matière → classe, et la
+    // ligne est guérie en base pour les prochaines consultations (la
+    // période est également restaurée : le filtre de la liste hors-ligne
+    // en dépend).
+    csId = classSubjectIdHint;
+    try {
+      await (db.update(db.assessments)
+            ..where((t) => t.id.equals(assessmentId)))
+          .write(AssessmentsCompanion(
+        classSubjectId: d.Value(csId),
+        periodId: periodIdHint == null
+            ? const d.Value.absent()
+            : d.Value(assessmentRow.periodId ?? periodIdHint),
+      ));
+    } catch (_) {
+      // Guérison best-effort : la reconstruction continue avec l'indice.
+    }
+  }
+
   final classSubject = await (db.select(db.classSubjects)
-        ..where((t) => t.id.equals(assessmentRow.classSubjectId)))
+        ..where((t) => t.id.equals(csId)))
       .getSingleOrNull();
   if (classSubject == null) return const [];
 

@@ -455,8 +455,10 @@ class _OfflineBanner extends ConsumerWidget {
           children: [
             Icon(Icons.cloud_off, size: 16),
             SizedBox(width: 8),
-            Text('Mode hors-ligne — accès SQLite uniquement',
-                style: TextStyle(fontSize: 12)),
+            // [Fix-OFFLINE-BANNER] V10 : formulations unifiées avec l'Accueil —
+            // pas de détail technique (« SQLite ») qui intrigue l'utilisateur.
+            Text('Mode hors-ligne — les données affichées peuvent être obsolètes',
+                style: const TextStyle(fontSize: 12)),
           ],
         ),
       ),

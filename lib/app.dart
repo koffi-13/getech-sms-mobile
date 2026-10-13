@@ -128,6 +128,18 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         path: '/qr-scanner',
         builder: (context, state) => const QrScannerPage(),
       ),
+      // [Fix-STARTUP-FLASH] V10 : écran de démarrage. Pendant le bootstrap
+      // multi-serveurs (lecture du registre, restauration du profil), la
+      // redirect-garde retourne null et AUCUNE route ne correspondait à
+      // '/' : GoRouter affichait alors son errorBuilder (« Page
+      // introuvable ») pendant plusieurs secondes avant l'arrivée sur
+      // l'Accueil. La route '/' est désormais servie par un écran de
+      // chargement ; la garde redirige vers /pairing, /login ou
+      // /dashboard dès que le registre est prêt.
+      GoRoute(
+        path: '/',
+        builder: (context, state) => const _StartupSplashPage(),
+      ),
       // Shell avec barre de navigation inférieure.
       ShellRoute(
         builder: (context, state, child) {
@@ -289,12 +301,116 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         ),
       ),
     ],
-    errorBuilder: (context, state) => Scaffold(
-      appBar: AppBar(title: const Text('Page introuvable')),
-      body: Center(child: Text(state.error?.toString() ?? 'Route inconnue')),
+    errorBuilder: (context, state) => _RouterErrorPage(
+      location: state.matchedLocation,
     ),
   );
 });
+
+/// [Fix-STARTUP-FLASH] V10 : page d'erreur auto-récupérante.
+///
+/// Une route inconnue (ex. '/profile', poussée par une ancienne version)
+/// ne bloque PLUS l'utilisateur : retour automatique à l'accueil dès le
+/// premier rendu, plus un bouton de secours. Le détail brut (GoException)
+/// n'est plus affiché — c'était un détail de développement.
+class _RouterErrorPage extends StatefulWidget {
+  const _RouterErrorPage({required this.location});
+
+  /// Localisation introuvable (utilisé pour éviter une boucle si '/'
+  /// lui-même était en erreur, théoriquement impossible).
+  final String location;
+
+  @override
+  State<_RouterErrorPage> createState() => _RouterErrorPageState();
+}
+
+class _RouterErrorPageState extends State<_RouterErrorPage> {
+  bool _recovered = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_recovered && widget.location != '/') {
+        _recovered = true;
+        context.go('/');
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Page introuvable')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.explore_off_outlined,
+                size: 56, color: Theme.of(context).colorScheme.outline),
+            const SizedBox(height: 16),
+            Text('Retour à l\'accueil…',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 24),
+            const SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(height: 24),
+            TextButton.icon(
+              onPressed: () => context.go('/'),
+              icon: const Icon(Icons.home_outlined),
+              label: const Text('Retour à l\'accueil'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// [Fix-STARTUP-FLASH] V10 : écran de chargement du démarrage (route '/').
+class _StartupSplashPage extends StatelessWidget {
+  const _StartupSplashPage();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.primaryContainer,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(Icons.school_rounded,
+                  size: 48, color: theme.colorScheme.onPrimaryContainer),
+            ),
+            const SizedBox(height: 20),
+            Text('GeTech-SMS',
+                style: theme.textTheme.headlineSmall
+                    ?.copyWith(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 32),
+            const SizedBox(
+              width: 26,
+              height: 26,
+              child: CircularProgressIndicator(strokeWidth: 2.5),
+            ),
+            const SizedBox(height: 12),
+            Text('Chargement…',
+                style: theme.textTheme.bodyMedium
+                    ?.copyWith(color: theme.colorScheme.outline)),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 int _shellIndexFor(String location) {
   if (location.startsWith('/dashboard')) return 0;

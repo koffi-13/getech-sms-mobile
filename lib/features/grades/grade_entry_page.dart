@@ -394,6 +394,11 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
         canEdit: canEdit,
         // Admin : le verrouillage is_locked est ignoré (notes modifiables).
         isAdmin: isAdmin,
+        // [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : indices matière + période
+        // pour la reconstruction hors-ligne (répare les caches
+        // classSubjectId=0 / periodId null).
+        classSubjectId: _classSubjectId,
+        periodId: _periodId,
       ),
     );
   }
@@ -1064,6 +1069,8 @@ class _GradeEntrySheet extends ConsumerStatefulWidget {
     required this.assessment,
     required this.canEdit,
     this.isAdmin = false,
+    this.classSubjectId,
+    this.periodId,
   });
 
   final AssessmentDto assessment;
@@ -1074,6 +1081,15 @@ class _GradeEntrySheet extends ConsumerStatefulWidget {
   /// (miroir de l'upsert admin du desktop ; nécessite le patch serveur pour
   /// persister côté API, sinon le serveur compte les existantes en `skipped`).
   final bool isAdmin;
+
+  /// [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : matière sélectionnée dans la
+  /// page — sert d'indice à la reconstruction hors-ligne quand l'évaluation
+  /// en cache porte classSubjectId=0 (serveur sans le patch V10).
+  final int? classSubjectId;
+
+  /// Période sélectionnée dans la page — même rôle que
+  /// [classSubjectId] (le filtre de la liste hors-ligne en dépend).
+  final int? periodId;
 
   @override
   ConsumerState<_GradeEntrySheet> createState() => _GradeEntrySheetState();
@@ -1088,7 +1104,13 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
 
   @override
   Widget build(BuildContext context) {
-    final async = ref.watch(assessmentGradesProvider(widget.assessment.id));
+    final async = ref.watch(assessmentGradesProvider(
+      (
+        assessmentId: widget.assessment.id,
+        classSubjectId: widget.classSubjectId,
+        periodId: widget.periodId,
+      ),
+    ));
     final maxHeight = MediaQuery.of(context).size.height * 0.85;
 
     return ConstrainedBox(
@@ -1196,7 +1218,13 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
                 error: (e, _) => AppErrorWidget(
                   message: e.toString(),
                   onRetry: () => ref.invalidate(
-                      assessmentGradesProvider(widget.assessment.id)),
+                      assessmentGradesProvider(
+                    (
+                      assessmentId: widget.assessment.id,
+                      classSubjectId: widget.classSubjectId,
+                      periodId: widget.periodId,
+                    ),
+                  )),
                 ),
               ),
             ),

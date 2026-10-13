@@ -34,7 +34,14 @@ Future<void> main() async {
 
   // Initialisation de la synchro en arrière-plan.
   // Note : la période minimale d'Android WorkManager est 15 min.
-  await Workmanager().initialize(callbackDispatcher, isInDebugMode: AppConfig.isDebug);
+  //
+  // [Fix-DEV-NOTIFS] V10 : `isInDebugMode` TOUJOURS false — en mode debug,
+  // le plugin workmanager affiche des NOTIFICATIONS DE DÉVELOPPEMENT
+  // (« Result », « dartTask », « inputData », « Elapsed time »…) à chaque
+  // exécution de la tâche périodique (retour utilisateur : « on voit
+  // s'afficher les notifications de développement »). Le suivi du fond
+  // reste disponible via les logs (debugPrint) sans polluer l'utilisateur.
+  await Workmanager().initialize(callbackDispatcher, isInDebugMode: false);
   await Workmanager().registerPeriodicTask(
     'getech-sms-sync',
     'syncTask',

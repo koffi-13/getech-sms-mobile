@@ -110,7 +110,10 @@ class _ProfileSection extends ConsumerWidget {
             title: Text(user?.fullName ?? 'Utilisateur'),
             subtitle: Text(user?.email ?? 'Aucun email'),
             trailing: const Icon(Icons.chevron_right),
-            onTap: () => context.push('/profile'),
+            // [Fix-PROFILE-ROUTE] V10 : la route du profil est
+            // '/settings/profile' — l'ancien '/profile' ouvrait « Page
+            // introuvable » (GoException: no routes for location: /profile).
+            onTap: () => context.push('/settings/profile'),
           ),
         ],
       ),

@@ -245,8 +245,9 @@ void main() {
       await seedGradesChain(db);
       container.read(connectionProvider.notifier).state = ConnectionOnline();
 
-      final online =
-          await container.read(assessmentGradesProvider(50).future);
+      final online = await container.read(assessmentGradesProvider(
+        (assessmentId: 50, classSubjectId: 21, periodId: 3),
+      ).future);
       expect(online, hasLength(2));
 
       // Le registre a été écrit par le cache-aside (le maillon manquant).
@@ -256,10 +257,13 @@ void main() {
 
       // 2) Hors-ligne : la reconstruction doit retrouver les DEUX élèves.
       container.read(connectionProvider.notifier).state = ConnectionOffline();
-      container.invalidate(assessmentGradesProvider(50));
+      container.invalidate(assessmentGradesProvider(
+        (assessmentId: 50, classSubjectId: 21, periodId: 3),
+      ));
 
-      final offline =
-          await container.read(assessmentGradesProvider(50).future);
+      final offline = await container.read(assessmentGradesProvider(
+        (assessmentId: 50, classSubjectId: 21, periodId: 3),
+      ).future);
       expect(offline, hasLength(2),
           reason: '« Aucun élève à noter » hors-ligne alors que les élèves '
               'existent en base');
@@ -292,7 +296,9 @@ void main() {
       addTearDown(container.dispose);
       container.read(connectionProvider.notifier).state = ConnectionOffline();
 
-      final offline = await container.read(assessmentGradesProvider(50).future);
+      final offline = await container.read(assessmentGradesProvider(
+        (assessmentId: 50, classSubjectId: 21, periodId: 3),
+      ).future);
       // Meilleur effort : liste partielle (l'élève noté) > liste vide.
       expect(offline, isNotEmpty);
       expect(offline.map((e) => e.studentId), contains(1));
