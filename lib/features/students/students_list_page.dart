@@ -457,8 +457,19 @@ class _OfflineBanner extends ConsumerWidget {
             SizedBox(width: 8),
             // [Fix-OFFLINE-BANNER] V10 : formulations unifiées avec l'Accueil —
             // pas de détail technique (« SQLite ») qui intrigue l'utilisateur.
-            Text('Mode hors-ligne — les données affichées peuvent être obsolètes',
-                style: const TextStyle(fontSize: 12)),
+            //
+            // [Fix-BANNER-OVERFLOW] V11 : le texte est dans un Expanded
+            // (ellipsis) — sans lui, la ligne « Mode hors-ligne — les
+            // données… » débordait à droite (« RIGHT OVERFLOWED BY … »)
+            // sur les écrans étroits, exactement le retour utilisateur.
+            Expanded(
+              child: Text(
+                'Mode hors-ligne — les données affichées peuvent être obsolètes',
+                style: const TextStyle(fontSize: 12),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
           ],
         ),
       ),

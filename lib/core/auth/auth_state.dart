@@ -117,6 +117,16 @@ class AuthNotifier extends Notifier<AuthState> {
 
   String? get _serverUrl => ref.read(connectionProvider).serverUrl;
 
+  /// Id du profil serveur actif (ou null si registre non chargé).
+  String? get _activeProfileId =>
+      ref.read(activeProfileIdProvider) ??
+          ref.read(connectionProvider).profileId;
+
+  // [Fix-401-RELOGIN] V11 — garde de réentrance : le re-login silencieux
+  // déclenché par un 401 ne doit pas se relancer sur l'échec de SA propre
+  // requête (sinon boucle infinie 401 → re-login → 401 → …).
+  bool _silentReloginInFlight = false;
+
   /// Restaure la session JWT du serveur ACTIF (clé par profil) au démarrage
   /// ou après une bascule de serveur.
   ///
@@ -206,6 +216,14 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   /// Connexion : `POST /auth/login`.
+  ///
+  /// [Fix-OFFLINE-LOGIN] V11 — repli hors-ligne : si la requête échoue pour
+  /// une RAISON RÉSEAU (serveur injoignable, délai dépassé — PAS un 401/403
+  /// « mauvais identifiants ») et que les identifiants saisis correspondent
+  /// EXACTEMENT à ceux stockés pour ce profil serveur (Keystore), la session
+  /// locale est restaurée depuis l'instantané persisté : l'enseignant peut
+  /// travailler hors-ligne (cache Drift + outbox) comme sur son poste.
+  /// Un mauvais mot de passe reste refusé (comparaison locale).
   Future<bool> login({
     required String username,
     required String password,
@@ -250,7 +268,25 @@ class AuthNotifier extends Notifier<AuthState> {
       if (pid != null) await _writeSnapshot(pid);
       return true;
     } on DioException catch (e) {
-      // [Fix-AUTH] Logger l'erreur complète pour diagnostic.
+      // [Fix-OFFLINE-LOGIN] V11 — échec RÉSEAU (pas mauvais identifiants)
+      // → tentative de connexion locale si les identifiants correspondent.
+      final isNetworkFailure = e.type == DioExceptionType.connectionError ||
+          e.type == DioExceptionType.connectionTimeout ||
+          e.type == DioExceptionType.sendTimeout ||
+          e.type == DioExceptionType.receiveTimeout;
+      if (isNetworkFailure) {
+        final offlineOk = await _tryOfflineLogin(username, password);
+        if (offlineOk) return true;
+        state = state.copyWith(
+          isLoading: false,
+          error: 'Serveur injoignable et aucune session locale ne '
+              'correspond à ces identifiants. Connectez-vous au moins une '
+              'fois avec le serveur démarré, ou vérifiez le module '
+              'Connexions.',
+        );
+        return false;
+      }
+      // Logger l'erreur complète pour diagnostic.
       debugPrint('[AUTH] Login DioException: type=${e.type}, message=${e.message}, '
           'error=${e.error}, statusCode=${e.response?.statusCode}, '
           'response=${e.response?.data}');
@@ -261,6 +297,39 @@ class AuthNotifier extends Notifier<AuthState> {
     } catch (e) {
       debugPrint('[AUTH] Login unexpected error: $e');
       state = state.copyWith(isLoading: false, error: e.toString());
+      return false;
+    }
+  }
+
+  /// [Fix-OFFLINE-LOGIN] V11 — restaure la session depuis l'instantané
+  /// local si les identifiants saisis correspondent à ceux stockés pour le
+  /// profil actif. Retourne true si la session offline est ouverte.
+  Future<bool> _tryOfflineLogin(String username, String password) async {
+    try {
+      final pid = _activeProfileId;
+      if (pid == null) return false;
+      final creds = await _storage.getCredentialsFor(pid);
+      if (creds == null) return false;
+      if (creds.username != username || creds.password != password) {
+        return false;
+      }
+      final snap = await _readSnapshot(pid);
+      final user = snap?['user'];
+      if (user is! UserDto) return false; // aucun instantané → impossible
+
+      final token = await _storage.getJwtFor(pid);
+      state = state.copyWith(
+        token: token ?? 'offline-session',
+        user: user,
+        permissions: (snap?['permissions'] as List<String>? ?? const []),
+        roles: (snap?['roles'] as List<String>? ?? const []),
+        establishmentId: snap?['establishmentId'] as int?,
+        isLoading: false,
+        clearError: true,
+      );
+      return true;
+    } catch (e) {
+      debugPrint('[AUTH] Offline login échoué : $e');
       return false;
     }
   }
@@ -342,8 +411,15 @@ class AuthNotifier extends Notifier<AuthState> {
     } on DioException catch (e) {
       // On ne déconnecte QUE si c'est une erreur 401 (token invalide/expiré).
       // Les erreurs réseau (503, timeout, etc.) ne doivent pas forcer le logout.
+      //
+      // [Fix-401-RELOGIN] V11 — un 401 ne détruit PLUS la session locale :
+      // d'abord un re-login TRANSPARENT avec les identifiants stockés (le
+      // serveur vient de répondre, il est joignable : c'est le token qui est
+      // périmé — ex. serveur desktop redémarré). Sans ce correctif, chaque
+      // redémarrage du serveur déconnectait l'enseignant ET effaçait son
+      // instantané → plus aucune connexion possible hors-ligne.
       if (e.response?.statusCode == 401) {
-        await logoutLocal();
+        await handleUnauthorized();
       }
     } catch (_) {
       // Erreur inattendue → on reste sur l'état actuel (cache).
@@ -403,9 +479,82 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   /// Appelé par l'interceptor Dio en cas de 401.
-  void handleUnauthorized() {
-    if (state.token != null) {
-      logoutLocal();
+  ///
+  /// [Fix-401-RELOGIN] V11 — un 401 signifie que le token n'est plus
+  /// accepté (expiré OU serveur redémarré avec un nouveau secret) mais le
+  /// serveur EST joignable (il vient de répondre). Avant de déconnecter :
+  /// 1. re-login silencieux avec les identifiants stockés du profil actif
+  ///    → session restaurée SANS interruption pour l'utilisateur ;
+  /// 2. si le re-login échoue (mot de passe changé, compte désactivé) :
+  ///    on efface UNIQUEMENT le JWT — l'instantané de session et les
+  ///    identifiants restent en place pour permettre la connexion
+  ///    hors-ligne (cf. [Fix-OFFLINE-LOGIN]) depuis l'écran de login.
+  Future<void> handleUnauthorized() async {
+    if (state.token == null) return;
+
+    // 1) Re-login silencieux (une seule tentative, pas de boucle).
+    if (!_silentReloginInFlight) {
+      _silentReloginInFlight = true;
+      try {
+        final healed = await _silentRelogin();
+        if (healed) return; // session restaurée, aucune interruption.
+      } finally {
+        _silentReloginInFlight = false;
+      }
+    }
+
+    // 2) Re-login impossible → on ne garde PAS un token refusé, mais on
+    //    CONSERVE l'instantané + les identifiants (reconnexion hors-ligne
+    //    possible avec le bon mot de passe).
+    final pid = _activeProfileId;
+    if (pid != null) {
+      await _storage.deleteJwtFor(pid);
+    } else {
+      await _storage.deleteJwt();
+    }
+    state = const AuthState();
+  }
+
+  /// [Fix-401-RELOGIN] V11 — re-login transparent avec les identifiants
+  /// stockés (profil actif). Réussit si le mot de passe n'a pas changé.
+  Future<bool> _silentRelogin() async {
+    try {
+      final pid = _activeProfileId;
+      final url = _serverUrl;
+      if (pid == null || url == null) return false;
+      final creds = await _storage.getCredentialsFor(pid);
+      if (creds == null) return false;
+      final estab =
+          ref.read(connectionProvider).establishmentCode ?? '';
+      if (estab.isEmpty) return false;
+
+      final resp = await _dio.post(
+        buildUrl(url, ApiEndpoints.authLogin),
+        data: LoginRequest(
+          username: creds.username,
+          password: creds.password,
+          establishmentCode: estab,
+        ).toJson(),
+      );
+      final login = LoginResponse.fromJson(
+          Map<String, dynamic>.from(resp.data as Map));
+      await _storage.saveJwtFor(pid, login.accessToken);
+      await _storage.saveCredentialsFor(pid, creds.username, creds.password);
+      state = state.copyWith(
+        token: login.accessToken,
+        user: login.user,
+        permissions:
+            _effectivePermissions(login.user, login.permissions),
+        roles: login.roles.map((r) => r.code).toList(),
+        establishmentId: login.establishment?.id,
+        clearError: true,
+      );
+      await _writeSnapshot(pid);
+      debugPrint('[AUTH] 401 → session restaurée par re-login silencieux');
+      return true;
+    } catch (e) {
+      debugPrint('[AUTH] Re-login silencieux impossible : $e');
+      return false;
     }
   }
 }

@@ -267,7 +267,20 @@ class SyncEngine {
           processed++;
           notifier.update(SyncStatus.processing,
               0.1 + (0.3 * (processed / total)), 'Traitement de ${entry.key}...');
-          await _applyTableChanges(entry.key, entry.value, pullResp.serverTime);
+          // [Fix-SYNC-FAIL-SOFT] V11 — une table en échec n'ABORTE PLUS le
+          // pull entier : l'ancien rethrow laissait le cache Drift vide
+          // dès qu'UNE table était en erreur (ex. school_years avant le
+          // correctif de champ) alors que TOUTES les autres tables
+          // (périodes, matières, évaluations, roster) étaient perdus pour
+          // la même synchronisation.
+          try {
+            await _applyTableChanges(
+                entry.key, entry.value, pullResp.serverTime);
+          } catch (e) {
+            _log.e('Pull : table « ${entry.key} » ignorée ($e)');
+            pageErrors.add(
+                'Table ${entry.key} non répliquée (${e.runtimeType})');
+          }
         }
         pulled += pullResp.totalChanges;
 
@@ -869,14 +882,25 @@ class SyncEngine {
               break;
 
             case 'school_years':
+              // [Fix-SYNC-SCHOOL-YEAR-FIELD] V11 — CAUSE RACINE du
+              // « Aucun élève » hors-ligne : le serveur envoie la colonne
+              // RÉELLE `school_year` (ex. « 2025-2026 »), pas `name`.
+              // L'ancienne lecture produisait name='' → InvalidDataException
+              // (contrainte min 1 caractère) → le batch ENTIER du pull
+              // échouait → le cache Drift ne se remplissait JAMAIS
+              // (périodes, matières, évaluations, roster) alors que la
+              // page Élèves (chemin API propre) affichait les élèves.
               b.insert(
                 _db.schoolYears,
                 SchoolYearsCompanion.insert(
                   id: Value(_rId(row)),
-                  name: _rStr(row, 'name'),
+                  name: _rStr(row, 'school_year', d: '') != ''
+                      ? _rStr(row, 'school_year')
+                      : _rStr(row, 'name'),
                   startDate: Value(_rDt(row, 'start_date')),
                   endDate: Value(_rDt(row, 'end_date')),
-                  isActive: Value(_rBool(row, 'is_active')),
+                  isActive: Value(_rBool(row, 'is_active',
+                      d: _rBool(row, 'is_current', d: false))),
                   alternatingWeekStartDate:
                       Value(_rDt(row, 'alternating_week_start_date')),
                   establishmentId: Value(_rIntN(row, 'establishment_id')),
@@ -1040,7 +1064,11 @@ class SyncEngine {
                   date: Value(
                       _rDt(row, 'date') ?? _rDt(row, 'date_taken')),
                   maxScore: Value(_rDbl(row, 'max_score', d: 20.0)),
-                  coefficient: Value(_rDbl(row, 'coefficient', d: 1.0)),
+                  // [Fix-SYNC-FIELD-MAP-V11] Le serveur envoie `weight`
+                  // (colonne réelle Assessment.weight) — l'ancienne lecture
+                  // `coefficient` seule tombait toujours sur le défaut 1.0.
+                  coefficient: Value(_rDbl(row, 'coefficient',
+                      d: _rDbl(row, 'weight', d: 1.0))),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
                   isDeleted: const Value(false),
@@ -1059,7 +1087,12 @@ class SyncEngine {
                   matricule: _rStr(row, 'matricule'),
                   nom: _rStr(row, 'nom'),
                   prenoms: Value(_rStrN(row, 'prenoms')),
-                  dob: Value(_rDt(row, 'dob')),
+                  // [Fix-SYNC-FIELD-MAP-V11] Le registre du serveur main
+                  // envoie `date_naissance` (ancien nom) alors que le
+                  // registre corrigé envoie `dob` (colonne réelle) — lire
+                  // les deux pour couvrir les deux déploiements.
+                  dob: Value(
+                      _rDt(row, 'dob') ?? _rDt(row, 'date_naissance')),
                   sexe: Value(_rStrN(row, 'sexe')),
                   birthPlace: Value(_rStrN(row, 'birth_place')),
                   birthPrefecture: Value(_rStrN(row, 'birth_prefecture')),
@@ -1180,6 +1213,15 @@ class SyncEngine {
               break;
 
             case 'student_class_assignments':
+              // [Fix-SYNC-FIELD-MAP-V11] Le serveur envoie `active` (bool,
+              // colonne réelle StudentClassAssignment.active) : une
+              // assignation inactive (élève ayant quitté la classe) doit
+              // être marquée supprimée localement — sinon le roster
+              // hors-ligne garde des élèves partis. Repli `is_deleted`
+              // pour les registres anciens, `is_active` jamais observé
+              // mais couvert par défense.
+              final assignDeleted = _rBool(row, 'is_deleted',
+                  d: !_rBool(row, 'active', d: true));
               b.insert(
                 _db.studentClassAssignments,
                 StudentClassAssignmentsCompanion.insert(
@@ -1191,7 +1233,7 @@ class SyncEngine {
                   inscriptionType: Value(_rStrN(row, 'inscription_type')),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
-                  isDeleted: const Value(false),
+                  isDeleted: Value(assignDeleted),
                 ),
                 mode: InsertMode.insertOrReplace,
               );
@@ -1267,20 +1309,37 @@ class SyncEngine {
               break;
 
             case 'course_sessions':
+              // [Fix-SYNC-FIELD-MAP-V11] Le registre serveur envoie
+              // `class_subject_id` + `start_at`/`end_at` (colonnes réelles
+              // de CourseSession) — l'ancienne lecture `weekly_schedule_id`/
+              // `classroom_id`/`date` échouait silencieusement (id de
+              // matière nul, date en repli « maintenant »).
+              final startAt = _rDt(row, 'start_at');
+              final csSubjectId = _rIntN(row, 'class_subject_id');
               b.insert(
                 _db.courseSessions,
                 CourseSessionsCompanion.insert(
                   id: Value(_rId(row)),
                   weeklyScheduleId: Value(_rIntN(row, 'weekly_schedule_id')),
                   classroomId: Value(_rIntN(row, 'classroom_id')),
-                  subjectId: Value(_rIntN(row, 'subject_id')),
+                  subjectId: Value(csSubjectId ?? _rIntN(row, 'subject_id')),
                   teacherId: Value(_rIntN(row, 'teacher_id')),
-                  date: _rDt(row, 'date') ?? DateTime.now(),
+                  date: startAt ??
+                      (_rDt(row, 'date') ?? DateTime.now()),
                   // [Fix-SYNC-FIELD-MAP] Colonne réelle :
                   // scheduled_start_time (miroir de CourseSession).
                   startTime: Value(_rStrN(row, 'start_time') ??
-                      _rStrN(row, 'scheduled_start_time')),
-                  endTime: Value(_rStrN(row, 'end_time')),
+                      _rStrN(row, 'scheduled_start_time') ??
+                      (startAt != null
+                          ? startAt.toIso8601String().substring(11, 16)
+                          : null)),
+                  endTime: Value(_rStrN(row, 'end_time') ??
+                      (() {
+                        final endAt = _rDt(row, 'end_at');
+                        return endAt != null
+                            ? endAt.toIso8601String().substring(11, 16)
+                            : null;
+                      }())),
                   state: Value(_rStr(row, 'state', d: 'PENDING')),
                   lessonRecordId: Value(_rIntN(row, 'lesson_record_id')),
                   syncedAt: Value(syncedAt),
@@ -1334,8 +1393,15 @@ class SyncEngine {
                 UsersCompanion.insert(
                   id: Value(_rId(row)),
                   username: _rStr(row, 'username'),
-                  firstName: Value(_rStrN(row, 'first_name')),
-                  lastName: Value(_rStrN(row, 'last_name')),
+                  // [Fix-SYNC-FIELD-MAP-V11] Le registre serveur envoie
+                  // `nom`/`prenoms` (colonnes réelles du modèle User)
+                  // — l'ancienne lecture `first_name`/`last_name` seule
+                  // perdait TOUS les noms (ex. « prof principal » vide,
+                  // noms des enseignants absents hors-ligne).
+                  firstName: Value(
+                      _rStrN(row, 'first_name') ?? _rStrN(row, 'nom')),
+                  lastName: Value(
+                      _rStrN(row, 'last_name') ?? _rStrN(row, 'prenoms')),
                   email: Value(_rStrN(row, 'email')),
                   phone: Value(_rStrN(row, 'phone')),
                   photoPath: Value(_rStrN(row, 'photo_path')),
@@ -1358,7 +1424,8 @@ class SyncEngine {
       });
     } catch (e) {
       _log.e('Erreur batch upsert table "$table" : $e');
-      rethrow;
+      // [Fix-SYNC-FAIL-SOFT] V11 : plus de rethrow — l'appelant (boucle de
+      // pull) journalise par table et poursuit avec les tables suivantes.
     }
   }
 
