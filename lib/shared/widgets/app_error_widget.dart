@@ -26,6 +26,39 @@ class AppErrorWidget extends StatelessWidget {
   static String humanize(String raw) {
     final m = raw.toLowerCase();
 
+    // [Fix-ERROR-DEV-INFO] Formats « ApiException(403): … » /
+    // « DioException … » : extraire le message interne puis traduire le
+    // code HTTP — l'utilisateur ne doit JAMAIS voir le nom d'une classe
+    // d'exception (retour V9 : « éviter d'afficher les informations de
+    // développement dans les messages d'erreur »).
+    final apiMatch = RegExp(
+      r'apiexception\((\d{3})[^)]*\)\s*:\s*(.*)',
+      caseSensitive: false,
+      multiLine: true,
+    ).firstMatch(raw);
+    if (apiMatch != null) {
+      final code = int.tryParse(apiMatch.group(1) ?? '') ?? 0;
+      final inner = (apiMatch.group(2) ?? '').trim();
+      switch (code) {
+        case 401:
+          return 'Session expirée. Reconnectez-vous.';
+        case 403:
+          return 'Vous n\'avez pas les droits nécessaires pour cette action.';
+        case 404:
+          return 'Fonctionnalité ou donnée non disponible sur ce serveur.';
+        case 409:
+          return inner.isNotEmpty && !inner.toLowerCase().contains('exception')
+              ? inner
+              : 'Cette donnée existe déjà.';
+        case 422:
+          return 'Certaines données envoyées sont invalides. Vérifiez les '
+              'champs puis réessayez.';
+        default:
+          return 'Le serveur a signalé une erreur ($code). '
+              'Réessayez dans un instant.';
+      }
+    }
+
     // Réseau / serveur injoignable.
     if (m.contains('connectiontimeout') ||
         m.contains('connection refused') ||

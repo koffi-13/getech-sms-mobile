@@ -370,6 +370,29 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
   void _showCreateAssessmentSheet() {
     if (_classSubjectId == null || _periodId == null) return;
 
+    // [Fix-ASSESSMENT-FORM] Libellés réels transmis au formulaire.
+    final classroomList =
+        ref.read(classroomsForGradesProvider).valueOrNull ??
+            const <ClassroomDto>[];
+    final periodsRaw = (_classroomId == null)
+        ? const <PeriodDto>[]
+        : (ref.read(periodsForClassroomProvider(_classroomId!)).valueOrNull ??
+            const <PeriodDto>[]);
+    final periodList = _filterPeriodsByCycle(periodsRaw, _classroomId,
+        ref.read(classroomsForGradesProvider));
+    final classroomName = classroomList
+        .where((c) => c.id == _classroomId)
+        .firstOrNull
+        ?.name;
+    final periodDto = periodList.where((p) => p.id == _periodId).firstOrNull;
+    final subjectName = (_classroomId == null)
+        ? null
+        : (ref.read(classSubjectsProvider(_classroomId!)).valueOrNull ??
+                const <ClassSubjectDto>[])
+            .where((s) => s.id == _classSubjectId)
+            .firstOrNull
+            ?.subjectName;
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -377,6 +400,11 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
       builder: (_) => _CreateAssessmentSheet(
         classSubjectId: _classSubjectId!,
         periodId: _periodId!,
+        classroomName: classroomName,
+        subjectName: subjectName,
+        periodName: periodDto?.name,
+        periodStart: periodDto?.startDate,
+        periodEnd: periodDto?.endDate,
         // [Fix-TEACHER-ASSESSMENT] Compositions et examens (catégorie
         // EXAM) : création réservée aux administrateurs.
         isAdmin: ref.read(authProvider).isAdminOrHeadmaster,
@@ -708,15 +736,36 @@ class _Chip extends StatelessWidget {
 /// Le type d'évaluation est choisi parmi [CommonAssessmentTypes.defaults]
 /// (aucun endpoint REST ne liste les types pour le moment — réf. serveur).
 /// La note maximale est pré-remplie avec `type.defaultMaxScore`.
+///
+/// [Fix-ASSESSMENT-FORM] Contraintes (miroir du serveur — retour V9
+/// « parfaire le formulaire d'ajout d'évaluations sans oublier les
+/// contraintes ») :
+/// - nom requis, ≤ 255 caractères, sans doublon connu (409 serveur) ;
+/// - date bornée à la période sélectionnée [periodStart, periodEnd] ;
+/// - note maximale entre 1 et 100 ;
+/// - libellés RÉELS (classe • matière • période) au lieu des ids
+///   techniques, et plus aucun texte destiné aux développeurs.
 class _CreateAssessmentSheet extends ConsumerStatefulWidget {
   const _CreateAssessmentSheet({
     required this.classSubjectId,
     required this.periodId,
+    this.classroomName,
+    this.subjectName,
+    this.periodName,
+    this.periodStart,
+    this.periodEnd,
     this.isAdmin = false,
   });
 
   final int classSubjectId;
   final int periodId;
+  final String? classroomName;
+  final String? subjectName;
+  final String? periodName;
+
+  /// Bornes ISO (YYYY-MM-DD) de la période — contraignent le calendrier.
+  final String? periodStart;
+  final String? periodEnd;
 
   /// [Fix-TEACHER-ASSESSMENT] Faux pour un enseignant simple : les types
   /// de catégorie EXAM (compositions, examens) sont filtrés du dropdown —
@@ -730,12 +779,34 @@ class _CreateAssessmentSheet extends ConsumerStatefulWidget {
 }
 
 class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> {
+  static const int _maxNameLength = 255;
+
   final _formKey = GlobalKey<FormState>();
   final _nameCtrl = TextEditingController();
   AssessmentTypeInfo? _type;
   DateTime? _date = DateTime.now();
   double _maxScore = 20;
   bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // [Fix-ASSESSMENT-FORM] Date initiale bornée à la période (aujourd'hui
+    // si possible, sinon le début de période).
+    final start = DateTime.tryParse(widget.periodStart ?? '');
+    final end = DateTime.tryParse(widget.periodEnd ?? '');
+    final now = DateTime.now();
+    if (start != null && now.isBefore(start)) {
+      _date = start;
+    } else if (end != null && now.isAfter(end)) {
+      _date = end;
+    } else {
+      _date = now;
+    }
+    if (_date != null) {
+      _date = DateTime(_date!.year, _date!.month, _date!.day);
+    }
+  }
 
   @override
   void dispose() {
@@ -825,13 +896,23 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
               Text('Nouvelle évaluation',
                   style: Theme.of(context).textTheme.titleLarge),
               const SizedBox(height: 4),
+              // [Fix-ASSESSMENT-FORM] Libellés réels (classe • matière •
+              // période) au lieu des identifiants techniques.
               Text(
-                'class_subject #${widget.classSubjectId} • période #${widget.periodId}',
+                [
+                  if (widget.classroomName != null) widget.classroomName!,
+                  if (widget.subjectName != null &&
+                      widget.subjectName!.isNotEmpty)
+                    widget.subjectName!,
+                  if (widget.periodName != null)
+                    'Période : ${widget.periodName}',
+                ].join(' • '),
                 style: Theme.of(context).textTheme.bodySmall,
               ),
               const SizedBox(height: 16),
               TextFormField(
                 controller: _nameCtrl,
+                maxLength: _maxNameLength,
                 decoration: const InputDecoration(
                   labelText: 'Nom *',
                   hintText: 'ex : Devoir 1',
@@ -839,15 +920,20 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
                   isDense: true,
                 ),
                 textCapitalization: TextCapitalization.sentences,
-                validator: (v) =>
-                    (v == null || v.trim().isEmpty) ? 'Nom requis' : null,
+                validator: (v) {
+                  final t = (v ?? '').trim();
+                  if (t.isEmpty) return 'Nom requis';
+                  if (t.length > _maxNameLength) {
+                    return 'Le nom ne doit pas dépasser $_maxNameLength caractères';
+                  }
+                  return null;
+                },
               ),
               const SizedBox(height: 12),
               if (types.isEmpty)
                 const Text(
-                  'Aucun type d\'évaluation connu pour ce serveur. Créez-en '
-                  'un côté desktop ou appliquez le patch serveur '
-                  '(assessment-types).',
+                  'Aucun type d\'évaluation n\'est configuré pour ce '
+                  'serveur. Contactez l\'administrateur de l\'établissement.',
                   style: TextStyle(fontStyle: FontStyle.italic),
                 )
               else
@@ -871,6 +957,9 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
                           ))
                       .toList(),
                   onChanged: _onTypeChanged,
+                  // [Fix-ASSESSMENT-FORM] Type obligatoire (miroir serveur).
+                  validator: (t) =>
+                      t == null ? 'Sélectionnez un type d\'évaluation' : null,
                 ),
               const SizedBox(height: 8),
               // [Fix-TEACHER-ASSESSMENT] Note explicite pour l'enseignant :
@@ -898,31 +987,29 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
                     ),
                   ],
                 ),
-              if (identical(types, CommonAssessmentTypes.defaults))
-                Text(
-                  'Astuce : les types sont chargés depuis le serveur si le patch '
-                  'GeTech-SMS est appliqué ; sinon ce sont les évaluations '
-                  'existantes de la matière qui servent de référence.',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
-                ),
+              // [Fix-ERROR-DEV-INFO] Plus d'« astuce » technique sur les
+              // patches serveur : information neutre uniquement.
               const SizedBox(height: 12),
+              // [Fix-ASSESSMENT-FORM] Calendrier borné à la période.
               InkWell(
                 onTap: () async {
+                  final bounds = _periodBounds();
                   final picked = await showDatePicker(
                     context: context,
-                    initialDate: _date ?? DateTime.now(),
-                    firstDate: DateTime(DateTime.now().year - 2, 1, 1),
-                    lastDate: DateTime(DateTime.now().year + 2, 12, 31),
+                    initialDate:
+                        _clampedToPeriod(_date ?? DateTime.now(), bounds),
+                    firstDate: bounds.start,
+                    lastDate: bounds.end,
+                    helpText: 'Date de l\'évaluation',
                   );
                   if (picked != null) setState(() => _date = picked);
                 },
                 child: InputDecorator(
-                  decoration: const InputDecoration(
-                    labelText: 'Date de l\'évaluation',
-                    border: OutlineInputBorder(),
+                  decoration: InputDecoration(
+                    labelText: 'Date de l\'évaluation *',
+                    border: const OutlineInputBorder(),
                     isDense: true,
+                    helperText: _periodRangeLabel(),
                   ),
                   child: Text(DateFormatter.date(_date)),
                 ),
@@ -938,7 +1025,9 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
               ),
               const SizedBox(height: 20),
               FilledButton.icon(
-                onPressed: _saving ? null : _submit,
+                // [Fix-ASSESSMENT-FORM] Impossible de créer sans type
+                // (le serveur répondrait 404).
+                onPressed: (_saving || types.isEmpty) ? null : _submit,
                 icon: _saving
                     ? const SizedBox(
                         width: 18,
@@ -955,9 +1044,48 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
     );
   }
 
+  /// Bornes de sélection de date : la période si connue, sinon ± 1 an.
+  ({DateTime start, DateTime end}) _periodBounds() {
+    final now = DateTime.now();
+    final start = DateTime.tryParse(widget.periodStart ?? '') ??
+        DateTime(now.year - 1, 1, 1);
+    var end = DateTime.tryParse(widget.periodEnd ?? '') ??
+        DateTime(now.year + 1, 12, 31);
+    if (!end.isAfter(start)) end = start.add(const Duration(days: 1));
+    return (start: start, end: end);
+  }
+
+  /// Bornne [d] à l'intérieur de la période (le DatePicker exige une
+  /// date initiale comprise entre firstDate et lastDate).
+  DateTime _clampedToPeriod(
+      DateTime d, ({DateTime start, DateTime end}) b) {
+    if (d.isBefore(b.start)) return b.start;
+    if (d.isAfter(b.end)) return b.end;
+    return d;
+  }
+
+  /// Libellé « du … au … » de la période (contrainte affichée).
+  String? _periodRangeLabel() {
+    final start = DateTime.tryParse(widget.periodStart ?? '');
+    final end = DateTime.tryParse(widget.periodEnd ?? '');
+    if (start == null || end == null) return null;
+    return 'Période : du ${DateFormatter.date(start)} '
+        'au ${DateFormatter.date(end)}';
+  }
+
   Future<void> _submit() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
-    if (_type == null) return;
+    // [Fix-ASSESSMENT-FORM] Feedback explicite si aucun type n'est
+    // disponible/sélectionné (bouton normalement désactivé).
+    if (_type == null) {
+      _showError('Sélectionnez un type d\'évaluation.');
+      return;
+    }
+    // [Fix-ASSESSMENT-FORM] Contrainte client miroir du serveur.
+    if (_maxScore < 1 || _maxScore > 100) {
+      _showError('La note maximale doit être comprise entre 1 et 100.');
+      return;
+    }
     setState(() => _saving = true);
     try {
       await ref.read(gradeControllerProvider).createAssessment(
@@ -977,9 +1105,11 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
         );
       }
     } on ApiException catch (e) {
-      _showError(e.message);
+      // [Fix-ERROR-DEV-INFO] Message serveur humanisé (409 doublon, 400
+      // date hors période… déjà rédigés en français côté serveur).
+      _showError(AppErrorWidget.humanize(e.message));
     } catch (e) {
-      _showError('Erreur : $e');
+      _showError(AppErrorWidget.humanize('Erreur : $e'));
     } finally {
       if (mounted) setState(() => _saving = false);
     }

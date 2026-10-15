@@ -46,7 +46,13 @@ class AuthState {
   bool get isSuperuser => permissions.contains('*');
 
   /// Vrai si l'utilisateur possède le rôle [role] (code MAJUSCULES, ex. `TEACHER`).
-  bool hasRole(String role) => roles.contains(role);
+  ///
+  /// [Fix-ROLE-CODE-CASE] Comparaison insensible à la casse : une base
+  /// serveur seedée par l'ancien script porte des codes minuscules
+  /// (« teacher », « admin ») — le profil doit être reconnu quelle que
+  /// soit la convention du serveur.
+  bool hasRole(String role) =>
+      roles.any((r) => r.toUpperCase() == role.toUpperCase());
 
   /// Administrateur au sens large : superuser, `ADMIN` ou `HEADMASTER`.
   ///
@@ -54,12 +60,29 @@ class AuthState {
   /// classes/matières, suppression d'évaluations, modification des notes
   /// existantes (non verrouillées pour un enseignant).
   bool get isAdminOrHeadmaster =>
-      isSuperuser || roles.any(RoleCodes.adminLike.contains);
+      isSuperuser ||
+      roles.any((r) => RoleCodes.adminLike
+          .map((a) => a.toUpperCase())
+          .contains(r.toUpperCase())) ||
+      _adminLegacyUserRole;
+
+  /// Détection admin via la colonne legacy ``User.role`` (« admin »,
+  /// « administrateur », « headmaster », « directeur ») — certains comptes
+  /// de production ne portent AUCUN rôle RBAC et aucune permission, la
+  /// navigation restait alors limitée à Accueil/Plus.
+  bool get _adminLegacyUserRole {
+    final r = user?.role?.toLowerCase();
+    if (r == null) return false;
+    return r.contains('admin') ||
+        r.contains('headmaster') ||
+        r.contains('directeur') ||
+        r.contains('proviseur');
+  }
 
   /// Le rôle « enseignant » est déclaré sur le compte (rôle `TEACHER` ou
   /// `UserDto.role` contenant teacher/enseignant).
   bool get hasDeclaredTeacherRole {
-    if (roles.contains(RoleCodes.teacher)) return true;
+    if (roles.any((r) => r.toUpperCase() == RoleCodes.teacher)) return true;
     final r = user?.role?.toLowerCase();
     return r != null && (r.contains('teacher') || r.contains('enseignant'));
   }

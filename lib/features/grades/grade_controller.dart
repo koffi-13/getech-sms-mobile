@@ -484,7 +484,7 @@ Future<List<ClassroomDto>> _fetchClassrooms(
       // [Fix-TEACHER-CLASSES-403] Message explicite au lieu d'une liste vide
       // silencieuse — l'appelant retombe sur le cache Drift.
       throw const ApiException(
-        'Accès refusé (403) — vérifiez les permissions du compte côté serveur.',
+        'Accès refusé — vous n\'avez pas les droits nécessaires.',
         statusCode: 403,
       );
     }
@@ -1439,7 +1439,7 @@ final rankingProvider = FutureProvider.autoDispose
       // [Fix-TEACHER-CLASSES-403] Message explicite au lieu d'une liste vide
       // silencieuse — l'appelant retombe sur le cache Drift.
       throw const ApiException(
-        'Accès refusé (403) — vérifiez les permissions du compte côté serveur.',
+        'Accès refusé — vous n\'avez pas les droits nécessaires.',
         statusCode: 403,
       );
     }

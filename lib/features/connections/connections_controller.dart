@@ -182,13 +182,14 @@ class ConnectionsController {
             'correcte. Le pare-feu du desktop doit autoriser le port.';
       case DioExceptionType.connectionError:
         return 'Connexion refusée ou serveur injoignable. Vérifiez l\'IP et '
-            'le port. Assurez-vous que l\'endpoint /api/v1/devices/pair '
-            'existe sur le serveur desktop.';
+            'le port, et que le serveur desktop est démarré.';
       case DioExceptionType.badResponse:
         final code = e.response?.statusCode;
         if (code == 404) {
-          return 'Endpoint /devices/pair introuvable (404). '
-              'Le serveur desktop doit implémenter cet endpoint.';
+          // [Fix-ERROR-DEV-INFO] pas de jargon d'endpoint côté utilisateur.
+          return 'La fonctionnalité d\'appairage n\'est pas disponible sur '
+              'ce serveur. Mettez le serveur GeTech-SMS à jour puis '
+              'réessayez.';
         }
         if (code == 400) return 'Token d\'appairage invalide ou expiré.';
         if (code == 422) {
