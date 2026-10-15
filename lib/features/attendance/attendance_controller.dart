@@ -176,6 +176,48 @@ final classStudentsProvider = FutureProvider.autoDispose
   }
 });
 
+/// [Présence-V10] Paramètre du provider d'élèves fusionnés : la liste des
+/// classes d'un groupe de cours JUMELÉS (chevauchement de créneaux).
+class MergedStudentsQuery {
+  final List<int> classroomIds;
+  const MergedStudentsQuery(this.classroomIds);
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MergedStudentsQuery &&
+          _listEquals(other.classroomIds, classroomIds);
+
+  @override
+  int get hashCode => Object.hashAll(classroomIds);
+
+  static bool _listEquals(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+}
+
+/// [Présence-V10] Élèves de plusieurs classes (classes jumelées), triés
+/// alphabétiquement. Une seule classe → simple délégation à
+/// [classStudentsProvider].
+final mergedClassStudentsProvider = FutureProvider.autoDispose
+    .family<List<StudentDto>, MergedStudentsQuery>((ref, q) async {
+  if (q.classroomIds.length <= 1) {
+    final list =
+        await ref.watch(classStudentsProvider(q.classroomIds.first).future);
+    return list;
+  }
+  final all = <StudentDto>[];
+  for (final cid in q.classroomIds) {
+    all.addAll(await ref.watch(classStudentsProvider(cid).future));
+  }
+  all.sort((a, b) => a.fullName.compareTo(b.fullName));
+  return all;
+});
+
 /// Liste de tous les élèves (pour le sélecteur d'historique d'absences) :
 /// `GET /students`.
 final allStudentsProvider =

@@ -48,7 +48,6 @@ class GradeEntryPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(authProvider);
     final perms = auth.permissions;
-    final conn = ref.watch(connectionProvider);
 
     final canRead = hasPermission(perms, RbacPermissions.gradeRead);
     // [Fix-TEACHER-GUARD] Repli enseignant (miroir de la barre de
@@ -243,17 +242,21 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
           const SizedBox(height: 12),
           _DropdownField<PeriodDto>(
             label: 'Période',
+            // [Fix-PERIOD-NOTES-EMPTY] Plus de second filtrage local :
+            // periodsForClassroomProvider filtre DÉJÀ par le cycle de la
+            // classe AVEC repli sur la liste complète si le filtre est vide.
+            // L'ancien double filtrage (_filterPeriodsByCycle, sans repli)
+            // vidait le dropdown « Période » de Notes dès que la classe
+            // n'avait aucune période de son cycle — alors que Classement
+            // (qui ne re-filtre pas) affichait bien les périodes.
             value: periods.maybeWhen(
-              data: (list) {
-                // [Fix-PERIOD-CYCLE] Filtrer les périodes par cycle de la classe sélectionnée.
-                final filtered = _filterPeriodsByCycle(list, _classroomId, classrooms);
-                return filtered.where((p) => p.id == _periodId).firstOrNull ??
-                    (filtered.isEmpty ? null : filtered.first);
-              },
+              data: (list) =>
+                  list.where((p) => p.id == _periodId).firstOrNull ??
+                  (list.isEmpty ? null : list.first),
               orElse: () => null,
             ),
             items: periods.maybeWhen(
-              data: (list) => _filterPeriodsByCycle(list, _classroomId, classrooms),
+              data: (list) => list,
               orElse: () => const [],
             ),
             enabled: periods is AsyncData && _classroomId != null,
@@ -330,43 +333,6 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
     );
   }
 
-  /// [Fix-PERIOD-CYCLE] Filtre les périodes par cycle de la classe sélectionnée.
-  /// Si la classe a un cycleId, on ne garde que les périodes du même cycle.
-  /// Si pas de classe sélectionnée ou pas de cycleId, on garde tout.
-  List<PeriodDto> _filterPeriodsByCycle(
-    List<PeriodDto> allPeriods,
-    int? classroomId,
-    AsyncValue<List<ClassroomDto>> classroomsAsync,
-  ) {
-    if (classroomId == null) return allPeriods;
-    final classrooms = classroomsAsync.valueOrNull ?? [];
-    final classroom = classrooms.where((c) => c.id == classroomId).firstOrNull;
-    if (classroom == null) return allPeriods;
-
-    // Le ClassroomDto a cycleName (ex: "Collège", "Lycée").
-    // Le PeriodDto a maintenant cycleId et cycleName.
-    // Si les périodes n'ont pas de cycleId (ancien serveur), on ne filtre pas.
-    final hasCycleInfo = allPeriods.any((p) => p.cycleId != null);
-    if (!hasCycleInfo) return allPeriods;
-
-    // Filtrer par cycleId si disponible, sinon par cycleName.
-    final filtered = allPeriods.where((p) {
-      // Si la période n'a pas de cycleId, on la garde (rétrocompatible).
-      if (p.cycleId == null) return true;
-      // Si la classroom a un cycleId et la période aussi, on compare.
-      if (classroom.cycleId != null) {
-        return p.cycleId == classroom.cycleId;
-      }
-      // Sinon, comparer par nom.
-      if (p.cycleName != null && classroom.cycleName != null) {
-        return p.cycleName!.toLowerCase() == classroom.cycleName!.toLowerCase();
-      }
-      return true;
-    }).toList();
-
-    return filtered;
-  }
-
   void _showCreateAssessmentSheet() {
     if (_classSubjectId == null || _periodId == null) return;
 
@@ -374,12 +340,13 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
     final classroomList =
         ref.read(classroomsForGradesProvider).valueOrNull ??
             const <ClassroomDto>[];
-    final periodsRaw = (_classroomId == null)
+    // [Fix-PERIOD-NOTES-EMPTY] Le provider filtre déjà par cycle (avec
+    // repli) — pas de second filtrage local (voyait le dropdown Période
+    // vide dans Notes alors que Classement fonctionnait).
+    final periodList = (_classroomId == null)
         ? const <PeriodDto>[]
         : (ref.read(periodsForClassroomProvider(_classroomId!)).valueOrNull ??
             const <PeriodDto>[]);
-    final periodList = _filterPeriodsByCycle(periodsRaw, _classroomId,
-        ref.read(classroomsForGradesProvider));
     final classroomName = classroomList
         .where((c) => c.id == _classroomId)
         .firstOrNull
@@ -868,15 +835,41 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
           .toList();
     }
 
-    // Auto-sélection du premier type.
-    if (_type == null || !types.any((t) => t.id == _type!.id)) {
-      if (types.isNotEmpty) {
+    // [Fix-DROPDOWN-ASSERT] La valeur d'un DropdownButton DOIT être un
+    // élément de la liste affichée. On RÉ-ANCRE donc _type sur l'instance
+    // de la liste courante (même id) : l'ancien code ne testait que
+    // l'appartenance PAR ID et conservait une instance issue d'une liste
+    // périmée (défauts serveur puis types déduits) → assertion Flutter
+    // « There should be exactly one item with [DropdownButton]'s value:
+    // Instance of 'AssessmentTypeInfo' » au clic sur « Nouvelle
+    // évaluation ». (Ceinture + bretelles : AssessmentTypeInfo définit
+    // désormais ==/hashCode.)
+    var typeChanged = false;
+    if (_type != null) {
+      final match = types.where((t) => t.id == _type!.id).toList();
+      if (match.isNotEmpty) {
+        if (!identical(_type, match.first)) {
+          _type = match.first;
+          typeChanged = true;
+        }
+      } else if (types.isNotEmpty) {
         _type = types.first;
         _maxScore = types.first.defaultMaxScore.toDouble();
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) setState(() {});
-        });
+        typeChanged = true;
+      } else {
+        _type = null;
+        typeChanged = true;
       }
+    } else if (types.isNotEmpty) {
+      // Auto-sélection du premier type.
+      _type = types.first;
+      _maxScore = types.first.defaultMaxScore.toDouble();
+      typeChanged = true;
+    }
+    if (typeChanged) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() {});
+      });
     }
 
     return Padding(

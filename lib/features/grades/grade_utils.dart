@@ -81,6 +81,22 @@ class AssessmentTypeInfo {
       defaultMaxScore: (j['default_max_score'] as num?)?.toInt() ?? 20,
     );
   }
+
+  /// [Fix-DROPDOWN-ASSERT] Égalité par (id, code) : DropdownButton compare
+  /// les éléments par `==` — sans cette redéfinition, deux instances
+  /// distinctes décrivant le MÊME type (liste serveur rafraîchie vs
+  /// sélection précédente) faisaient échouer l'assertion
+  /// « There should be exactly one item with [DropdownButton]'s value »
+  /// au clic sur « Nouvelle évaluation ».
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AssessmentTypeInfo &&
+          other.id == id &&
+          other.code == code;
+
+  @override
+  int get hashCode => Object.hash(id, code);
 }
 
 /// Catégorie d'évaluation (AssessmentCategory côté desktop).

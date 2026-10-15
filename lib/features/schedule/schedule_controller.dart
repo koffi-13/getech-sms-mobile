@@ -76,10 +76,7 @@ final classroomsForScheduleProvider =
       queryParameters: {'per_page': 200},
     );
     return _parseClassroomList(resp.data);
-  } on DioException catch (e) {
-    final api = (e.error is ApiException)
-        ? e.error as ApiException
-        : dioErrorToApiException(e);
+  } on DioException {
     // [Fix-TEACHER-CLASSES-403] 403 → cache local (plus de liste vide
     // silencieuse).
     // Serveur injoignable → cache local.
@@ -370,12 +367,108 @@ List<WeeklyScheduleDto> _parseWeeklyScheduleList(dynamic data) {
 // Écriture (admins uniquement — nécessite le patch serveur GeTech-SMS)
 // ===========================================================================
 
+/// Créneau horaire de la grille (TimeSlotResponse côté serveur —
+/// `GET /schedule/time-slots`).
+///
+/// [Fix-EDT-FORM-DESKTOP] Miroir du formulaire desktop : le cours se pose
+/// sur un CRÉNEAU de la grille (jour + heures) et non sur des heures libres.
+class TimeSlotDto {
+  final int id;
+  final int dayOfWeek; // 1..6
+  final int slotOrder;
+  final String startTime; // "HH:mm"
+  final String endTime; // "HH:mm"
+  final String? label;
+  final bool isBreak;
+
+  const TimeSlotDto({
+    required this.id,
+    required this.dayOfWeek,
+    this.slotOrder = 0,
+    required this.startTime,
+    required this.endTime,
+    this.label,
+    this.isBreak = false,
+  });
+
+  factory TimeSlotDto.fromJson(Map<String, dynamic> j) => TimeSlotDto(
+        id: (j['id'] as num?)?.toInt() ?? 0,
+        dayOfWeek: (j['day_of_week'] as num?)?.toInt() ?? 1,
+        slotOrder: (j['slot_order'] as num?)?.toInt() ?? 0,
+        startTime: j['start_time'] as String? ?? '',
+        endTime: j['end_time'] as String? ?? '',
+        label: j['label'] as String?,
+        isBreak: (j['is_break'] as bool?) ?? false,
+      );
+
+  /// Libellé « Lundi 08:00 — 10:00 » (miroir du dropdown desktop).
+  String get displayLabel {
+    const days = {
+      1: 'Lundi', 2: 'Mardi', 3: 'Mercredi', 4: 'Jeudi', 5: 'Vendredi',
+      6: 'Samedi',
+    };
+    final day = days[dayOfWeek] ?? '?';
+    if (label != null && label!.isNotEmpty) {
+      return '$day $startTime — $endTime ($label)';
+    }
+    return '$day $startTime — $endTime';
+  }
+}
+
+/// Grille des créneaux de l'établissement : `GET /schedule/time-slots`
+/// (sans les pauses). Repli : liste vide (le formulaire bascule alors sur
+/// la saisie manuelle jour + heures, le serveur créant le créneau).
+final timeSlotsProvider =
+    FutureProvider.autoDispose<List<TimeSlotDto>>((ref) async {
+  final conn = ref.watch(connectionProvider
+      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
+  if (!conn.isPaired || conn.serverUrl == null) return const [];
+  final dio = ref.watch(dioProvider);
+  try {
+    final resp = await dio.get(
+      buildUrl(conn.serverUrl!, ApiEndpoints.scheduleTimeSlots),
+      queryParameters: {'include_breaks': false},
+    );
+    final data = resp.data;
+    List? rows;
+    if (data is List) {
+      rows = data;
+    } else if (data is Map && data['items'] is List) {
+      rows = data['items'] as List;
+    }
+    if (rows == null) return const [];
+    final slots = rows
+        .whereType<Map>()
+        .map((e) => TimeSlotDto.fromJson(Map<String, dynamic>.from(e)))
+        .where((s) => !s.isBreak)
+        .toList()
+      ..sort((a, b) {
+        final d = a.dayOfWeek.compareTo(b.dayOfWeek);
+        if (d != 0) return d;
+        return a.startTime.compareTo(b.startTime);
+      });
+    return slots;
+  } on DioException catch (e) {
+    final api = (e.error is ApiException)
+        ? e.error as ApiException
+        : dioErrorToApiException(e);
+    // Serveur sans grille (404/403) → liste vide, saisie manuelle.
+    if (api.statusCode == 403 || api.statusCode == 404) return const [];
+    return const [];
+  } catch (_) {
+    return const [];
+  }
+});
+
 /// Requête de création d'une entrée d'emploi du temps.
 ///
 /// Le patch serveur résout le créneau (`TimeSlot`) et la session
 /// (`ScheduleSession`) à partir de `day_of_week` + `start_time`/`end_time`,
 /// avec détection de conflits classe + enseignant (miroir de
 /// `ScheduleService.create_schedule_entry` du desktop).
+///
+/// [Fix-EDT-FORM-DESKTOP] `teacherId` : miroir du formulaire desktop —
+/// l'enseignant sélectionné devient l'enseignant affecté de la matière.
 class ScheduleEntryCreateRequest {
   final int classroomId;
   final int classSubjectId;
@@ -384,6 +477,7 @@ class ScheduleEntryCreateRequest {
   final String endTime; // "HH:mm"
   final String? weekType; // 'A' | 'B' | null (toutes les semaines)
   final String? room;
+  final int? teacherId;
 
   const ScheduleEntryCreateRequest({
     required this.classroomId,
@@ -393,6 +487,7 @@ class ScheduleEntryCreateRequest {
     required this.endTime,
     this.weekType,
     this.room,
+    this.teacherId,
   });
 
   Map<String, dynamic> toJson() => {
@@ -403,10 +498,15 @@ class ScheduleEntryCreateRequest {
         'end_time': endTime,
         if (weekType != null) 'week_type': weekType,
         if (room != null && room!.isNotEmpty) 'room': room,
+        if (teacherId != null) 'teacher_id': teacherId,
       };
 }
 
 /// Requête de modification d'une entrée (tous les champs optionnels).
+///
+/// [Fix-EDT-FORM-DESKTOP] Ajouts miroir du formulaire desktop « Modifier le
+/// cours » : `timeSlotId` (déplacement sur un créneau de la grille) et
+/// `teacherId` (enseignant affecté à la matière).
 class ScheduleEntryUpdateRequest {
   final int? timeSlotId;
   final int? dayOfWeek;
@@ -414,6 +514,7 @@ class ScheduleEntryUpdateRequest {
   final String? endTime;
   final String? weekType;
   final String? room;
+  final int? teacherId;
 
   const ScheduleEntryUpdateRequest({
     this.timeSlotId,
@@ -422,6 +523,7 @@ class ScheduleEntryUpdateRequest {
     this.endTime,
     this.weekType,
     this.room,
+    this.teacherId,
   });
 
   Map<String, dynamic> toJson() => {
@@ -431,7 +533,10 @@ class ScheduleEntryUpdateRequest {
         if (endTime != null) 'end_time': endTime,
         // Permet de repasser en « toutes les semaines » avec la clé explicite.
         'week_type': weekType,
-        if (room != null) 'room': room,
+        // [Fix-EDT-WEEK-RESET] La clé room est TOUJOURS présente : null =
+        // effacer la salle (le serveur distingue clé absente / null).
+        'room': room,
+        if (teacherId != null) 'teacher_id': teacherId,
       };
 }
 

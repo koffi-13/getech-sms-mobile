@@ -19,7 +19,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/auth/teacher_scope.dart';
 import '../../core/config/constants.dart';
-import '../../core/utils/permissions.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/attendance_dto.dart';
 import '../../shared/models/classroom_dto.dart';
@@ -336,17 +335,13 @@ class _TeacherDropdown extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // Liste des enseignants : GET /users (permission USER_READ).
-    final usersAsync = ref.watch(usersListProvider(''));
+    // [Fix-TEACHERS-DROPDOWN] Liste CANONIQUE des enseignants :
+    // GET /users?role=teacher (filtre serveur par rôle UserRole). L'ancien
+    // filtrage client sur le « rôle principal » ratait les enseignants
+    // multi-rôles → dropdown incomplet (« 3 sur 7 »).
+    final usersAsync = ref.watch(teachersListProvider);
     return usersAsync.when(
-      data: (users) {
-        final teachers = users
-            .where((u) =>
-                u.isActive &&
-                ((u.role ?? '').toLowerCase().contains('teacher') ||
-                    (u.role ?? '').toLowerCase().contains('enseignant')))
-            .toList()
-          ..sort((a, b) => a.fullName.compareTo(b.fullName));
+      data: (teachers) {
         if (teachers.isEmpty) {
           return const Text(
               'Aucun enseignant trouvé (permission USER_READ requise).');

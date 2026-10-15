@@ -103,6 +103,62 @@ final usersListProvider =
   }
 });
 
+/// [Fix-TEACHERS-DROPDOWN] Liste CANONIQUE des enseignants :
+/// `GET /users?role=teacher` (endpoint dédié du serveur — filtre par rôle
+/// UserRole, indépendant du « rôle principal » sérialisé).
+///
+/// L'ancien filtrage client (rôle principal contenant « teacher ») ratait
+/// les enseignants dont le rôle principal affiché était un AUTRE rôle
+/// (multi-rôles) — d'où un dropdown « Enseignant » de l'EDT incomplet
+/// (« 3 chargés sur 7 »). Repli : filtrage client de la liste complète
+/// si le serveur ne supporte pas le paramètre `role`.
+final teachersListProvider =
+    FutureProvider.autoDispose<List<UserDto>>((ref) async {
+  final conn = ref.watch(connectionProvider
+      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
+  if (!conn.isPaired || conn.serverUrl == null) return const [];
+
+  final dio = ref.watch(dioProvider);
+  final url = buildUrl(conn.serverUrl!, ApiEndpoints.users);
+
+  List<UserDto> clientSideFilter(List<UserDto> users) => users
+      .where((u) =>
+          u.isActive &&
+          ((u.role ?? '').toLowerCase().contains('teacher') ||
+              (u.role ?? '').toLowerCase().contains('enseignant')))
+      .toList()
+    ..sort((a, b) => _teacherLabel(a).compareTo(_teacherLabel(b)));
+
+  try {
+    final resp = await dio.getJson<dynamic>(url, query: {
+      'role': 'teacher',
+      'per_page': 200,
+    });
+    final teachers = _parseUserList(resp.data)
+      ..sort((a, b) => _teacherLabel(a).compareTo(_teacherLabel(b)));
+    if (teachers.isNotEmpty) return teachers;
+
+    // Repli : serveur sans support du paramètre `role` (réponse = tous les
+    // utilisateurs, y compris non-enseignants) → filtrage client.
+    final all = await dio.getJson<dynamic>(url, query: {'per_page': 200});
+    return clientSideFilter(_parseUserList(all.data));
+  } on DioException catch (e) {
+    final api = (e.error is ApiException)
+        ? e.error as ApiException
+        : dioErrorToApiException(e);
+    if (api.statusCode == 403) return const [];
+    _log.w('teachersListProvider : ${api.message}');
+    rethrow;
+  } catch (e) {
+    _log.w('teachersListProvider : $e');
+    rethrow;
+  }
+});
+
+/// Libellé de tri d'un enseignant (nom complet, sinon username).
+String _teacherLabel(UserDto u) =>
+    u.fullName.isEmpty ? u.username : u.fullName;
+
 /// Détail d'un utilisateur par ID : `GET /users/{id}`.
 final userDetailProvider =
     FutureProvider.autoDispose.family<UserDto, int>((ref, id) async {

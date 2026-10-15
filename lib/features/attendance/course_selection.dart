@@ -86,3 +86,108 @@ int? defaultClassroomId(
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// [Présence-V10] Groupes de cours jumelés (chevauchements de créneaux)
+// ---------------------------------------------------------------------------
+
+/// Minutes depuis minuit (« HH:mm » → int) ; null si non parsable.
+int? _minutes(String? s) {
+  final hm = parseHm(s);
+  if (hm == null) return null;
+  return hm.$1 * 60 + hm.$2;
+}
+
+/// Groupe de cours d'un même créneau : 1 cours normal, ou PLUSIEURS cours
+/// qui se chevauchent (l'enseignant a JUMELÉ les classes — il fait cours
+/// aux deux classes en même temps).
+class CourseGroup {
+  final List<WeeklyScheduleDto> courses;
+  const CourseGroup(this.courses);
+
+  /// Heure de début du groupe (min depuis minuit).
+  int get startMinutes =>
+      courses.map((c) => _minutes(c.startTime) ?? 0).reduce((a, b) => a < b ? a : b);
+
+  /// Heure de fin du groupe (max des fins).
+  int get endMinutes =>
+      courses.map((c) => _minutes(c.endTime) ?? 0).reduce((a, b) => a > b ? a : b);
+
+  bool get isMerged => courses.length > 1;
+
+  /// Libellé des classes du groupe : « 6A » ou « 6A + 6B » (jumelées).
+  String get classroomLabel {
+    final names = courses
+        .map((c) => c.classroomName ?? 'Classe ${c.classroomId ?? '?'}')
+        .toSet()
+        .toList()
+      ..sort();
+    return names.join(' + ');
+  }
+
+  /// Matière(s) du groupe (une en général ; les jumelages croisés gardent
+  /// les matières distinctes séparées par « / »).
+  String get subjectLabel {
+    final names = courses
+        .map((c) => c.subjectName ?? 'Cours')
+        .toSet()
+        .toList();
+    return names.join(' / ');
+  }
+}
+
+/// Regroupe les cours d'une journée par chevauchement d'intervalles.
+///
+/// Deux cours se chevauchent si `startA < finB` ET `startB < finA`
+/// (l'appartenance à un groupe est transitive). Un chevauchement =
+/// l'enseignant a JUMELÉ les classes : elles forment UN seul créneau.
+List<CourseGroup> groupOverlappingCourses(List<WeeklyScheduleDto> dayCourses) {
+  final sorted = [...dayCourses]
+    ..sort((a, b) => (_minutes(a.startTime) ?? 0)
+        .compareTo(_minutes(b.startTime) ?? 0));
+  final groups = <CourseGroup>[];
+  final groupEnds = <int>[];
+
+  for (final c in sorted) {
+    final start = _minutes(c.startTime);
+    final end = _minutes(c.endTime);
+    var placed = false;
+    for (var i = 0; i < groups.length; i++) {
+      // Trié par début : chevauche le groupe s'il commence avant la fin
+      // (maximale) du groupe.
+      if (start != null && start < groupEnds[i]) {
+        groups[i].courses.add(c);
+        if (end != null && end > groupEnds[i]) groupEnds[i] = end;
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      groups.add(CourseGroup([c]));
+      groupEnds.add(end ?? start ?? 0);
+    }
+  }
+  return groups;
+}
+
+/// Groupe présélectionné selon « l'heure qui sonne » :
+/// - le groupe dont le CRÉNEAU CONTIENT l'heure courante ;
+/// - sinon le prochain groupe à venir (premier créneau non terminé) ;
+/// - sinon le dernier groupe de la journée (rattrapage) ;
+/// - null si aucun cours.
+CourseGroup? autoCourseGroup(
+  List<CourseGroup> groups, {
+  required DateTime now,
+}) {
+  if (groups.isEmpty) return null;
+  final nowMinutes = now.hour * 60 + now.minute;
+  for (final g in groups) {
+    if (nowMinutes >= g.startMinutes && nowMinutes < g.endMinutes) {
+      return g; // l'heure qui sonne est DANS ce créneau.
+    }
+  }
+  for (final g in groups) {
+    if (nowMinutes < g.startMinutes) return g; // prochain créneau.
+  }
+  return groups.last; // journée finie → rattrapage.
+}
