@@ -16,10 +16,13 @@
 /// la surface de codegen.
 library;
 
+import 'dart:convert';
+
 import 'package:collection/collection.dart';
 import 'package:dio/dio.dart';
 import 'package:drift/drift.dart' as d;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/auth/auth_state.dart';
 import '../../core/auth/teacher_scope.dart';
@@ -28,6 +31,8 @@ import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
 import '../../core/sync/outbox.dart';
+import '../../core/sync/sync_engine.dart'
+    show syncGenerationProvider;
 import '../../core/utils/formatters.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
@@ -123,6 +128,16 @@ class BulletinQuery {
   int get hashCode => Object.hash(studentId, classroomId, periodId);
 }
 
+/// Vrai si l'exception traduit une indisponibilité RÉSEAU (aucune réponse
+/// du serveur : timeout, connexion refusée, Wi-Fi coupé…).
+///
+/// [Fix-OFFLINE-GRADES-NETWORK] V15 — utilisée par [GradeController.saveGrades]
+/// pour basculer la saisie vers l'outbox SANS la perdre lorsque la requête
+/// échoue pour une raison réseau (les erreurs serveur 4xx/5xx, elles,
+/// remontent normalement à l'utilisateur).
+bool isNetworkFailure(ApiException e) =>
+    e is NetworkException || e.statusCode == null;
+
 /// Contrôleur Riverpod exposant les opérations de mutation (sauvegarde de
 /// notes, création d'évaluation, suppression d'évaluation). Stateless : la
 /// page appelante gère son propre indicateur de chargement.
@@ -136,6 +151,36 @@ class GradeController {
   bool get _definitivelyOffline {
     final conn = _ref.read(connectionProvider);
     return !conn.canReachServer && !conn.isChecking;
+  }
+
+  /// Met la soumission complète dans l'outbox et renvoie la réponse
+  /// « enregistré hors-ligne » (partagée par le chemin hors-ligne AVANT
+  /// requête et par le repli sur échec réseau PENDANT la requête).
+  Future<SaveGradesResponse> _enqueueGradeSubmission(
+    int assessmentId,
+    List<GradeEntryDto> entries,
+  ) async {
+    await _ref.read(outboxProvider).enqueue(
+      table: 'grade_submission',
+      operation: 'UPSERT',
+      payload: {
+        'assessment_id': assessmentId,
+        'grades': entries.map((e) => e.toJson()).toList(),
+      },
+    );
+    // [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : clé de famille record —
+    // invalidation best-effort (l'instance regardée par le bas de page
+    // porte l'indice de matière, mais la feuille se ferme après
+    // enregistrement et l'autoDispose la nettoie).
+    _ref.invalidate(assessmentGradesProvider(
+      (assessmentId: assessmentId, classSubjectId: null, periodId: null),
+    ));
+    return const SaveGradesResponse(
+      offlineQueued: true,
+      savedCount: 0,
+      skippedCount: 0,
+      queuedCount: 0,
+    );
   }
 
   /// Sauvegarde en lot des notes d'une évaluation — [Offline-First].
@@ -165,39 +210,38 @@ class GradeController {
 
     // 2. Hors-ligne : outbox « grade_submission ».
     if (_definitivelyOffline) {
-      await _ref.read(outboxProvider).enqueue(
-        table: 'grade_submission',
-        operation: 'UPSERT',
-        payload: {
-          'assessment_id': assessmentId,
-          'grades': entries.map((e) => e.toJson()).toList(),
-        },
-      );
-      // [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : clé de famille record —
-      // invalidation best-effort (l'instance regardée par le bas de page
-      // porte l'indice de matière, mais la feuille se ferme après
-      // enregistrement et l'autoDispose la nettoie).
-      _ref.invalidate(assessmentGradesProvider(
-        (assessmentId: assessmentId, classSubjectId: null, periodId: null),
-      ));
-      return const SaveGradesResponse(
-        offlineQueued: true,
-        savedCount: 0,
-        skippedCount: 0,
-        queuedCount: 0,
-      );
+      return _enqueueGradeSubmission(assessmentId, entries);
     }
 
     // 3. En ligne : POST direct.
+    //
+    // [Fix-OFFLINE-GRADES-NETWORK] V15 : si la requête échoue pour une
+    // raison RÉSEAU (serveur desktop arrêté entre-temps, Wi-Fi coupé,
+    // état de connexion périmé — le heartbeat a jusqu'à 30 s de retard),
+    // la saisie part dans l'outbox AU LIEU D'ÊTRE PERDUE derrière un
+    // message d'erreur. Seules les erreurs serveur RÉELLES (403, 422,
+    // 409…) restent remontées à l'utilisateur.
     final body = SaveGradesRequest(
       grades: entries.map((e) => e.toJson()).toList(),
     ).toJson();
-    final resp = await _dio.post(
-      buildUrl(url, ApiEndpoints.assessmentGrades(assessmentId)),
-      data: body,
-    );
-    final data = resp.data is Map
-        ? Map<String, dynamic>.from(resp.data as Map)
+    final dynamic respData;
+    try {
+      final resp = await _dio.post(
+        buildUrl(url, ApiEndpoints.assessmentGrades(assessmentId)),
+        data: body,
+      );
+      respData = resp.data;
+    } on DioException catch (e) {
+      final api = (e.error is ApiException)
+          ? e.error as ApiException
+          : dioErrorToApiException(e);
+      if (isNetworkFailure(api)) {
+        return _enqueueGradeSubmission(assessmentId, entries);
+      }
+      rethrow;
+    }
+    final data = respData is Map
+        ? Map<String, dynamic>.from(respData as Map)
         : <String, dynamic>{};
     final result = SaveGradesResponse.fromJson(data);
 
@@ -281,12 +325,34 @@ class GradeController {
       AssessmentCreateRequest request) async {
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
-    final resp = await _dio.post(
-      buildUrl(url, ApiEndpoints.gradesAssessments),
-      data: request.toJson(),
-    );
-    final data = resp.data is Map
-        ? Map<String, dynamic>.from(resp.data as Map)
+    final dynamic respData;
+    try {
+      final resp = await _dio.post(
+        buildUrl(url, ApiEndpoints.gradesAssessments),
+        data: request.toJson(),
+      );
+      respData = resp.data;
+    } on DioException catch (e) {
+      final api = (e.error is ApiException)
+          ? e.error as ApiException
+          : dioErrorToApiException(e);
+      // [Fix-OFFLINE-ASSESSMENT-CREATE] V15 : message clair et actionnable
+      // si le serveur est injoignable (l'évaluation est référencée par son
+      // id serveur dans les soumissions de notes — sa création ne peut
+      // PAS être différée hors-ligne ; on l'explique simplement au lieu
+      // d'afficher une erreur réseau brute).
+      if (isNetworkFailure(api)) {
+        throw const ApiException(
+          'Impossible de créer l\'évaluation : le serveur est injoignable. '
+          'Reconnectez-vous au serveur de l\'établissement, puis réessayez '
+          '— la saisie de notes sur une évaluation existante reste '
+          'possible hors-ligne.',
+        );
+      }
+      rethrow;
+    }
+    final data = respData is Map
+        ? Map<String, dynamic>.from(respData as Map)
         : <String, dynamic>{};
     final created = AssessmentDto.fromJson(data);
     // Invalide la liste des évaluations pour ce class_subject+period.
@@ -337,6 +403,9 @@ final gradeControllerProvider =
 /// - **Admin / headmaster** : toutes les classes.
 final classroomsForGradesProvider =
     FutureProvider.autoDispose<List<ClassroomDto>>((ref) async {
+  // [Fix-AUTO-SYNC] V15 : rafraîchissement automatique après chaque synchro
+  // utile (le roster / les assignations peuvent avoir changé).
+  ref.watch(syncGenerationProvider);
   // [Fix-HEARTBEAT-REBUILD] select : le heartbeat émet un nouvel état toutes
   // les 30 s (latence) — watcher l'état entier invalidait ce provider et
   // réinitialisait les sélecteurs de la cascade Notes.
@@ -759,6 +828,9 @@ List<ClassSubjectDto> _parseClassSubjectList(dynamic data) {
 /// `GET /grades/assessments?class_subject_id=X&period_id=Y`.
 final assessmentsProvider = FutureProvider.autoDispose
     .family<List<AssessmentDto>, AssessmentsQuery>((ref, q) async {
+  // [Fix-AUTO-SYNC] V15 : rafraîchissement après chaque synchro utile
+  // (évaluations créées par d'autres, comptes de saisie recalculés).
+  ref.watch(syncGenerationProvider);
   // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
   final conn = ref.watch(connectionProvider
       .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
@@ -887,6 +959,11 @@ final assessmentGradesProvider = FutureProvider.autoDispose
         ({int assessmentId, int? classSubjectId, int? periodId})>(
         (ref, q) async {
   final assessmentId = q.assessmentId;
+  // [Fix-AUTO-SYNC] V15 : rafraîchissement après chaque synchro utile —
+  // notamment après le push des soumissions hors-ligne (marques
+  // queued/approved renvoyées par le serveur) et le pull des notes
+  // saisies par d'autres.
+  ref.watch(syncGenerationProvider);
   // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
   // canReachServer/isChecking ne changent qu'aux transitions d'état.
   final conn = ref.watch(connectionProvider.select((c) => (
@@ -1410,12 +1487,46 @@ List<GradeEntryDto> _parseGradeEntryList(dynamic data) {
 
 /// Classement d'une classe pour une période :
 /// `GET /grades/ranking?classroom_id=&period_id=&ranking_mode=&subject_id=`.
+///
+/// [Fix-RANKING-OFFLINE] V15 — retour utilisateur : « le classement
+/// devrait s'afficher aussi en mode hors-ligne et s'actualiser
+/// automatiquement à la connexion » :
+/// - chaque réussite en ligne est mise en cache localement
+///   ([writeRankingCache], SharedPreferences JSON par requête) ;
+/// - hors-ligne (état connu OU échec réseau en cours de requête), le
+///   cache est servi s'il existe — plus jamais d'écran bloquant vide ;
+/// - le select surveille AUSSI `canReachServer` : la transition
+///   hors-ligne → en ligne relance le provider (actualisation
+///   automatique à la reconnexion) ;
+/// - [syncGenerationProvider] est surveillé : après une synchro qui a
+///   poussé des notes (moyennes recalculées côté serveur), le classement
+///   affiché se rafraîchit tout seul.
 final rankingProvider = FutureProvider.autoDispose
     .family<List<RankingRowDto>, RankingQuery>((ref, q) async {
   // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
-  final conn = ref.watch(connectionProvider
-      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+  final conn = ref.watch(connectionProvider.select((c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      )));
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return readRankingCache(q) ?? const <RankingRowDto>[];
+  }
+  // [Fix-AUTO-SYNC] V15 : rafraîchissement après chaque synchro utile.
+  ref.watch(syncGenerationProvider);
+
+  final definitelyOffline = !conn.canReachServer && !conn.isChecking;
+  if (definitelyOffline) {
+    final cached = await readRankingCache(q);
+    if (cached != null) return cached;
+    throw const ApiException(
+      'Classement indisponible hors-ligne : aucune donnée en cache pour '
+      'cette classe et cette période. Il s\'affichera automatiquement dès '
+      'la reconnexion au serveur.',
+    );
+  }
+
   final dio = ref.watch(dioProvider);
   try {
     final params = <String, dynamic>{
@@ -1430,22 +1541,76 @@ final rankingProvider = FutureProvider.autoDispose
       buildUrl(conn.serverUrl!, ApiEndpoints.gradesRanking),
       queryParameters: params,
     );
-    return _parseRankingList(resp.data);
+    final rows = _parseRankingList(resp.data);
+    await writeRankingCache(q, rows);
+    return rows;
   } on DioException catch (e) {
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
     if (api.statusCode == 403) {
       // [Fix-TEACHER-CLASSES-403] Message explicite au lieu d'une liste vide
-      // silencieuse — l'appelant retombe sur le cache Drift.
+      // silencieuse.
       throw const ApiException(
         'Accès refusé — vous n\'avez pas les droits nécessaires.',
         statusCode: 403,
       );
     }
+    // [Fix-RANKING-OFFLINE] réseau KO en cours de requête → cache local.
+    if (isNetworkFailure(api)) {
+      final cached = await readRankingCache(q);
+      if (cached != null) return cached;
+      throw const ApiException(
+        'Classement indisponible : le serveur est injoignable et aucune '
+        'donnée n\'est en cache pour cette classe et cette période.',
+      );
+    }
     rethrow;
   }
 });
+
+/// [Fix-RANKING-OFFLINE] Clé du cache de classement (une par requête :
+/// classe + période + mode + matière). Public pour les tests
+/// (v15_auto_sync_test.dart).
+String rankingCacheKey(RankingQuery q) =>
+    'ranking_cache_${q.classroomId}_${q.periodId}_${q.rankingMode.serverValue}'
+    '${q.subjectId != null ? '_s${q.subjectId}' : ''}';
+
+/// [Fix-RANKING-OFFLINE] Écrit le classement en cache (best-effort).
+Future<void> writeRankingCache(
+    RankingQuery q, List<RankingRowDto> rows) async {
+  if (rows.isEmpty) return;
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      rankingCacheKey(q),
+      jsonEncode({
+        'saved_at': DateTime.now().toIso8601String(),
+        'rows': rows.map((r) => r.toJson()).toList(),
+      }),
+    );
+  } catch (_) {
+    // Best-effort : le cache ne doit jamais casser l'affichage en ligne.
+  }
+}
+
+/// [Fix-RANKING-OFFLINE] Lit le classement en cache (null si absent ou
+/// vide — l'appelant distingue « pas de données » d'une liste vide).
+Future<List<RankingRowDto>?> readRankingCache(RankingQuery q) async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(rankingCacheKey(q));
+    if (raw == null || raw.isEmpty) return null;
+    final j = Map<String, dynamic>.from(jsonDecode(raw) as Map);
+    final rows = (j['rows'] as List? ?? const [])
+        .whereType<Map>()
+        .map((e) => RankingRowDto.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+    return rows.isEmpty ? null : rows;
+  } catch (_) {
+    return null;
+  }
+}
 
 List<RankingRowDto> _parseRankingList(dynamic data) {
   if (data is List) {

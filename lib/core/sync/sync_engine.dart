@@ -62,6 +62,18 @@ DateTime? _rDt(Map<String, dynamic> r, String k) {
 // SyncState & Progress
 // ---------------------------------------------------------------------------
 
+/// [Fix-AUTO-SYNC] V15 — génération de synchronisation : incrémentée à la
+/// fin de chaque synchronisation qui a transféré des données (pull ou
+/// push). Les providers de données qui la surveillent (classement,
+/// évaluations, notes, classes…) se rafraîchissent alors automatiquement
+/// — retour utilisateur : « le classement devrait s'actualiser
+/// automatiquement à la connexion ».
+///
+/// ⚠️ Ne surveiller CE provider que dans des `FutureProvider.autoDispose`
+/// de lecture : il est incrémenté uniquement par [SyncEngine.syncNow]
+/// (jamais depuis les providers eux-mêmes → aucun cycle).
+final syncGenerationProvider = StateProvider<int>((ref) => 0);
+
 enum SyncStatus { idle, pulling, pushing, processing, success, error }
 
 class SyncProgress {
@@ -205,6 +217,15 @@ class SyncEngine {
       errors: errors,
     );
     notifier.complete(finalResult);
+
+    // [Fix-AUTO-SYNC] V15 : une synchro qui a transféré des données rend
+    // les caches d'affichage potentiellement périmés (moyennes
+    // recalculées côté serveur après le push des notes, roster
+    // actualisé…). On incrémente la génération : les providers de
+    // lecture qui la surveillent se rafraîchissent tous seuls.
+    if (finalResult.isSuccess && (pulled > 0 || pushed > 0)) {
+      _ref.read(syncGenerationProvider.notifier).state++;
+    }
     return finalResult;
   }
 

@@ -15,6 +15,7 @@ import 'core/auth/teacher_scope.dart';
 import 'core/config/theme.dart';
 import 'core/notifications/notification_service.dart';
 import 'core/notifications/notification_store.dart';
+import 'core/sync/auto_sync.dart';
 import 'features/attendance/attendance_history_page.dart';
 import 'features/attendance/attendance_page.dart';
 import 'features/auth/login_page.dart';
@@ -641,6 +642,19 @@ class _GeTechAppState extends ConsumerState<GeTechApp>
     _remindersTimer = Timer.periodic(const Duration(minutes: 15), (_) {
       _rescheduleRemindersIfNeeded();
     });
+    // [Fix-AUTO-SYNC] V15 — « tant que le serveur est en ligne avec
+    // l'application mobile, la connexion et la synchronisation
+    // s'effectuent automatiquement » : chaque transition « serveur
+    // injoignable → en ligne » (heartbeat 30 s, démarrage, retour au
+    // premier plan) déclenche une synchro complète automatique — l'outbox
+    // (notes saisies hors-ligne…) est poussé sans action manuelle, et les
+    // pages affichées se rafraîchissent via syncGenerationProvider.
+    ref.listenManual<ConnectionState>(
+      connectionProvider,
+      (prev, next) => ref
+          .read(autoSyncControllerProvider)
+          .handleConnectionChange(prev, next),
+    );
   }
 
   @override
@@ -658,6 +672,11 @@ class _GeTechAppState extends ConsumerState<GeTechApp>
       // recharger l'historique du centre de notifications.
       _rescheduleRemindersIfNeeded();
       ref.read(notificationCenterProvider.notifier).reload();
+      // [Fix-AUTO-SYNC] V15 : re-ping immédiat du serveur (le heartbeat ne
+      // passe que toutes les 30 s) — si le serveur est revenu en ligne
+      // pendant que l'app était en arrière-plan, la transition déclenche
+      // la synchro automatique sans attendre le prochain battement.
+      ref.read(autoSyncControllerProvider).onAppResumed();
     }
   }
 

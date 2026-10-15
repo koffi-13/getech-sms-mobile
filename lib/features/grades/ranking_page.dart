@@ -134,86 +134,117 @@ class _RankingBodyState extends ConsumerState<_RankingBody> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('Classement')),
-      body: !conn.canReachServer && !conn.isChecking
-          ? const EmptyState(
-              title: 'Hors-ligne',
-              message: 'Le classement nécessite une connexion au serveur.',
-              icon: Icons.cloud_off,
-            )
-          : ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                _FiltersCard(
-                  classrooms: classrooms,
-                  periods: periods,
-                  subjects: subjects,
-                  classroomId: _classroomId,
-                  periodId: _periodId,
-                  mode: _mode,
-                  subjectId: _subjectId,
-                  canUseGlobalRanking: canUseGlobalRanking,
-                  onClassroomChanged: (id) => setState(() {
-                    _classroomId = id;
-                    _subjectId = null;
-                    // La période sera re-filtrée par le cycle de la nouvelle
-                    // classe puis auto-sélectionnée (période active).
-                    _periodId = null;
-                  }),
-                  onPeriodChanged: (id) => setState(() => _periodId = id),
-                  onModeChanged: (m) => setState(() => _mode = m),
-                  onSubjectChanged: (id) => setState(() => _subjectId = id),
+      // [Fix-RANKING-OFFLINE] V15 — plus de garde bloquante « Hors-ligne » :
+      // le classement consulté en ligne est servi depuis le cache local
+      // (rankingProvider), et s'actualise automatiquement à la reconnexion
+      // (le provider surveille la transition + la génération de synchro).
+      body: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            // [Fix-RANKING-OFFLINE] Bandeau informatif (jamais bloquant).
+            if (!conn.canReachServer && !conn.isChecking)
+              Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.tertiaryContainer,
+                  borderRadius: BorderRadius.circular(12),
                 ),
-                const SizedBox(height: 16),
-                if (query == null)
-                  const EmptyState(
-                    title: 'Sélectionnez une classe et une période',
-                    icon: Icons.filter_list,
-                  )
-                else if (_mode == RankingMode.subject && _subjectId == null)
-                  const EmptyState(
-                    title: 'Sélectionnez une matière',
-                    message:
-                        'Le mode SUBJECT nécessite une matière spécifique.',
-                    icon: Icons.book_outlined,
-                  )
-                else
-                  ref.watch(rankingProvider(query)).when(
-                        data: (rows) {
-                          if (rows.isEmpty) {
-                            return const EmptyState(
-                              title: 'Aucun élève classé',
-                              message:
-                                  'Aucune note n\'a été saisie pour cette classe/période.',
-                              icon: Icons.leaderboard_outlined,
-                            );
-                          }
-                          return Column(
-                            children: [
-                              _RankingSummary(rows: rows),
-                              const SizedBox(height: 16),
-                              ...rows
-                                  .asMap()
-                                  .entries
-                                  .map((entry) => _RankingRow(
-                                        row: entry.value,
-                                        rank: entry.value.rank != 0
-                                            ? entry.value.rank
-                                            : entry.key + 1,
-                                        classroomId: _classroomId!,
-                                        periodId: _periodId!,
-                                      ))
-                                  .toList(),
-                            ],
-                          );
-                        },
-                        loading: () => const AppLoading(
-                            label: 'Calcul du classement…'),
-                        error: (e, _) => AppErrorWidget(
-                          message: e.toString(),
-                          onRetry: () => ref.invalidate(rankingProvider(query)),
-                        ),
+                child: Row(
+                  children: [
+                    Icon(Icons.cloud_off_outlined,
+                        size: 18,
+                        color:
+                            Theme.of(context).colorScheme.onTertiaryContainer),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Mode hors-ligne — classement issu du cache local. '
+                        'Il sera actualisé automatiquement à la reconnexion.',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onTertiaryContainer),
                       ),
-              ],
+                    ),
+                  ],
+                ),
+              ),
+            _FiltersCard(
+              classrooms: classrooms,
+              periods: periods,
+              subjects: subjects,
+              classroomId: _classroomId,
+              periodId: _periodId,
+              mode: _mode,
+              subjectId: _subjectId,
+              canUseGlobalRanking: canUseGlobalRanking,
+              onClassroomChanged: (id) => setState(() {
+                _classroomId = id;
+                _subjectId = null;
+                // La période sera re-filtrée par le cycle de la nouvelle
+                // classe puis auto-sélectionnée (période active).
+                _periodId = null;
+              }),
+              onPeriodChanged: (id) => setState(() => _periodId = id),
+              onModeChanged: (m) => setState(() => _mode = m),
+              onSubjectChanged: (id) => setState(() => _subjectId = id),
+            ),
+            const SizedBox(height: 16),
+            if (query == null)
+              const EmptyState(
+                title: 'Sélectionnez une classe et une période',
+                icon: Icons.filter_list,
+              )
+            else if (_mode == RankingMode.subject && _subjectId == null)
+              const EmptyState(
+                title: 'Sélectionnez une matière',
+                message:
+                    'Le mode SUBJECT nécessite une matière spécifique.',
+                icon: Icons.book_outlined,
+              )
+            else
+              ref.watch(rankingProvider(query)).when(
+                    data: (rows) {
+                      if (rows.isEmpty) {
+                        return const EmptyState(
+                          title: 'Aucun élève classé',
+                          message:
+                              'Aucune note n\'a été saisie pour cette classe/période.',
+                          icon: Icons.leaderboard_outlined,
+                        );
+                      }
+                      return Column(
+                        children: [
+                          _RankingSummary(rows: rows),
+                          const SizedBox(height: 16),
+                          ...rows
+                              .asMap()
+                              .entries
+                              .map((entry) => _RankingRow(
+                                    row: entry.value,
+                                    rank: entry.value.rank != 0
+                                        ? entry.value.rank
+                                        : entry.key + 1,
+                                    classroomId: _classroomId!,
+                                    periodId: _periodId!,
+                                  ))
+                              .toList(),
+                        ],
+                      );
+                    },
+                    loading: () => const AppLoading(
+                        label: 'Calcul du classement…'),
+                    error: (e, _) => AppErrorWidget(
+                      message: e.toString(),
+                      onRetry: () => ref.invalidate(rankingProvider(query)),
+                    ),
+                  ),
+          ],
             ),
     );
   }

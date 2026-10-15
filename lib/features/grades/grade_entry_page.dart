@@ -24,6 +24,7 @@
 library;
 
 import 'package:collection/collection.dart'; // firstOrNull
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -1400,6 +1401,15 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
       }
     } on ApiException catch (e) {
       _showError(e.message);
+    } on DioException catch (e) {
+      // [Fix-OFFLINE-GRADES-NETWORK] V15 : les pannes RÉSEAU basculent déjà
+      // vers l'outbox dans le contrôleur (plus jamais de saisie perdue) —
+      // il ne reste ici que des erreurs serveur réelles (403, 409, 422…) :
+      // message humanisé au lieu d'un « DioException » brut.
+      final api = (e.error is ApiException)
+          ? e.error as ApiException
+          : dioErrorToApiException(e);
+      _showError(api.message);
     } catch (e) {
       _showError('Erreur : $e');
     } finally {
