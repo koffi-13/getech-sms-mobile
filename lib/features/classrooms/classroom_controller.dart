@@ -18,6 +18,7 @@ import '../../core/database/database.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
+import '../../core/sync/sync_engine.dart' show syncGenerationProvider;
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
 
@@ -31,6 +32,12 @@ final log_pkg.Logger _log = log_pkg.Logger(
 // ---------------------------------------------------------------------------
 
 final classroomsProvider = StateNotifierProvider.autoDispose<ClassroomController, AsyncValue<List<ClassroomDto>>>((ref) {
+  // [Fix-CLASSES-REACTIVE] Surveille le compteur de génération de sync :
+  // après une synchro qui rafraîchit le cache (et potentiellement écrase
+  // `current_students_count` — voir fix sync_engine case 'classrooms'),
+  // ce provider se recalcule et l'UI affiche l'effectif à jour (cf. Bug 2).
+  // Miroir du pattern utilisé dans `grade_controller.dart:408`.
+  ref.watch(syncGenerationProvider);
   return ClassroomController(ref);
 });
 
@@ -217,18 +224,9 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
         .get();
 
     // Comptage local groupé en une seule requête (pas de N+1).
-    final countExpr = db.studentClassAssignments.id.count();
-    final countRows = await (db.selectOnly(db.studentClassAssignments)
-          ..addColumns([db.studentClassAssignments.classroomId, countExpr])
-          ..where(db.studentClassAssignments.isDeleted.equals(false))
-          ..groupBy([db.studentClassAssignments.classroomId]))
-        .get();
-    final localCounts = <int, int>{};
-    for (final row in countRows) {
-      final cid = row.read(db.studentClassAssignments.classroomId);
-      if (cid == null) continue;
-      localCounts[cid] = row.read(countExpr) ?? 0;
-    }
+    // [Fix-COUNTS-EXITED] + [Fix-COUNTS-YEAR-FILTER] — voir
+    // `localActiveStudentCounts` (helper mutualisé avec `teacher_scope`).
+    final localCounts = await localActiveStudentCounts(db);
 
     final dtos = <ClassroomDto>[];
     for (final c in classrooms) {
@@ -284,4 +282,61 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
       }
     });
   }
+}
+
+/// [Fix-COUNTS-LOCAL-HELPER] Comptage local des assignations actives par
+/// classe, partagé entre le contrôleur Classes et le périmètre enseignant
+/// (`teacher_scope._localTeacherScope`).
+///
+/// Filtres appliqués (miroir du helper serveur
+/// `_current_students_counts` dans `api/routers/classrooms.py`) :
+/// - `isDeleted = false` (lignes marquées supprimées) ;
+/// - année scolaire active (ou NULL — données héritées pré-V11) ;
+/// - `inscriptionType` ni EXCLU ni ABANDON (ou NULL — élève sans type).
+///
+/// Si `classroomIds` est fourni, le comptage est restreint à cet ensemble
+/// (sinon : toutes les classes — pour le périmètre enseignant).
+///
+/// Retourne une map `{classroom_id: count}` (0 si aucune assignation).
+Future<Map<int, int>> localActiveStudentCounts(
+  AppDatabase db, {
+  List<int>? classroomIds,
+}) async {
+  // Année active : on ne compte QUE les assignations de l'année active (ou
+  // sans année — données héritées pré-V11). Sans ce filtre, les assignations
+  // des années antérieures (restées actives côté serveur) gonflent l'effectif
+  // affiché. Repli sans filtre année si aucune année active.
+  final activeYears = await (db.select(db.schoolYears)
+        ..where((t) => t.isActive.equals(true))
+        ..orderBy([(t) => d.OrderingTerm.desc(t.id)])
+        ..limit(1))
+      .get();
+  final activeYearId = activeYears.isEmpty ? null : activeYears.first.id;
+
+  final countExpr = db.studentClassAssignments.id.count();
+  var query = db.selectOnly(db.studentClassAssignments)
+    ..addColumns([db.studentClassAssignments.classroomId, countExpr])
+    ..where(db.studentClassAssignments.isDeleted.equals(false));
+  if (classroomIds != null && classroomIds.isNotEmpty) {
+    query = query
+      ..where(db.studentClassAssignments.classroomId.isIn(classroomIds));
+  }
+  if (activeYearId != null) {
+    query = query
+      ..where(db.studentClassAssignments.schoolYearId.equals(activeYearId) |
+          db.studentClassAssignments.schoolYearId.isNull());
+  }
+  query = query
+    ..where(db.studentClassAssignments.inscriptionType
+            .isNotIn(['EXCLU', 'ABANDON']) |
+        db.studentClassAssignments.inscriptionType.isNull())
+    ..groupBy([db.studentClassAssignments.classroomId]);
+  final rows = await query.get();
+  final out = <int, int>{};
+  for (final row in rows) {
+    final cid = row.read(db.studentClassAssignments.classroomId);
+    if (cid == null) continue;
+    out[cid] = row.read(countExpr) ?? 0;
+  }
+  return out;
 }

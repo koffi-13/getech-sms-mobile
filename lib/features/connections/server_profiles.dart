@@ -146,6 +146,36 @@ class ServerProfileRegistry {
     _profiles = _readProfiles();
     _activeId = _prefs.getString(_kActiveId);
 
+    // [Fix-DEV-URL-LEAK] V16 — purge des profils dont l'URL pointe vers
+    // localhost/127.0.0.1 : ces profils proviennent d'une migration legacy
+    // (cf. [_migrateLegacy]) ou d'un appairage de test fait en dev. Sur un
+    // appareil physique, « localhost » désigne le mobile lui-même : le
+    // profil est inutilisable et pollue l'écran « Gérer les connexions
+    // serveur ». On supprime aussi le token d'appairage correspondant pour
+    // éviter des identifiants orphelins dans le Keystore/Keychain.
+    if (_profiles.isNotEmpty) {
+      final purged = <ServerProfile>[];
+      for (final p in _profiles) {
+        if (_isLocalhostUrl(p.serverUrl)) {
+          _log.w('Profil ${p.id} ignoré (URL localhost : ${p.serverUrl}) — '
+              'suppression du token d\'appairage orphelin.');
+          try {
+            await _storage.delete(
+              _storage.profileKey('getech.device_token', p.id),
+            );
+          } catch (e) {
+            _log.w('Échec suppression token orphelin ${p.id} : $e');
+          }
+          continue;
+        }
+        purged.add(p);
+      }
+      if (purged.length != _profiles.length) {
+        _profiles = purged;
+        await _persist();
+      }
+    }
+
     if (_profiles.isEmpty) {
       await _migrateLegacy();
     }
@@ -155,11 +185,30 @@ class ServerProfileRegistry {
     }
   }
 
+  /// Vrai si [url] pointe vers le mobile lui-même (localhost / 127.0.0.1).
+  /// Ces URLs sont des résidus de config dev/test inutilisables sur un
+  /// appareil physique.
+  ///
+  /// [Fix-DEV-URL-LEAK] V16 — partagé entre la purge au chargement
+  /// (cf. [load]) et le filtrage de la migration legacy (cf.
+  /// [_migrateLegacy]) pour éviter qu'une URL dev ne survive indéfiniment.
+  static bool _isLocalhostUrl(String url) {
+    final lower = url.toLowerCase();
+    return lower.contains('localhost') || lower.contains('127.0.0.1');
+  }
+
   /// Convertit l'ancienne config mono-serveur en profil « main ».
   ///
   /// Le fichier de base reste `getech_sms.db` : les données locales de
   /// l'utilisateur (cache Drift, outbox) sont intégralement conservées.
   /// Le token d'appairage legacy est copié vers la clé par profil.
+  ///
+  /// [Fix-DEV-URL-LEAK] V16 — ne migre JAMAIS une URL localhost/127.0.0.1 :
+  /// sur un appareil physique, cette URL désigne le mobile lui-même, le
+  /// profil serait inutilisable et s'afficherait indéfiniment dans
+  /// « Gérer les connexions serveur ». On logge un avertissement et on
+  /// abandonne la migration (l'utilisateur devra re-appairer via le
+  /// module Connexions avec l'IP LAN réelle du desktop).
   Future<void> _migrateLegacy() async {
     final legacyUrl = _prefs.getString('server_url');
     final legacyIp = _prefs.getString('server_ip');
@@ -175,6 +224,17 @@ class ServerProfileRegistry {
       url = 'http://$legacyIp:${legacyPort ?? 8000}/api/v1';
     }
     if (url == null || legacyToken == null || legacyToken.isEmpty) return;
+
+    // Refuser les URLs dev/test qui survivraient indéfiniment dans le
+    // registre multi-serveurs (localhost/127.0.0.1 sur mobile = mobile
+    // lui-même). On évite ainsi qu'un profil inutilisable encombre
+    // l'écran de Connexions.
+    if (_isLocalhostUrl(url)) {
+      _log.w('Migration mono-serveur ignorée : URL legacy « $url » pointe '
+          'vers localhost/127.0.0.1 — inutilisable sur mobile physique. '
+          'Re-appairez via Connexions avec l\'IP LAN du desktop.');
+      return;
+    }
 
     final profile = ServerProfile(
       id: 'main',

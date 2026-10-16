@@ -1,7 +1,8 @@
 /// Configuration globale de l'application GeTech-SMS Mobile.
 ///
-/// Centralise : URL serveur par défaut, timeouts, clés de stockage sécurisé,
-/// type de service mDNS, limites de synchro, etc.
+/// Centralise : timeouts, clés de stockage sécurisé, type de service mDNS,
+/// limites de synchro, etc. L'URL du serveur est TOUJOURS configurée via
+/// le module Connexions (jamais hard-codée).
 library;
 
 import 'package:flutter/foundation.dart';
@@ -19,11 +20,6 @@ class AppConfig {
   /// Préfixe de l'API REST (toujours relatif, complété par l'URL serveur).
   static const String apiPrefix = '/api/v1';
 
-  /// URL serveur par défaut en développement local.
-  /// En production, l'URL est configurée via le module Connexions
-  /// (ex: http://192.168.1.10:8000/api/v1).
-  static const String defaultServerUrl = 'http://localhost:8000/api/v1';
-
   /// Durée de validité du token d'appairage (QR code) côté desktop : 5 min.
   static const Duration pairingTokenTtl = Duration(minutes: 5);
 
@@ -37,8 +33,16 @@ class AppConfig {
   static const Duration receiveTimeout = Duration(seconds: 30);
   static const Duration sendTimeout = Duration(seconds: 30);
 
-  /// Intervalle de synchro automatique en arrière-plan (5 min).
-  static const Duration syncInterval = Duration(minutes: 5);
+  /// Intervalle de synchro automatique en arrière-plan.
+  ///
+  /// [Fix-SYNC-INTERVAL-HONESTY] Android WorkManager impose un minimum de
+  /// 15 min (les valeurs inférieures sont silencieusement clampées à 15 min
+  /// par le système — voir [main.dart]) : on déclare donc 15 min au lieu
+  /// du 5 min historique pour être honnête avec l'utilisateur sur le
+  /// délai MAXIMAL entre deux sync en arrière-plan. La synchro RAPIDE est
+  /// assurée par le heartbeat 30 s + [AutoSyncController] sur transition
+  /// réseau (cf. [network_state.dart]).
+  static const Duration syncInterval = Duration(minutes: 15);
 
   /// Latence considérée comme "serveur injoignable".
   static const Duration unreachableThreshold = Duration(seconds: 10);

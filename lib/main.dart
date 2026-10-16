@@ -33,7 +33,12 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // Initialisation de la synchro en arrière-plan.
-  // Note : la période minimale d'Android WorkManager est 15 min.
+  // [Fix-SYNC-INTERVAL-HONESTY] Android WorkManager impose un minimum de
+  // 15 min : AppConfig.syncInterval vaut désormais 15 min (et non plus 5 min)
+  // — Android clampe silencieusement toute valeur inférieure, le déclarer
+  // honnêtement évite les retours « la synchro de fond est plus espacée que
+  // prévu ». La synchro RAPIDE reste assurée par le heartbeat 30 s +
+  // AutoSyncController (transition réseau) et la synchro post-login.
   //
   // [Fix-DEV-NOTIFS] V10 : `isInDebugMode` TOUJOURS false — en mode debug,
   // le plugin workmanager affiche des NOTIFICATIONS DE DÉVELOPPEMENT

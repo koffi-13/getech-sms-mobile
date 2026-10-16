@@ -29,6 +29,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../features/connections/connection_state.dart';
+import '../network/network_state.dart';
 import 'sync_engine.dart';
 
 /// Décision pure (testable) : faut-il déclencher une synchro automatique
@@ -77,6 +78,34 @@ class AutoSyncController {
     }
   }
 
+  /// [Fix-AUTO-BG-SYNC] V16 — réagir à une transition « hors-ligne → en
+  /// ligne » de l'appareil (WiFi réactivé, retour de mode avion, bascule
+  /// 4G→WiFi…) pendant que l'app est en arrière-plan : re-pinger le
+  /// serveur immédiatement (le heartbeat 30 s ne verra la transition
+  /// qu'au prochain battement, soit jusqu'à 30 s d'attente) puis
+  /// planifier une synchro avec le debounce habituel.
+  ///
+  /// Si le serveur est désormais joignable, [checkStatus] fait
+  /// basculer l'état vers `online` → [handleConnectionChange]
+  /// (branché dans [GeTechApp]) re-planifie une synchro ; le présent
+  /// `_schedule()` est un filet de sécurité qui couvre le cas où
+  /// l'état était DÉJÀ `online` au moment de la transition réseau
+  /// (le serveur répondait, mais le téléphone était hors-réseau —
+  /// l'état `canReachServer` n'avait pas changé).
+  ///
+  /// Comparé à [onAppResumed] qui ne déclenche QUE le ping (la synchro
+  /// est ensuite pilotée par [handleConnectionChange]), ici on ping ET
+  /// on planifie une synchro en parallèle : en arrière-plan, l'utilisateur
+  /// ne peut PAS déclencher la synchro manuellement, il faut la
+  /// déclencher pour lui.
+  void onNetworkRestored() {
+    final conn = _ref.read(connectionProvider);
+    if (conn.isPaired && !conn.forceOffline) {
+      unawaited(_ref.read(connectionProvider.notifier).checkStatus());
+      _schedule();
+    }
+  }
+
   void _schedule() {
     _debounce?.cancel();
     // Petit délai : laisse le heartbeat/serveur se stabiliser (le ping
@@ -121,6 +150,31 @@ class AutoSyncController {
 /// Provider de l'orchestrateur (vivant toute la durée de l'app).
 final autoSyncControllerProvider = Provider<AutoSyncController>((ref) {
   final controller = AutoSyncController(ref);
+
+  // [Fix-AUTO-BG-SYNC] V16 — s'abonner à l'état de connectivité réseau
+  // (connectivity_plus) pour déclencher un ping serveur + synchro
+  // automatique sur transition « hors-ligne → en ligne » (WiFi réactivé,
+  // retour de mode avion…). Avant ce correctif, l'app ne réagissait qu'au
+  // heartbeat 30 s et au retour au premier plan : en arrière-plan, un
+  // utilisateur dont le téléphone revenait sur le réseau devait attendre
+  // le prochain tick WorkManager (15 min) pour que l'outbox soit poussé.
+  //
+  // `ref.listen` (vs `ref.watch`) : on n'a PAS besoin que la
+  // reconstruction du controller soit déclenchée par les transitions —
+  // seulement être notifié pour appeler [onNetworkRestored].
+  //
+  // Gestion du `prev` : à la première émission, `prev?.valueOrNull` est
+  // null (état loading initial) — on le traite comme « inconnu / hors-ligne
+  // par sécurité » pour éviter de rater la transition initiale.
+  ref.listen<AsyncValue<bool>>(networkStateProvider, (prev, next) {
+    next.whenData((isOnline) {
+      final wasOnline = prev?.valueOrNull ?? false;
+      if (!wasOnline && isOnline) {
+        controller.onNetworkRestored();
+      }
+    });
+  });
+
   ref.onDispose(controller.dispose);
   return controller;
 });

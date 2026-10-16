@@ -239,10 +239,34 @@ class StudentController extends StateNotifier<AsyncValue<List<StudentDto>>> {
   Future<List<StudentDto>> _fetchFromLocal() async {
     final db = _ref.read(databaseProvider);
 
+    // [Fix-STUDENT-DUP-LEFT-JOIN] La jointure LEFT OUTER élèves →
+    // student_class_assignments produisait une ligne par assignation : un
+    // élève redoublant (2 assignations actives pour 2 années) apparaissait 2×
+    // dans la liste Élèves. On restreint la jointure aux assignations de
+    // l'année active (ou NULL — données héritées pré-V11) et non supprimées.
+    // Sans ce filtre dans le ON, un WHERE sur `studentClassAssignments` aurait
+    // converti la jointure en INNER JOIN (un élève sans assignation aurait
+    // disparu de la liste).
+    final activeYears = await (db.select(db.schoolYears)
+          ..where((t) => t.isActive.equals(true))
+          ..orderBy([(t) => d.OrderingTerm.desc(t.id)])
+          ..limit(1))
+        .get();
+    final activeYearId = activeYears.isEmpty ? null : activeYears.first.id;
+
+    var assignOn = db.studentClassAssignments.studentId
+            .equalsExp(db.students.id) &
+        db.studentClassAssignments.isDeleted.equals(false);
+    if (activeYearId != null) {
+      assignOn = assignOn &
+          (db.studentClassAssignments.schoolYearId.equals(activeYearId) |
+              db.studentClassAssignments.schoolYearId.isNull());
+    }
+
     final rows = await (db.select(db.students).join([
       d.leftOuterJoin(
         db.studentClassAssignments,
-        db.studentClassAssignments.studentId.equalsExp(db.students.id),
+        assignOn,
       ),
       d.leftOuterJoin(
         db.classrooms,

@@ -27,6 +27,8 @@ import 'package:dio/dio.dart';
 import 'package:drift/drift.dart' as d;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../features/classrooms/classroom_controller.dart'
+    show localActiveStudentCounts;
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/attendance_dto.dart';
 import '../../shared/models/classroom_dto.dart';
@@ -299,20 +301,33 @@ Future<_LocalTeacherScope> _localTeacherScope(Ref ref, int? userId) async {
         ..where((t) => t.isDeleted.equals(false)))
       .get();
 
+  // [Fix-COUNTS-NULL] Repli de comptage : après une sync pull, la colonne
+  // dénormalisée `currentStudentsCount` peut être NULL (cas historique avant
+  // le fix sync_engine case 'classrooms' qui préserve les colonnes
+  // dénormalisées). On recompute via la même requête que
+  // `ClassroomController._fetchFromLocal` (helper `localActiveStudentCounts`).
+  // Idem quand le serveur a renvoyé 0 (élève sorti compté puis exclus).
+  final localCounts = await localActiveStudentCounts(db);
+
   List<ClassroomDto> all = classrooms
-      .map((c) => ClassroomDto(
-            id: c.id,
-            name: c.name,
-            // La colonne locale teacherId EST le titulaire (head teacher).
-            headTeacherId: c.teacherId,
-            headTeacherName: c.headTeacherName,
-            levelName: c.levelName,
-            cycleName: c.cycleName,
-            cycleId: c.cycleId,
-            seriesName: c.seriesName,
-            currentStudentsCount: c.currentStudentsCount,
-            maxStudents: c.capacity == 0 ? null : c.capacity,
-          ))
+      .map((c) {
+        final serverCount = c.currentStudentsCount ?? 0;
+        final localCount = localCounts[c.id] ?? 0;
+        final effectiveCount = serverCount > 0 ? serverCount : localCount;
+        return ClassroomDto(
+          id: c.id,
+          name: c.name,
+          // La colonne locale teacherId EST le titulaire (head teacher).
+          headTeacherId: c.teacherId,
+          headTeacherName: c.headTeacherName,
+          levelName: c.levelName,
+          cycleName: c.cycleName,
+          cycleId: c.cycleId,
+          seriesName: c.seriesName,
+          currentStudentsCount: effectiveCount,
+          maxStudents: c.capacity == 0 ? null : c.capacity,
+        );
+      })
       .toList();
 
   List<ClassroomDto> teaching = const [];

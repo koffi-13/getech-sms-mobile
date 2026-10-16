@@ -861,6 +861,132 @@ class SyncEngine {
     });
   }
 
+  // [Fix-SYNC-PRESERVE-DENORM] V17 — Bug 2 résiduel #1
+  // Cf. [_applyTableChanges] early-return case 'classrooms' pour le contexte.
+  // Utilise `insertOnConflictUpdate` (UPSERT SQLite) qui ne met à jour QUE
+  // les colonnes présentes dans le companion — les colonnes dénormalisées
+  // (currentStudentsCount, headTeacherName, levelName, cycleName, cycleId,
+  // seriesName) NON présentes dans le companion sont PRÉSERVÉES sur les
+  // lignes existantes. Pour les NOUVELLES lignes (première sync), ces
+  // colonnes sont NULL — elles seront peuplées par le prochain
+  // `_fetchFromApi()` du contrôleur Classes (qui utilise `insertOrReplace`
+  // avec currentStudentsCount explicite — voir ClassroomController._saveToLocal).
+  Future<void> _applyClassroomsPull(
+    List<Map<String, dynamic>> rows,
+    DateTime syncedAt,
+  ) async {
+    // Transaction : atomicité par table (équivalent du batch d'origine).
+    // [Fix-DRIFT-2.21-API] V17 — Drift 2.21+ a changé la signature de
+    // `transaction` : la callback ne prend PLUS d'argument (l'ancienne
+    // API `transaction((txn) async {...})` ne compile pas — la closure
+    // inférée `Future<Null> Function(dynamic)` ne matche pas le type
+    // attendu `Future<T> Function()`). On utilise `_db` directement à
+    // l'intérieur de la closure — Drift route les requêtes via la
+    // connexion transactionnelle automatiquement.
+    await _db.transaction(() async {
+      for (final row in rows) {
+        await _db.into(_db.classrooms).insertOnConflictUpdate(
+          ClassroomsCompanion.insert(
+            id: Value(_rId(row)),
+            name: _rStr(row, 'name'),
+            code: Value(_rStrN(row, 'code')),
+            levelId: Value(_rIntN(row, 'level_id')),
+            streamId: Value(_rIntN(row, 'stream_id')),
+            seriesId: Value(_rIntN(row, 'series_id')),
+            // [Fix-SYNC-FIELD-MAP] Le serveur envoie `head_teacher_id`
+            // (colonne Classroom réelle).
+            teacherId: Value(
+                _rIntN(row, 'head_teacher_id') ?? _rIntN(row, 'teacher_id')),
+            // [Fix-SYNC-FIELD-MAP] Le serveur envoie `max_students`
+            // (colonne Classroom réelle).
+            capacity: Value(
+                _rInt(row, 'max_students', d: _rInt(row, 'capacity', d: 0))),
+            schoolYearId: Value(_rIntN(row, 'school_year_id')),
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: const Value(false),
+            // ⚠ Colonnes dénormalisées (currentStudentsCount, headTeacherName,
+            // levelName, cycleName, cycleId, seriesName, establishmentId,
+            // isActive) ABSENTES du companion — préservées sur les lignes
+            // existantes par insertOnConflictUpdate (UPSERT). Pour les
+            // nouvelles lignes, elles sont NULL jusqu'au prochain
+            // _fetchFromApi() du ClassroomController.
+          ),
+        );
+      }
+    });
+  }
+
+  // [Fix-SYNC-RESOLVE-IDS] V17 — Bug 2 résiduel #2
+  // Cf. [_applyTableChanges] early-return case 'student_class_assignments'
+  // pour le contexte. Le serveur envoie `inscription_type_id` et
+  // `student_status_id` (entiers — cf. sync_registry.py:258-260). On
+  // pré-charge en une seule requête les tables locales InscriptionTypes /
+  // StudentStatuses (sync AVANT le roster — cf. sync_registry.py:163-164,
+  // 250-257) puis on résout l'ID en code textuel pour peupler les colonnes
+  // `inscriptionType` / `status` du mobile. Sans cette résolution, le filtre
+  // `localActiveStudentCounts isNotIn(['EXCU','ABANDON'])` ne servait à rien
+  // (colonne toujours NULL → tous les élèves passaient par `| isNull()`).
+  Future<void> _applyStudentClassAssignmentsPull(
+    List<Map<String, dynamic>> rows,
+    DateTime syncedAt,
+  ) async {
+    // Pré-chargement des lookup tables (1 requête par table — pas de N+1).
+    // Si ces tables n'ont pas encore été sync (premier sync partiel), les
+    // maps seront vides et les colonnes textuelles resteront NULL — le
+    // prochain sync (après que inscription_types/student_statuses soient
+    // arrivés) remplira les codes correctement.
+    final inscriptionMap = <int, String>{};
+    final statusMap = <int, String>{};
+    final inscRows = await _db.select(_db.inscriptionTypes).get();
+    for (final r in inscRows) {
+      inscriptionMap[r.id] = r.code;
+    }
+    final statRows = await _db.select(_db.studentStatuses).get();
+    for (final r in statRows) {
+      statusMap[r.id] = r.code;
+    }
+
+    await _db.batch((b) {
+      for (final row in rows) {
+        // [Fix-SYNC-FIELD-MAP-V11] Le serveur envoie `active` (bool) :
+        // une assignation inactive (élève ayant quitté la classe) doit
+        // être marquée supprimée localement — sinon le roster hors-ligne
+        // garde des élèves partis. Repli `is_deleted` pour les registres
+        // anciens, `is_active` jamais observé mais couvert par défense.
+        final assignDeleted = _rBool(row, 'is_deleted',
+            d: !_rBool(row, 'active', d: true));
+
+        // [Fix-SYNC-RESOLVE-IDS] Résolution ID → code textuel via lookup
+        // tables locales (sync_registry.py:132-139 documente explicitement
+        // cette attente côté mobile).
+        final inscTypeId = _rIntN(row, 'inscription_type_id');
+        final statId = _rIntN(row, 'student_status_id');
+        final inscTypeCode =
+            inscTypeId != null ? inscriptionMap[inscTypeId] : null;
+        final statusCode = statId != null ? statusMap[statId] : null;
+
+        b.insert(
+          _db.studentClassAssignments,
+          StudentClassAssignmentsCompanion.insert(
+            id: Value(_rId(row)),
+            studentId: _rInt(row, 'student_id'),
+            classroomId: _rInt(row, 'classroom_id'),
+            schoolYearId: Value(_rIntN(row, 'school_year_id')),
+            // [Fix-SYNC-RESOLVE-IDS] colonnes textuelles peuplées depuis
+            // la résolution ID → code via les lookup tables locales.
+            status: Value(statusCode),
+            inscriptionType: Value(inscTypeCode),
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(assignDeleted),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
+      }
+    });
+  }
+
   Future<void> _applyTableChanges(
     String table,
     List<Map<String, dynamic>> rows,
@@ -873,6 +999,37 @@ class SyncEngine {
     // propositions en attente contre l'écrasement par le pull.
     if (table == 'grades') {
       await _applyGradesPull(rows, syncedAt);
+      return;
+    }
+
+    // [Fix-SYNC-PRESERVE-DENORM] V17 — Bug 2 résiduel #1 : case 'classrooms'
+    // sorti du batch pour utiliser `insertOnConflictUpdate` qui préserve les
+    // colonnes dénormalisées (currentStudentsCount, headTeacherName,
+    // levelName, cycleName, cycleId, seriesName) que le serveur n'envoie PAS
+    // dans le spec sync (sync_registry.py:230-232 — `current_students_count`
+    // n'est pas une colonne, c'est un @property côté serveur). L'ancien
+    // `InsertMode.insertOrReplace` du batch DELETAIT la ligne existante et
+    // INSÉRAIT une nouvelle avec NULL sur ces colonnes → l'effectif
+    // disparaissait de l'UI Classes à chaque sync pull (jusqu'au prochain
+    // `_fetchFromApi()` qui persiste à nouveau la valeur).
+    if (table == 'classrooms') {
+      await _applyClassroomsPull(rows, syncedAt);
+      return;
+    }
+
+    // [Fix-SYNC-RESOLVE-IDS] V17 — Bug 2 résiduel #2 : case
+    // 'student_class_assignments' sorti du batch pour résoudre les IDs
+    // entiers `inscription_type_id` et `student_status_id` (envoyés par le
+    // serveur — cf. sync_registry.py:258-260) en codes textuels via les
+    // tables locales `InscriptionTypes` / `StudentStatuses` (sync AVANT le
+    // roster — cf. sync_registry.py:163-164, 250-257). Le serveur
+    // documente explicitement cette résolution côté mobile
+    // (sync_registry.py:132-139) mais elle n'était JAMAIS faite — les
+    // colonnes textuelles `inscriptionType` / `status` restaient NULL → le
+    // filtre `localActiveStudentCounts isNotIn(['EXCU','ABANDON'])` ne
+    // servait à rien (toutes les lignes passaient par `| isNull()`).
+    if (table == 'student_class_assignments') {
+      await _applyStudentClassAssignmentsPull(rows, syncedAt);
       return;
     }
 
@@ -990,38 +1147,6 @@ class SyncEngine {
                   id: Value(_rId(row)),
                   name: _rStr(row, 'name'),
                   code: Value(_rStrN(row, 'code')),
-                  syncedAt: Value(syncedAt),
-                  isDirty: const Value(false),
-                  isDeleted: const Value(false),
-                ),
-                mode: InsertMode.insertOrReplace,
-              );
-              break;
-
-            case 'classrooms':
-              b.insert(
-                _db.classrooms,
-                ClassroomsCompanion.insert(
-                  id: Value(_rId(row)),
-                  name: _rStr(row, 'name'),
-                  code: Value(_rStrN(row, 'code')),
-                  levelId: Value(_rIntN(row, 'level_id')),
-                  streamId: Value(_rIntN(row, 'stream_id')),
-                  seriesId: Value(_rIntN(row, 'series_id')),
-                  // [Fix-SYNC-FIELD-MAP] Le serveur envoie `head_teacher_id`
-                  // (colonne Classroom) — l'ancienne lecture `teacher_id`
-                  // était TOUJOURS nulle : le titulaire local était perdu,
-                  // et le repli Drift du périmètre enseignant (Accueil,
-                  // Notes, EDT) ne détectait aucune classe de titulariat.
-                  teacherId: Value(
-                      _rIntN(row, 'head_teacher_id') ?? _rIntN(row, 'teacher_id')),
-                  // [Fix-SYNC-FIELD-MAP] Le serveur envoie `max_students`
-                  // (colonne réelle de Classroom) — l'ancienne lecture
-                  // `capacity` était TOUJOURS nulle : la capacité des classes
-                  // était perdue hors-ligne (barre d'occupation à 0).
-                  capacity: Value(
-                      _rInt(row, 'max_students', d: _rInt(row, 'capacity', d: 0))),
-                  schoolYearId: Value(_rIntN(row, 'school_year_id')),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
                   isDeleted: const Value(false),
@@ -1228,33 +1353,6 @@ class SyncEngine {
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
                   isDeleted: const Value(false),
-                ),
-                mode: InsertMode.insertOrReplace,
-              );
-              break;
-
-            case 'student_class_assignments':
-              // [Fix-SYNC-FIELD-MAP-V11] Le serveur envoie `active` (bool,
-              // colonne réelle StudentClassAssignment.active) : une
-              // assignation inactive (élève ayant quitté la classe) doit
-              // être marquée supprimée localement — sinon le roster
-              // hors-ligne garde des élèves partis. Repli `is_deleted`
-              // pour les registres anciens, `is_active` jamais observé
-              // mais couvert par défense.
-              final assignDeleted = _rBool(row, 'is_deleted',
-                  d: !_rBool(row, 'active', d: true));
-              b.insert(
-                _db.studentClassAssignments,
-                StudentClassAssignmentsCompanion.insert(
-                  id: Value(_rId(row)),
-                  studentId: _rInt(row, 'student_id'),
-                  classroomId: _rInt(row, 'classroom_id'),
-                  schoolYearId: Value(_rIntN(row, 'school_year_id')),
-                  status: Value(_rStrN(row, 'status')),
-                  inscriptionType: Value(_rStrN(row, 'inscription_type')),
-                  syncedAt: Value(syncedAt),
-                  isDirty: const Value(false),
-                  isDeleted: Value(assignDeleted),
                 ),
                 mode: InsertMode.insertOrReplace,
               );

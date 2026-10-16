@@ -7,7 +7,7 @@ library;
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -18,6 +18,7 @@ import '../config/constants.dart';
 import '../network/api_endpoints.dart';
 import '../network/api_exceptions.dart';
 import '../network/dio_client.dart';
+import '../sync/auto_sync.dart';
 import 'secure_storage.dart';
 import '../../features/connections/connection_state.dart';
 import '../../features/connections/server_profiles.dart';
@@ -256,6 +257,22 @@ class AuthNotifier extends Notifier<AuthState> {
       state = state.copyWith(error: 'Aucun serveur configuré. Appairez d\'abord un terminal.');
       return false;
     }
+    // [Fix-DEV-URL-LEAK] V16 — pré-flight : si l'URL du profil actif pointe
+    // vers localhost/127.0.0.1, on n'envoie PAS la requête (elle échouerait
+    // en connectant le mobile à lui-même, et le message d'erreur final en
+    // deviendrait trompeur). On renvoye un message actionnable invitant
+    // l'utilisateur à corriger le profil dans « Gérer les connexions
+    // serveur ». Idempotent avec [_humanizeDioError] qui détecte aussi ce
+    // cas mais, lui, APRÈS l'échec — ce pré-flight l'évite carrément.
+    if (_isLocalhostUrl(_serverUrl!)) {
+      state = state.copyWith(
+        error: 'Adresse invalide : « localhost » désigne le mobile '
+            'lui-même. Modifiez le profil dans « Gérer les connexions '
+            'serveur » pour utiliser l\'IP LAN du desktop (ex: '
+            '192.168.1.10).',
+      );
+      return false;
+    }
     state = state.copyWith(isLoading: true, clearError: true);
     try {
       final resp = await _dio.post(
@@ -289,6 +306,24 @@ class AuthNotifier extends Notifier<AuthState> {
       );
       // [Fix-OFFLINE-SESSION] persister l'instantané pour ce profil.
       if (pid != null) await _writeSnapshot(pid);
+      // [Fix-POST-LOGIN-SYNC] V16 — déclencher une synchro immédiate après
+      // un login (re)réussi : l'utilisateur qui revient d'une longue
+      // déconnexion récupère ses données sans attendre le prochain battement
+      // du heartbeat (30 s) ni la prochaine exécution WorkManager (15 min).
+      // Le [AutoSyncController] débouncera si une synchro est déjà en cours
+      // et refusera (single-flight) si l'état de connexion est hors-ligne.
+      // Post-frame callback : laisser l'état Riverpod se propager (le
+      // `connectionProvider` se reconstruit après le login) avant de lire
+      // l'orchestrateur — évite une lecture d'état partiellement mis à
+      // jour pendant les tests unitaires (ProviderContainer sans pump).
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        try {
+          ref.read(autoSyncControllerProvider).syncIfIdle();
+        } catch (e) {
+          // Best-effort : ignorer si le provider n'est pas prêt (tests).
+          debugPrint('[AUTH] syncIfIdle post-login ignoré : $e');
+        }
+      });
       return true;
     } on DioException catch (e) {
       // [Fix-OFFLINE-LOGIN] V11 — échec RÉSEAU (pas mauvais identifiants)
@@ -360,9 +395,17 @@ class AuthNotifier extends Notifier<AuthState> {
   /// Transforme une [DioException] en message d'erreur clair et actionnable,
   /// avec détection des causes courantes (localhost sur appareil physique,
   /// serveur injoignable, délai dépassé).
+  ///
+  /// [Fix-LOGIN-DETAIL] V16 — pour les réponses 401/403, on lit désormais
+  /// le `detail` renvoyé par FastAPI dans le corps de la réponse
+  /// (`e.response.data['detail']`). Avant, TOUT 401 mappait à
+  /// « Nom d'utilisateur ou mot de passe incorrect. » même quand le
+  /// serveur renvoyait « Unknown establishment code: <code> » ou qu'un
+  /// portail captif WiFi répondait 401 à /auth/login. Idem pour 403
+  /// (« Account is disabled » vs « User not linked »…).
   String _humanizeDioError(DioException e, String serverUrl) {
     // Détecter l'usage de localhost/127.0.0.1 sur un appareil physique.
-    if (serverUrl.contains('localhost') || serverUrl.contains('127.0.0.1')) {
+    if (_isLocalhostUrl(serverUrl)) {
       return 'L\'adresse « localhost » ou « 127.0.0.1 » désigne le mobile '
           'lui-même, pas le serveur desktop. Utilisez l\'IP LAN du desktop '
           '(ex: 192.168.1.10).';
@@ -382,8 +425,8 @@ class AuthNotifier extends Notifier<AuthState> {
             'le port, et que le serveur desktop est démarré.';
       case DioExceptionType.badResponse:
         final code = e.response?.statusCode;
-        if (code == 401) return 'Nom d\'utilisateur ou mot de passe incorrect.';
-        if (code == 403) return 'Accès refusé. Permissions insuffisantes.';
+        if (code == 401) return _humanize401(e);
+        if (code == 403) return _humanize403(e);
         if (code == 404) return 'Endpoint introuvable (404). L\'API du serveur '
             'desktop ne correspond peut-être pas à la version attendue.';
         if (code == 422) {
@@ -411,6 +454,80 @@ class AuthNotifier extends Notifier<AuthState> {
             : underlying;
         return 'Erreur réseau : $short';
     }
+  }
+
+  /// Vrai si [url] pointe vers localhost/127.0.0.1 (le mobile lui-même sur
+  /// un appareil physique). Réutilisé par le pré-flight de [login] et par
+  /// [_humanizeDioError] pour éviter une requête réseau vouée à l'échec.
+  ///
+  /// [Fix-DEV-URL-LEAK] V16 — voir aussi la purge des profils localhost
+  /// dans [ServerProfileRegistry.load] (lib/features/connections/).
+  static bool _isLocalhostUrl(String url) {
+    final lower = url.toLowerCase();
+    return lower.contains('localhost') || lower.contains('127.0.0.1');
+  }
+
+  /// Extrait le champ `detail` d'une réponse FastAPI (HTTPException) en
+  /// tant que chaîne. Renvoie null si le body est absent, malformé, ou si
+  /// `detail` est une List (erreurs de validation 422 — non gérées ici).
+  static String? _extractFastApiDetail(DioException e) {
+    final data = e.response?.data;
+    if (data is! Map) return null;
+    final detail = data['detail'];
+    if (detail is String && detail.isNotEmpty) return detail;
+    return null;
+  }
+
+  /// Humanise un 401 en lisant le `detail` FastAPI :
+  ///   - « Invalid credentials » → identifiants erronés (message historique) ;
+  ///   - « Unknown establishment code: <code> » → code établissement inconnu ;
+  ///   - tout autre détail texte → renvoyé tel quel (transparence serveur) ;
+  ///   - détail absent / illisible (portail captif WiFi, proxy) → message
+  ///     invitant à vérifier l'URL du serveur dans Connexions.
+  String _humanize401(DioException e) {
+    final detail = _extractFastApiDetail(e);
+    if (detail == null) {
+      // Pas de body FastAPI lisible : la plupart du temps, un portail captif
+      // WiFi ou un proxy qui répond 401 à /auth/login sans respecter le
+      // contrat d'API. On ne dit PAS « mot de passe incorrect ».
+      return 'Réponse inattendue du serveur — vérifiez l\'URL du serveur '
+          'dans Connexions (un portail captif WiFi ou un proxy renvoie '
+          'peut-être cette page à la place du serveur GeTech).';
+    }
+    if (detail == 'Invalid credentials') {
+      return 'Nom d\'utilisateur ou mot de passe incorrect.';
+    }
+    if (detail.startsWith('Unknown establishment code')) {
+      return 'Code établissement inconnu. Vérifiez le code saisi ou '
+          'contactez l\'administrateur.';
+    }
+    // Tout autre détail texte renvoyé par FastAPI : transparence.
+    return detail;
+  }
+
+  /// Humanise un 403 en lisant le `detail` FastAPI :
+  ///   - « Account is disabled » → compte désactivé (contact admin) ;
+  ///   - « Account is temporarily locked... » → verrouillage temporaire ;
+  ///   - « User is not linked to this establishment » (ou variantes) →
+  ///     rattachement établissement perdu ;
+  ///   - sinon → repli générique « Permissions insuffisantes ».
+  String _humanize403(DioException e) {
+    final detail = _extractFastApiDetail(e);
+    if (detail == null) {
+      return 'Accès refusé. Permissions insuffisantes.';
+    }
+    if (detail == 'Account is disabled') {
+      return 'Votre compte est désactivé. Contactez l\'administrateur.';
+    }
+    if (detail.startsWith('Account is temporarily locked')) {
+      return 'Compte temporairement verrouillé. Réessayez dans quelques '
+          'minutes.';
+    }
+    if (detail.contains('not linked to this establishment') ||
+        detail.contains('no longer linked')) {
+      return 'Votre compte n\'est plus rattaché à cet établissement.';
+    }
+    return 'Accès refusé. Permissions insuffisantes.';
   }
 
   /// Récupère le profil courant : `GET /auth/me`.
