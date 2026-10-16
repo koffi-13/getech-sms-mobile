@@ -21,7 +21,7 @@ import 'features/attendance/attendance_page.dart';
 import 'features/auth/login_page.dart';
 import 'features/classrooms/classroom_detail_page.dart';
 import 'features/classrooms/classrooms_list_page.dart';
-import 'features/connections/connection_state.dart';
+import 'features/connections/connection_state.dart' as conn;
 import 'features/connections/connections_page.dart';
 import 'features/connections/device_pairing_page.dart';
 import 'features/connections/qr_scanner_page.dart';
@@ -57,7 +57,7 @@ final themeModeProvider = StateProvider<ThemeMode>((ref) => ThemeMode.system);
 class _RouterNotifier extends ChangeNotifier {
   _RouterNotifier(this._ref) {
     _ref.listen<AuthState>(authProvider, (_, __) => notifyListeners());
-    _ref.listen(connectionProvider, (_, __) => notifyListeners());
+    _ref.listen(conn.connectionProvider, (_, __) => notifyListeners());
     // Bootstrap multi-serveurs : dès que le registre a appliqué le profil
     // actif, le routeur réévalue ses redirects.
     _ref.listen<AsyncValue<bool>>(
@@ -80,7 +80,7 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       // Déclenche le chargement du registre multi-serveurs (idempotent).
       ref.read(serverBootstrapProvider);
 
-      final conn = ref.read(connectionProvider);
+      final connection = ref.read(conn.connectionProvider);
       final auth = ref.read(authProvider);
       final loc = state.matchedLocation;
       final isPairing = loc == '/pairing' || loc.startsWith('/pairing');
@@ -95,7 +95,7 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       if (!bootstrapped) return null;
 
       // 1) Aucun serveur enregistré → onboarding d'appairage.
-      if (!conn.isPaired) {
+      if (!connection.isPaired) {
         return (isPairing || isQrScanner) ? null : '/pairing';
       }
       // 2) Appairé mais non authentifié → login.
@@ -649,8 +649,8 @@ class _GeTechAppState extends ConsumerState<GeTechApp>
     // premier plan) déclenche une synchro complète automatique — l'outbox
     // (notes saisies hors-ligne…) est poussé sans action manuelle, et les
     // pages affichées se rafraîchissent via syncGenerationProvider.
-    ref.listenManual<ConnectionState>(
-      connectionProvider,
+    ref.listenManual<conn.ConnectionState>(
+      conn.connectionProvider,
       (prev, next) => ref
           .read(autoSyncControllerProvider)
           .handleConnectionChange(prev, next),

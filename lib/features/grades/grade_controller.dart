@@ -1511,7 +1511,7 @@ final rankingProvider = FutureProvider.autoDispose
         isChecking: c.isChecking,
       )));
   if (!conn.isPaired || conn.serverUrl == null) {
-    return readRankingCache(q) ?? const <RankingRowDto>[];
+    return await readRankingCache(q) ?? const <RankingRowDto>[];
   }
   // [Fix-AUTO-SYNC] V15 : rafraîchissement après chaque synchro utile.
   ref.watch(syncGenerationProvider);
