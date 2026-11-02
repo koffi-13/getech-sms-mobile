@@ -149,8 +149,8 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
     } else {
       setState(() {
         _savingPassword = false;
-        _passwordError =
-            ref.read(authProvider).error ?? 'Échec du changement de mot de passe.';
+        _passwordError = ref.read(authProvider).error ??
+            'Échec du changement de mot de passe.';
       });
     }
   }
@@ -258,7 +258,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
               ),
               const SizedBox(height: 12),
               DropdownButtonFormField<Sexe?>(
-                value: _sexe,
+                initialValue: _sexe,
                 decoration: const InputDecoration(
                   labelText: 'Sexe',
                   prefixIcon: Icon(Icons.wc_outlined),
@@ -270,7 +270,8 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
                     child: Text('Non renseigné'),
                   ),
                   ...Sexe.values.map(
-                    (s) => DropdownMenuItem<Sexe?>(value: s, child: Text(s.label)),
+                    (s) =>
+                        DropdownMenuItem<Sexe?>(value: s, child: Text(s.label)),
                   ),
                 ],
                 onChanged: (v) => setState(() => _sexe = v),
@@ -330,11 +331,12 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
                   prefixIcon: const Icon(Icons.lock_outline),
                   border: const OutlineInputBorder(),
                   suffixIcon: IconButton(
-                    icon: Icon(_obscureOld
-                        ? Icons.visibility_outlined
-                        : Icons.visibility_off_outlined),
-                    onPressed: () =>
-                        setState(() => _obscureOld = !_obscureOld),
+                    icon: Icon(
+                      _obscureOld
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                    ),
+                    onPressed: () => setState(() => _obscureOld = !_obscureOld),
                   ),
                 ),
                 validator: (v) => (v == null || v.isEmpty)
@@ -350,11 +352,12 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
                   prefixIcon: const Icon(Icons.lock_outline),
                   border: const OutlineInputBorder(),
                   suffixIcon: IconButton(
-                    icon: Icon(_obscureNew
-                        ? Icons.visibility_outlined
-                        : Icons.visibility_off_outlined),
-                    onPressed: () =>
-                        setState(() => _obscureNew = !_obscureNew),
+                    icon: Icon(
+                      _obscureNew
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                    ),
+                    onPressed: () => setState(() => _obscureNew = !_obscureNew),
                   ),
                 ),
                 validator: (v) {
@@ -376,9 +379,11 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
                   prefixIcon: const Icon(Icons.lock_outline),
                   border: const OutlineInputBorder(),
                   suffixIcon: IconButton(
-                    icon: Icon(_obscureConfirm
-                        ? Icons.visibility_outlined
-                        : Icons.visibility_off_outlined),
+                    icon: Icon(
+                      _obscureConfirm
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                    ),
                     onPressed: () =>
                         setState(() => _obscureConfirm = !_obscureConfirm),
                   ),
@@ -412,7 +417,9 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
                       )
                     : const Icon(Icons.vpn_key_outlined),
                 label: Text(
-                  _savingPassword ? 'Modification…' : 'Modifier le mot de passe',
+                  _savingPassword
+                      ? 'Modification…'
+                      : 'Modifier le mot de passe',
                 ),
               ),
             ],
@@ -474,16 +481,14 @@ class _ProfileHeader extends StatelessWidget {
               runSpacing: 6,
               alignment: WrapAlignment.center,
               children: [
-                if (user.email != null)
-                  _Chip(icon: Icons.mail_outline, label: user.email!),
+                _Chip(icon: Icons.mail_outline, label: user.email),
                 if (user.phone != null)
                   _Chip(icon: Icons.phone_outlined, label: user.phone!),
                 if (user.sexe != null)
                   _Chip(icon: Icons.wc_outlined, label: user.sexe!.label),
                 _Chip(
-                  icon: user.isSuperuser
-                      ? Icons.verified
-                      : Icons.shield_outlined,
+                  icon:
+                      user.isSuperuser ? Icons.verified : Icons.shield_outlined,
                   label: user.isSuperuser ? 'Superutilisateur' : 'Utilisateur',
                 ),
               ],
@@ -539,7 +544,7 @@ class _InlineMessage extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.12),
+        color: color.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Row(

@@ -56,7 +56,9 @@ class DashboardPage extends ConsumerWidget {
     // (qui contient paiements récents + élèves récemment inscrits).
     final declared = auth.hasDeclaredTeacherRole;
     final scopeIsTeacher = scopeAsync.maybeWhen(
-        data: (s) => s.isTeacher, orElse: () => false);
+      data: (s) => s.isTeacher,
+      orElse: () => false,
+    );
     final isTeacher = !auth.isAdminOrHeadmaster && (declared || scopeIsTeacher);
     final scopePending =
         !auth.isAdminOrHeadmaster && !declared && !scopeAsync.hasValue;
@@ -64,7 +66,7 @@ class DashboardPage extends ConsumerWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Tableau de bord'),
-        actions: [
+        actions: const [
           // [Notif-V8] Cloche du Centre de notifications (badge non-lus).
           _NotificationBell(),
           _SyncButton(),
@@ -78,51 +80,54 @@ class DashboardPage extends ConsumerWidget {
                     AppErrorWidget(
                       message:
                           'Impossible de déterminer votre profil enseignant.',
-                      onRetry: () =>
-                          ref.invalidate(teacherScopeProvider),
+                      onRetry: () => ref.invalidate(teacherScopeProvider),
                     ),
                   ],
                 )
               : const AppLoading(
-                  label: 'Détection de votre profil…'))
+                  label: 'Détection de votre profil…',
+                ))
           : isTeacher
               ? _TeacherDashboard(isOffline: isOffline)
               : RefreshIndicator(
-              onRefresh: () async {
-                ref.invalidate(dashboardStatsProvider);
-                // Attendre la prochaine valeur pour garder le spinner affiché.
-                await ref.read(dashboardStatsProvider.future);
-              },
-              child: statsAsync.when(
-                data: (stats) => _DashboardContent(
-                  stats: stats,
-                  isOffline: isOffline,
-                  perms: auth.permissions,
+                  onRefresh: () async {
+                    ref.invalidate(dashboardStatsProvider);
+                    // Attendre la prochaine valeur pour garder le spinner affiché.
+                    await ref.read(dashboardStatsProvider.future);
+                  },
+                  child: statsAsync.when(
+                    data: (stats) => _DashboardContent(
+                      stats: stats,
+                      isOffline: isOffline,
+                      perms: auth.permissions,
+                    ),
+                    loading: () =>
+                        const AppLoading(label: 'Chargement des statistiques…'),
+                    error: (err, _) {
+                      // Distingue le mode hors-ligne des autres erreurs.
+                      final offline =
+                          isOffline || err is OfflineDashboardException;
+                      return ListView(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        children: [
+                          if (offline)
+                            AppErrorWidget(
+                              message:
+                                  'Mode hors-ligne — données non disponibles. Vérifiez votre connexion au serveur.',
+                              onRetry: () =>
+                                  ref.invalidate(dashboardStatsProvider),
+                            )
+                          else
+                            AppErrorWidget(
+                              message: err.toString(),
+                              onRetry: () =>
+                                  ref.invalidate(dashboardStatsProvider),
+                            ),
+                        ],
+                      );
+                    },
+                  ),
                 ),
-                loading: () =>
-                    const AppLoading(label: 'Chargement des statistiques…'),
-                error: (err, _) {
-                  // Distingue le mode hors-ligne des autres erreurs.
-                  final offline = isOffline || err is OfflineDashboardException;
-                  return ListView(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    children: [
-                      if (offline)
-                        AppErrorWidget(
-                          message:
-                              'Mode hors-ligne — données non disponibles. Vérifiez votre connexion au serveur.',
-                          onRetry: () => ref.invalidate(dashboardStatsProvider),
-                        )
-                      else
-                        AppErrorWidget(
-                          message: err.toString(),
-                          onRetry: () => ref.invalidate(dashboardStatsProvider),
-                        ),
-                    ],
-                  );
-                },
-              ),
-            ),
     );
   }
 }
@@ -287,7 +292,9 @@ class _TeacherDashboard extends ConsumerWidget {
       },
       child: async.when(
         data: (data) => _TeacherDashboardContent(
-            data: data, isOffline: isOffline),
+          data: data,
+          isOffline: isOffline,
+        ),
         loading: () => ListView(
           physics: const AlwaysScrollableScrollPhysics(),
           children: const [
@@ -327,8 +334,11 @@ class _TeacherDashboardContent extends StatelessWidget {
     // utile et l'enseignant voit tout de suite quand reprend son service.
     final isSunday = DateTime.now().weekday > 6;
     final upcoming = todayCourses.isEmpty
-        ? data.scope.upcomingCourses(DateTime.now(),
-            currentWeek: data.currentWeek, limit: 3)
+        ? data.scope.upcomingCourses(
+            DateTime.now(),
+            currentWeek: data.currentWeek,
+            limit: 3,
+          )
         : const <WeeklyScheduleDto>[];
 
     return ListView(
@@ -425,38 +435,40 @@ class _TeacherDashboardContent extends StatelessWidget {
                               ),
                             ),
                           ),
-                          ...upcoming.map((c) => _UpcomingCourseTile(
-                                course: c,
-                                currentWeek: data.currentWeek,
-                              )),
+                          ...upcoming.map(
+                            (c) => _UpcomingCourseTile(
+                              course: c,
+                              currentWeek: data.currentWeek,
+                            ),
+                          ),
                         ],
                       ],
                     ),
                   )
                 else
-                  ...todayCourses.map((c) => ListTile(
-                        dense: true,
-                        contentPadding:
-                            const EdgeInsets.symmetric(vertical: 4),
-                        leading: CircleAvatar(
-                          backgroundColor:
-                              theme.colorScheme.primaryContainer,
-                          child: const Icon(Icons.schedule, size: 20),
-                        ),
-                        title: Text(
-                          c.subjectName ?? 'Cours',
-                          style: theme.textTheme.bodyMedium
-                              ?.copyWith(fontWeight: FontWeight.w600),
-                        ),
-                        subtitle: Text(
-                          [
-                            '${c.startTime} – ${c.endTime}',
-                            if (c.classroomName != null) c.classroomName!,
-                            if (c.room != null && c.room!.isNotEmpty)
-                              'Salle ${c.room}',
-                          ].join(' • '),
-                        ),
-                      )),
+                  ...todayCourses.map(
+                    (c) => ListTile(
+                      dense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 4),
+                      leading: CircleAvatar(
+                        backgroundColor: theme.colorScheme.primaryContainer,
+                        child: const Icon(Icons.schedule, size: 20),
+                      ),
+                      title: Text(
+                        c.subjectName ?? 'Cours',
+                        style: theme.textTheme.bodyMedium
+                            ?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                      subtitle: Text(
+                        [
+                          '${c.startTime} – ${c.endTime}',
+                          if (c.classroomName != null) c.classroomName!,
+                          if (c.room != null && c.room!.isNotEmpty)
+                            'Salle ${c.room}',
+                        ].join(' • '),
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -489,12 +501,11 @@ class _TeacherDashboardContent extends StatelessWidget {
                   )
                 else
                   ...data.classrooms.map((c) {
-                    final isHead = data.scope.headClassrooms
-                        .any((h) => h.id == c.id);
+                    final isHead =
+                        data.scope.headClassrooms.any((h) => h.id == c.id);
                     return ListTile(
                       dense: true,
-                      contentPadding:
-                          const EdgeInsets.symmetric(vertical: 4),
+                      contentPadding: const EdgeInsets.symmetric(vertical: 4),
                       leading: CircleAvatar(
                         backgroundColor: isHead
                             ? Colors.amber.withValues(alpha: 0.2)
@@ -502,19 +513,18 @@ class _TeacherDashboardContent extends StatelessWidget {
                         child: Icon(
                           isHead ? Icons.star : Icons.school,
                           size: 18,
-                          color: isHead
-                              ? Colors.amber.shade800
-                              : null,
+                          color: isHead ? Colors.amber.shade800 : null,
                         ),
                       ),
-                      title: Text(c.name,
-                          style: theme.textTheme.bodyMedium
-                              ?.copyWith(fontWeight: FontWeight.w600)),
+                      title: Text(
+                        c.name,
+                        style: theme.textTheme.bodyMedium
+                            ?.copyWith(fontWeight: FontWeight.w600),
+                      ),
                       subtitle: Text(
                         [
                           '${c.studentCount} élève${c.studentCount > 1 ? 's' : ''}',
-                          if (c.capacity > 0)
-                            'capacité ${c.capacity}',
+                          if (c.capacity > 0) 'capacité ${c.capacity}',
                           if (isHead) 'Titulaire',
                         ].join(' • '),
                       ),
@@ -595,9 +605,9 @@ class _OfflineBanner extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: Colors.orange.withOpacity(0.14),
+        color: Colors.orange.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.orange.withOpacity(0.4)),
+        border: Border.all(color: Colors.orange.withValues(alpha: 0.4)),
       ),
       child: Row(
         children: [
@@ -685,9 +695,7 @@ class _KpiGrid extends ConsumerWidget {
       ],
     );
   }
-
 }
-
 
 /// Carte "Paiements récents" : liste des derniers paiements enregistrés.
 class _RecentPaymentsCard extends StatelessWidget {
@@ -738,7 +746,7 @@ class _PaymentTile extends StatelessWidget {
       dense: true,
       contentPadding: const EdgeInsets.symmetric(vertical: 4),
       leading: CircleAvatar(
-        backgroundColor: Colors.green.withOpacity(0.14),
+        backgroundColor: Colors.green.withValues(alpha: 0.14),
         child: const Icon(Icons.payments, color: Colors.green, size: 20),
       ),
       title: Row(
@@ -752,8 +760,7 @@ class _PaymentTile extends StatelessWidget {
               ),
             ),
           ),
-          if (status != null)
-            _PaymentStatusBadge(status: status),
+          if (status != null) _PaymentStatusBadge(status: status),
         ],
       ),
       subtitle: Wrap(
@@ -773,9 +780,7 @@ class _PaymentTile extends StatelessWidget {
               ),
             ),
           Text(
-            p.paymentDate == null
-                ? '—'
-                : DateFormatter.relative(p.paymentDate),
+            p.paymentDate == null ? '—' : DateFormatter.relative(p.paymentDate),
             style: theme.textTheme.bodySmall?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
             ),
@@ -845,35 +850,33 @@ class _RecentStudentsCard extends StatelessWidget {
                 ),
               )
             else
-              ...students.map((s) => ListTile(
-                    dense: true,
-                    contentPadding:
-                        const EdgeInsets.symmetric(vertical: 4),
-                    leading: CircleAvatar(
-                      backgroundColor:
-                          theme.colorScheme.primaryContainer,
-                      child: Text(
-                        s.fullName.isNotEmpty
-                            ? s.fullName[0].toUpperCase()
-                            : '?',
-                        style: theme.textTheme.titleMedium?.copyWith(
-                          color: theme.colorScheme.onPrimaryContainer,
-                        ),
+              ...students.map(
+                (s) => ListTile(
+                  dense: true,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 4),
+                  leading: CircleAvatar(
+                    backgroundColor: theme.colorScheme.primaryContainer,
+                    child: Text(
+                      s.fullName.isNotEmpty ? s.fullName[0].toUpperCase() : '?',
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        color: theme.colorScheme.onPrimaryContainer,
                       ),
                     ),
-                    title: Text(
-                      s.fullName.isEmpty ? '(sans nom)' : s.fullName,
-                      style: theme.textTheme.bodyMedium
-                          ?.copyWith(fontWeight: FontWeight.w500),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    subtitle: Text(
-                      s.matricule.isEmpty ? 'Mat. —' : 'Mat. ${s.matricule}',
-                      style: theme.textTheme.bodySmall,
-                    ),
-                    onTap: () => context.push('/students/${s.id}'),
-                  )),
+                  ),
+                  title: Text(
+                    s.fullName.isEmpty ? '(sans nom)' : s.fullName,
+                    style: theme.textTheme.bodyMedium
+                        ?.copyWith(fontWeight: FontWeight.w500),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  subtitle: Text(
+                    s.matricule.isEmpty ? 'Mat. —' : 'Mat. ${s.matricule}',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  onTap: () => context.push('/students/${s.id}'),
+                ),
+              ),
           ],
         ),
       ),

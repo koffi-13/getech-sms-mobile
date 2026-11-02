@@ -102,8 +102,9 @@ class NotificationStore {
     try {
       final rows = (jsonDecode(raw) as List)
           .whereType<Map>()
-          .map((e) =>
-              NotificationEntry.fromJson(Map<String, dynamic>.from(e)))
+          .map(
+            (e) => NotificationEntry.fromJson(Map<String, dynamic>.from(e)),
+          )
           .whereType<NotificationEntry>()
           .toList();
       rows.sort((a, b) => b.createdAt.compareTo(a.createdAt));
@@ -115,12 +116,13 @@ class NotificationStore {
 
   Future<void> _save(List<NotificationEntry> entries) async {
     final prefs = await SharedPreferences.getInstance();
-    final capped =
-        (entries..sort((a, b) => b.createdAt.compareTo(a.createdAt)))
-            .take(_maxEntries)
-            .toList();
+    final capped = (entries..sort((a, b) => b.createdAt.compareTo(a.createdAt)))
+        .take(_maxEntries)
+        .toList();
     await prefs.setString(
-        _key, jsonEncode(capped.map((e) => e.toJson()).toList()));
+      _key,
+      jsonEncode(capped.map((e) => e.toJson()).toList()),
+    );
   }
 
   /// Ajoute une notification en tête d'historique (non lue).
@@ -160,14 +162,13 @@ class NotificationCenterState {
   final List<NotificationEntry> entries;
   const NotificationCenterState({this.entries = const []});
 
-  int get unreadCount =>
-      entries.where((e) => !e.read).length;
+  int get unreadCount => entries.where((e) => !e.read).length;
 }
 
 /// Provider de l'état du centre de notifications (liste persistée).
 /// Toute modification repasse par [reloadNotificationCenter].
-final notificationCenterProvider =
-    StateNotifierProvider<NotificationCenterController, NotificationCenterState>(
+final notificationCenterProvider = StateNotifierProvider<
+    NotificationCenterController, NotificationCenterState>(
   (ref) => NotificationCenterController(ref),
 );
 

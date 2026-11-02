@@ -90,8 +90,7 @@ final goRouterProvider = Provider<GoRouter>((ref) {
 
       // 0) Registre pas encore chargé : attendre (évite le flash vers
       // /pairing au démarrage à froid).
-      final bootstrapped =
-          ref.read(serverBootstrapProvider).hasValue;
+      final bootstrapped = ref.read(serverBootstrapProvider).hasValue;
       if (!bootstrapped) return null;
 
       // 1) Aucun serveur enregistré → onboarding d'appairage.
@@ -145,7 +144,7 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       ShellRoute(
         builder: (context, state, child) {
           final index = _shellIndexFor(state.matchedLocation);
-          return AppShell(child: child, index: index);
+          return AppShell(index: index, child: child);
         },
         routes: [
           GoRoute(
@@ -221,7 +220,8 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         path: '/attendance/history',
         builder: (context, state) => AttendanceHistoryPage(
           studentId: int.tryParse(
-              state.uri.queryParameters['student_id'] ?? ''),
+            state.uri.queryParameters['student_id'] ?? '',
+          ),
         ),
       ),
       GoRoute(
@@ -261,7 +261,8 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         path: '/subjects/class-subjects',
         builder: (context, state) => ClassSubjectsPage(
           classroomId: int.parse(
-              state.uri.queryParameters['classroom_id'] ?? '0'),
+            state.uri.queryParameters['classroom_id'] ?? '0',
+          ),
         ),
       ),
       GoRoute(
@@ -283,7 +284,8 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         path: '/finance/payments/new',
         builder: (context, state) => RecordPaymentPage(
           studentId: int.tryParse(
-              state.uri.queryParameters['student_id'] ?? ''),
+            state.uri.queryParameters['student_id'] ?? '',
+          ),
         ),
       ),
       GoRoute(
@@ -347,11 +349,16 @@ class _RouterErrorPageState extends State<_RouterErrorPage> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.explore_off_outlined,
-                size: 56, color: Theme.of(context).colorScheme.outline),
+            Icon(
+              Icons.explore_off_outlined,
+              size: 56,
+              color: Theme.of(context).colorScheme.outline,
+            ),
             const SizedBox(height: 16),
-            Text('Retour à l\'accueil…',
-                style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              'Retour à l\'accueil…',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             const SizedBox(height: 24),
             const SizedBox(
               width: 24,
@@ -389,13 +396,18 @@ class _StartupSplashPage extends StatelessWidget {
                 color: theme.colorScheme.primaryContainer,
                 shape: BoxShape.circle,
               ),
-              child: Icon(Icons.school_rounded,
-                  size: 48, color: theme.colorScheme.onPrimaryContainer),
+              child: Icon(
+                Icons.school_rounded,
+                size: 48,
+                color: theme.colorScheme.onPrimaryContainer,
+              ),
             ),
             const SizedBox(height: 20),
-            Text('GeTech-SMS',
-                style: theme.textTheme.headlineSmall
-                    ?.copyWith(fontWeight: FontWeight.bold)),
+            Text(
+              'GeTech-SMS',
+              style: theme.textTheme.headlineSmall
+                  ?.copyWith(fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 32),
             const SizedBox(
               width: 26,
@@ -403,9 +415,11 @@ class _StartupSplashPage extends StatelessWidget {
               child: CircularProgressIndicator(strokeWidth: 2.5),
             ),
             const SizedBox(height: 12),
-            Text('Chargement…',
-                style: theme.textTheme.bodyMedium
-                    ?.copyWith(color: theme.colorScheme.outline)),
+            Text(
+              'Chargement…',
+              style: theme.textTheme.bodyMedium
+                  ?.copyWith(color: theme.colorScheme.outline),
+            ),
           ],
         ),
       ),
@@ -437,7 +451,7 @@ class _MoreGridPage extends ConsumerWidget {
         scopeAsync.maybeWhen(data: (s) => s.isTeacher, orElse: () => false);
 
     final items = <_MoreItem>[
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.calendar_view_week,
         label: 'Emploi du temps',
         color: Colors.teal,
@@ -445,7 +459,7 @@ class _MoreGridPage extends ConsumerWidget {
         permission: 'STUDENT_READ',
         teacherVisible: true,
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.fact_check,
         label: 'Présence',
         color: Colors.deepOrange,
@@ -453,7 +467,7 @@ class _MoreGridPage extends ConsumerWidget {
         permission: 'STUDENT_READ',
         teacherVisible: true,
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.grading,
         label: 'Saisie de notes',
         color: Colors.indigo,
@@ -461,78 +475,82 @@ class _MoreGridPage extends ConsumerWidget {
         permission: 'GRADE_READ',
         teacherVisible: true,
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.leaderboard,
         label: 'Classement',
         color: Colors.purple,
         route: '/grades/ranking',
         permission: 'GRADE_READ',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.receipt_long,
         label: 'Bulletins',
         color: Colors.indigo,
         route: '/grades',
         permission: 'GRADE_READ',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.manage_accounts,
         label: 'Utilisateurs',
         color: Colors.deepPurple,
         route: '/users',
         permission: 'USER_READ',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.menu_book,
         label: 'Matières',
         color: Colors.brown,
         route: '/subjects',
         permission: 'GRADE_READ',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.payments,
         label: 'Paiements',
         color: Colors.green,
         route: '/finance',
         permission: 'PAYMENT_READ',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.account_balance_wallet,
         label: 'Soldes',
         color: Colors.teal,
         route: '/finance/balances',
         permission: 'PAYMENT_READ',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.upload_file,
         label: 'Import élèv.',
         color: Colors.amber,
         route: '/students/import',
         permission: 'STUDENT_CREATE',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.domain,
         label: 'Établiss.',
         color: Colors.cyan,
         route: '/establishments',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.link,
         label: 'Connexions',
         color: Colors.green,
         route: '/connections',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.settings,
         label: 'Paramètres',
         color: Colors.blueGrey,
         route: '/settings',
       ),
-    ].where((i) =>
-        i.permission == null ||
-        perms.contains('*') ||
-        perms.contains(i.permission!) ||
-        (teacherish && i.teacherVisible)).toList();
+    ]
+        .where(
+          (i) =>
+              i.permission == null ||
+              perms.contains('*') ||
+              perms.contains(i.permission!) ||
+              (teacherish && i.teacherVisible),
+        )
+        .toList();
 
     return Scaffold(
       appBar: AppBar(title: const Text('Plus')),
@@ -541,7 +559,8 @@ class _MoreGridPage extends ConsumerWidget {
         padding: const EdgeInsets.all(16),
         crossAxisSpacing: 12,
         mainAxisSpacing: 12,
-        childAspectRatio: 0.78, // Encore augmenté pour éviter les overflows sur petits écrans
+        childAspectRatio:
+            0.78, // Encore augmenté pour éviter les overflows sur petits écrans
         children: items
             .map(
               (i) => Card(
@@ -560,7 +579,7 @@ class _MoreGridPage extends ConsumerWidget {
                         Container(
                           padding: const EdgeInsets.all(10),
                           decoration: BoxDecoration(
-                            color: i.color.withOpacity(0.12),
+                            color: i.color.withValues(alpha: 0.12),
                             borderRadius: BorderRadius.circular(14),
                           ),
                           child: Icon(i.icon, color: i.color, size: 24),
@@ -572,11 +591,13 @@ class _MoreGridPage extends ConsumerWidget {
                             textAlign: TextAlign.center,
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
-                            style:
-                                Theme.of(context).textTheme.labelSmall?.copyWith(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 10, // Réduit à 10 pour sécurité
-                                    ),
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelSmall
+                                ?.copyWith(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 10, // Réduit à 10 pour sécurité
+                                ),
                           ),
                         ),
                       ],

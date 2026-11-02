@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../../features/connections/connection_state.dart'
-    show ServerStatus;
+import '../../features/connections/connection_state.dart' show ServerStatus;
 
 /// Badge de statut coloré (en ligne / hors-ligne / etc.).
 class StatusBadge extends StatelessWidget {
@@ -58,9 +57,9 @@ class StatusBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: filled ? color.withOpacity(0.14) : Colors.transparent,
+        color: filled ? color.withValues(alpha: 0.14) : Colors.transparent,
         borderRadius: BorderRadius.circular(20),
-        border: filled ? null : Border.all(color: color.withOpacity(0.5)),
+        border: filled ? null : Border.all(color: color.withValues(alpha: 0.5)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,

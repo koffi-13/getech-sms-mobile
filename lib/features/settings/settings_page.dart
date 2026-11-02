@@ -135,8 +135,10 @@ class _AppearanceSection extends ConsumerWidget {
         children: [
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text('Apparence',
-                style: TextStyle(fontWeight: FontWeight.bold)),
+            child: Text(
+              'Apparence',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
           ),
           ListTile(
             leading: const Icon(Icons.palette_outlined),
@@ -160,7 +162,11 @@ class _AppearanceSection extends ConsumerWidget {
     }
   }
 
-  void _showThemePicker(BuildContext context, WidgetRef ref, ThemeMode current) {
+  void _showThemePicker(
+    BuildContext context,
+    WidgetRef ref,
+    ThemeMode current,
+  ) {
     showModalBottomSheet(
       context: context,
       showDragHandle: true,
@@ -171,27 +177,36 @@ class _AppearanceSection extends ConsumerWidget {
             ListTile(
               leading: const Icon(Icons.brightness_auto_outlined),
               title: const Text('Système'),
-              trailing: current == ThemeMode.system ? const Icon(Icons.check) : null,
+              trailing:
+                  current == ThemeMode.system ? const Icon(Icons.check) : null,
               onTap: () {
-                ref.read(settingsProvider.notifier).setThemeMode(ThemeMode.system);
+                ref
+                    .read(settingsProvider.notifier)
+                    .setThemeMode(ThemeMode.system);
                 Navigator.pop(ctx);
               },
             ),
             ListTile(
               leading: const Icon(Icons.light_mode_outlined),
               title: const Text('Clair'),
-              trailing: current == ThemeMode.light ? const Icon(Icons.check) : null,
+              trailing:
+                  current == ThemeMode.light ? const Icon(Icons.check) : null,
               onTap: () {
-                ref.read(settingsProvider.notifier).setThemeMode(ThemeMode.light);
+                ref
+                    .read(settingsProvider.notifier)
+                    .setThemeMode(ThemeMode.light);
                 Navigator.pop(ctx);
               },
             ),
             ListTile(
               leading: const Icon(Icons.dark_mode_outlined),
               title: const Text('Sombre'),
-              trailing: current == ThemeMode.dark ? const Icon(Icons.check) : null,
+              trailing:
+                  current == ThemeMode.dark ? const Icon(Icons.check) : null,
               onTap: () {
-                ref.read(settingsProvider.notifier).setThemeMode(ThemeMode.dark);
+                ref
+                    .read(settingsProvider.notifier)
+                    .setThemeMode(ThemeMode.dark);
                 Navigator.pop(ctx);
               },
             ),
@@ -219,9 +234,11 @@ class _NotificationsSection extends ConsumerWidget {
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text('Notifications',
-                style: theme.textTheme.titleSmall
-                    ?.copyWith(fontWeight: FontWeight.bold)),
+            child: Text(
+              'Notifications',
+              style: theme.textTheme.titleSmall
+                  ?.copyWith(fontWeight: FontWeight.bold),
+            ),
           ),
           settingsAsync.when(
             data: (settings) => Column(
@@ -231,7 +248,8 @@ class _NotificationsSection extends ConsumerWidget {
                   leading: const Icon(Icons.notifications_none),
                   title: const Text('Centre de notifications'),
                   subtitle: const Text(
-                      'Historique des notifications reçues, non lues'),
+                    'Historique des notifications reçues, non lues',
+                  ),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => context.push('/notifications'),
                 ),
@@ -251,7 +269,8 @@ class _NotificationsSection extends ConsumerWidget {
                   secondary: const Icon(Icons.grading_outlined),
                   title: const Text('Validation des notes'),
                   subtitle: const Text(
-                      'Nouvelles propositions à valider, décisions reçues'),
+                    'Nouvelles propositions à valider, décisions reçues',
+                  ),
                   value: settings.gradesValidation,
                   onChanged: (v) async {
                     await settings.save(gradesValidation: v);
@@ -301,13 +320,17 @@ class _SyncSection extends ConsumerWidget {
         children: [
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text('Synchronisation & Connexion',
-                style: TextStyle(fontWeight: FontWeight.bold)),
+            child: Text(
+              'Synchronisation & Connexion',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
           ),
           ListTile(
             leading: const Icon(Icons.wifi_tethering),
             title: const Text('Serveur local'),
-            subtitle: Text(conn.serverIp ?? conn.serverUrlOverride ?? 'Non configuré'),
+            subtitle: Text(
+              conn.serverIp ?? conn.serverUrlOverride ?? 'Non configuré',
+            ),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => context.push('/pairing'),
           ),
@@ -337,8 +360,10 @@ class _AboutSection extends StatelessWidget {
         children: [
           Padding(
             padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text('À propos',
-                style: TextStyle(fontWeight: FontWeight.bold)),
+            child: Text(
+              'À propos',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
           ),
           ListTile(
             leading: Icon(Icons.info_outline),

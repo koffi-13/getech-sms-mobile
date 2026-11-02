@@ -44,18 +44,24 @@ class DashboardStatsDto {
             0.0,
         totalUsers: (j['total_users'] as num?)?.toInt() ?? 0,
         recentPayments: (j['recent_payments'] as List?)
-                ?.map((e) => DashboardRecentPaymentDto.fromJson(
-                    e as Map<String, dynamic>))
+                ?.map(
+                  (e) => DashboardRecentPaymentDto.fromJson(
+                    e as Map<String, dynamic>,
+                  ),
+                )
                 .toList() ??
             const [],
         recentStudents: (j['recent_students'] as List?)
-                ?.map((e) => DashboardRecentStudentDto.fromJson(
-                    e as Map<String, dynamic>))
+                ?.map(
+                  (e) => DashboardRecentStudentDto.fromJson(
+                    e as Map<String, dynamic>,
+                  ),
+                )
                 .toList() ??
             const [],
       );
     } catch (e) {
-      // Si le format change ou est invalide, on renvoie un objet vide 
+      // Si le format change ou est invalide, on renvoie un objet vide
       // pour éviter de crasher le dashboard.
       return const DashboardStatsDto();
     }
@@ -368,7 +374,7 @@ class SyncPushLineResultDto {
   final String? lineId;
   final String table;
   final String status; // applied | conflict_server_wins | invalid |
-                        // unknown_table | error | queued_for_validation
+  // unknown_table | error | queued_for_validation
   final int? rowId;
   final String? detail;
 
@@ -402,15 +408,16 @@ class SyncPushResponse {
     this.results = const [],
   });
 
-  factory SyncPushResponse.fromJson(Map<String, dynamic> j) =>
-      SyncPushResponse(
+  factory SyncPushResponse.fromJson(Map<String, dynamic> j) => SyncPushResponse(
         serverTime: DateFormatter.parse(j['server_time'] as String?) ??
             DateTime.now().toUtc(),
         accepted: (j['accepted'] as num?)?.toInt() ?? 0,
         results: ((j['results'] as List?) ?? const [])
             .whereType<Map>()
-            .map((e) =>
-                SyncPushLineResultDto.fromJson(Map<String, dynamic>.from(e)))
+            .map(
+              (e) =>
+                  SyncPushLineResultDto.fromJson(Map<String, dynamic>.from(e)),
+            )
             .toList(),
       );
 

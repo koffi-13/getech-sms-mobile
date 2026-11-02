@@ -90,7 +90,8 @@ class LoginResponse {
         establishment: j['establishment'] == null
             ? null
             : EstablishmentDto.fromJson(
-                j['establishment'] as Map<String, dynamic>),
+                j['establishment'] as Map<String, dynamic>,
+              ),
       );
 }
 
@@ -118,7 +119,8 @@ class MeResponse {
         establishment: j['establishment'] == null
             ? null
             : EstablishmentDto.fromJson(
-                j['establishment'] as Map<String, dynamic>),
+                j['establishment'] as Map<String, dynamic>,
+              ),
       );
 }
 
@@ -159,8 +161,10 @@ class UserDto {
     this.sexe,
   });
 
-  String get fullName =>
-      [firstName, lastName].whereType<String>().where((s) => s.isNotEmpty).join(' ');
+  String get fullName => [firstName, lastName]
+      .whereType<String>()
+      .where((s) => s.isNotEmpty)
+      .join(' ');
 
   factory UserDto.fromJson(Map<String, dynamic> j) => UserDto(
         id: (j['id'] as num).toInt(),

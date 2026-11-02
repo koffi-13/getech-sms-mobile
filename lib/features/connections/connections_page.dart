@@ -102,8 +102,10 @@ class _MyServersCard extends ConsumerWidget {
                 Icon(Icons.dns_rounded, color: theme.colorScheme.primary),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text('Mes serveurs',
-                      style: theme.textTheme.titleMedium),
+                  child: Text(
+                    'Mes serveurs',
+                    style: theme.textTheme.titleMedium,
+                  ),
                 ),
                 FilledButton.tonalIcon(
                   onPressed: () => context.push('/pairing'),
@@ -196,9 +198,7 @@ class _ServerTile extends ConsumerWidget {
         ),
       ),
       subtitle: Text(
-        active
-            ? '$subtitle • en cours d\'utilisation'
-            : subtitle,
+        active ? '$subtitle • en cours d\'utilisation' : subtitle,
         style: theme.textTheme.bodySmall?.copyWith(
           color: theme.colorScheme.onSurfaceVariant,
         ),
@@ -309,9 +309,12 @@ class _ServerStatusCard extends ConsumerWidget {
     final cs = theme.colorScheme;
 
     final establishmentName = serverInfo.maybeWhen(
-      data: (info) => info?.establishmentName,
-      orElse: () => null,
-    ) ?? conn.discoveredServerName ?? conn.establishmentCode ?? '—';
+          data: (info) => info?.establishmentName,
+          orElse: () => null,
+        ) ??
+        conn.discoveredServerName ??
+        conn.establishmentCode ??
+        '—';
 
     final apiInfo = serverInfo.maybeWhen(
       data: (info) => info,
@@ -330,7 +333,8 @@ class _ServerStatusCard extends ConsumerWidget {
               title: 'Serveur GeTech-SMS',
               icon: Icons.dns_outlined,
               actionLabel: 'Vérifier',
-              onAction: () => ref.read(connectionProvider.notifier).checkStatus(),
+              onAction: () =>
+                  ref.read(connectionProvider.notifier).checkStatus(),
             ),
             const Divider(height: 16),
             _InfoRow(
@@ -479,7 +483,9 @@ class _SyncCardState extends ConsumerState<_SyncCard> {
       ref.read(multiServerControllerProvider).recordSync();
       // [Notifications] Suivi validation/rejet + résultat utile.
       if (result.isSuccess) {
-        await ref.read(notificationServiceProvider).maybeCheckGradeModifications();
+        await ref
+            .read(notificationServiceProvider)
+            .maybeCheckGradeModifications();
       }
       await ref.read(notificationServiceProvider).notifySyncResult(result);
 
@@ -578,7 +584,7 @@ class _SyncCardState extends ConsumerState<_SyncCard> {
                 child: LinearProgressIndicator(
                   value: sync.progress,
                   minHeight: 8,
-                  backgroundColor: cs.primaryContainer.withOpacity(0.3),
+                  backgroundColor: cs.primaryContainer.withValues(alpha: 0.3),
                 ),
               ),
               const SizedBox(height: 8),
@@ -651,7 +657,7 @@ class _OfflineModeCard extends ConsumerWidget {
             Text(
               conn.forceOffline
                   ? 'L\'application utilise uniquement les données locales. '
-                    'Aucune requête réseau ne sera envoyée.'
+                      'Aucune requête réseau ne sera envoyée.'
                   : 'L\'application se synchronise automatiquement avec le serveur.',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: cs.onSurfaceVariant,
@@ -773,9 +779,9 @@ class _OutboxCard extends ConsumerWidget {
       case 'INSERT':
         return Icon(Icons.add_circle_outline, color: cs.primary, size: 20);
       case 'UPDATE':
-        return Icon(Icons.edit_outlined, color: Colors.blue, size: 20);
+        return const Icon(Icons.edit_outlined, color: Colors.blue, size: 20);
       case 'DELETE':
-        return Icon(Icons.delete_outline, color: Colors.red, size: 20);
+        return const Icon(Icons.delete_outline, color: Colors.red, size: 20);
       default:
         return const Icon(Icons.help_outline, size: 20);
     }
@@ -790,7 +796,10 @@ class _OutboxCard extends ConsumerWidget {
           'Cela supprimera toutes les modifications locales non encore envoyées au serveur. Cette action est irréversible.',
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annuler')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Annuler'),
+          ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('Vider', style: TextStyle(color: Colors.red)),
@@ -828,7 +837,8 @@ class _PairedDevicesCard extends ConsumerWidget {
           children: [
             SectionHeader(
               title: 'Appareils appairés',
-              subtitle: 'Vue administrateur — visibilité selon vos permissions.',
+              subtitle:
+                  'Vue administrateur — visibilité selon vos permissions.',
               icon: Icons.devices,
               actionLabel: 'Rafraîchir',
               onAction: () => ref.invalidate(pairedDevicesProvider),
@@ -870,8 +880,11 @@ class _PairedDevicesCard extends ConsumerWidget {
                                 label: Text('Révoqué'),
                                 visualDensity: VisualDensity.compact,
                               )
-                            : Icon(Icons.check_circle,
-                                color: Colors.green.shade400, size: 20),
+                            : Icon(
+                                Icons.check_circle,
+                                color: Colors.green.shade400,
+                                size: 20,
+                              ),
                       ),
                   ],
                 );
@@ -921,7 +934,8 @@ class _BackupRestoreCard extends ConsumerWidget {
             const Divider(height: 16),
             Text(
               'Exportez vos données scolaires (élèves, notes, appels) pour les sauvegarder ou les transférer.',
-              style: theme.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: cs.onSurfaceVariant),
             ),
             const SizedBox(height: 16),
             Row(
@@ -1021,7 +1035,7 @@ class _ResetDataCard extends ConsumerWidget {
     final theme = Theme.of(context);
     return Card(
       elevation: 0,
-      color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.3),
+      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -1066,10 +1080,16 @@ class _ResetDataCard extends ConsumerWidget {
           'Cette action va effacer TOUTES les données stockées localement (élèves, notes, appels, outbox). Les informations de connexion seront conservées.',
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annuler')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Annuler'),
+          ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Réinitialiser', style: TextStyle(color: Colors.red)),
+            child: const Text(
+              'Réinitialiser',
+              style: TextStyle(color: Colors.red),
+            ),
           ),
         ],
       ),
@@ -1098,7 +1118,7 @@ class _DangerZoneCard extends ConsumerWidget {
     final theme = Theme.of(context);
     return Card(
       elevation: 0,
-      color: theme.colorScheme.errorContainer.withOpacity(0.3),
+      color: theme.colorScheme.errorContainer.withValues(alpha: 0.3),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -1107,11 +1127,15 @@ class _DangerZoneCard extends ConsumerWidget {
           children: [
             Row(
               children: [
-                Icon(Icons.warning_amber_rounded,
-                    color: theme.colorScheme.error),
+                Icon(
+                  Icons.warning_amber_rounded,
+                  color: theme.colorScheme.error,
+                ),
                 const SizedBox(width: 8),
-                Text('Zone d\'action',
-                    style: theme.textTheme.titleMedium),
+                Text(
+                  'Zone d\'action',
+                  style: theme.textTheme.titleMedium,
+                ),
               ],
             ),
             const SizedBox(height: 4),

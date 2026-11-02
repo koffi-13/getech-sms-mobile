@@ -60,7 +60,8 @@ final dashboardStatsProvider =
   if (!conn.canReachServer || conn.serverUrl == null) {
     if (cachedStats != null) return cachedStats;
     throw const OfflineDashboardException(
-        'Mode hors-ligne — données non disponibles.');
+      'Mode hors-ligne — données non disponibles.',
+    );
   }
 
   final dio = ref.watch(dioProvider);
@@ -119,8 +120,7 @@ class TeacherDashboardData {
   int get classCount => classrooms.length;
 
   /// Effectif cumulé des classes de l'enseignant.
-  int get studentCount =>
-      classrooms.fold(0, (sum, c) => sum + c.studentCount);
+  int get studentCount => classrooms.fold(0, (sum, c) => sum + c.studentCount);
 
   /// Matières distinctes enseignées.
   int get subjectCount =>

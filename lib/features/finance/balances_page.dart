@@ -59,7 +59,8 @@ class _BalancesPageState extends ConsumerState<BalancesPage> {
   @override
   Widget build(BuildContext context) {
     final auth = ref.watch(authProvider);
-    final canRead = hasPermission(auth.permissions, RbacPermissions.paymentRead);
+    final canRead =
+        hasPermission(auth.permissions, RbacPermissions.paymentRead);
 
     if (!canRead) {
       return Scaffold(
@@ -126,35 +127,41 @@ class _BalancesPageState extends ConsumerState<BalancesPage> {
     ];
 
     if (balancesAsync.isLoading) {
-      slivers.add(const SliverFillRemaining(
-        hasScrollBody: false,
-        child: AppLoading(label: 'Chargement des soldes…'),
-      ));
+      slivers.add(
+        const SliverFillRemaining(
+          hasScrollBody: false,
+          child: AppLoading(label: 'Chargement des soldes…'),
+        ),
+      );
       slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 24)));
       return slivers;
     }
     if (balancesAsync.hasError) {
-      slivers.add(SliverFillRemaining(
-        hasScrollBody: false,
-        child: AppErrorWidget(
-          message: balancesAsync.error.toString(),
-          onRetry: _refresh,
+      slivers.add(
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: AppErrorWidget(
+            message: balancesAsync.error.toString(),
+            onRetry: _refresh,
+          ),
         ),
-      ));
+      );
       slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 24)));
       return slivers;
     }
 
     final balances = balancesAsync.value ?? const <FeeSubscriptionDto>[];
     if (balances.isEmpty) {
-      slivers.add(const SliverFillRemaining(
-        hasScrollBody: false,
-        child: EmptyState(
-          icon: Icons.account_balance_wallet_outlined,
-          title: 'Aucun solde dû',
-          message: 'Aucune subscription avec solde restant à payer.',
+      slivers.add(
+        const SliverFillRemaining(
+          hasScrollBody: false,
+          child: EmptyState(
+            icon: Icons.account_balance_wallet_outlined,
+            title: 'Aucun solde dû',
+            message: 'Aucune subscription avec solde restant à payer.',
+          ),
         ),
-      ));
+      );
       slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 24)));
       return slivers;
     }
@@ -172,60 +179,63 @@ class _BalancesPageState extends ConsumerState<BalancesPage> {
       totalOutstanding += b.balanceDue;
     }
 
-    slivers.add(SliverToBoxAdapter(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-        child: Column(
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: KpiCard(
-                    label: 'Total dû',
-                    value: MoneyFormatter.compact(totalDue),
-                    icon: Icons.request_quote_outlined,
-                    color: Colors.red.shade400,
+    slivers.add(
+      SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: KpiCard(
+                      label: 'Total dû',
+                      value: MoneyFormatter.compact(totalDue),
+                      icon: Icons.request_quote_outlined,
+                      color: Colors.red.shade400,
+                    ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: KpiCard(
-                    label: 'Encaissé',
-                    value: MoneyFormatter.compact(totalPaid),
-                    icon: Icons.check_circle_outline,
-                    color: Colors.green,
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: KpiCard(
+                      label: 'Encaissé',
+                      value: MoneyFormatter.compact(totalPaid),
+                      icon: Icons.check_circle_outline,
+                      color: Colors.green,
+                    ),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            KpiCard(
-              label: 'Solde restant',
-              value: MoneyFormatter.format(totalOutstanding),
-              icon: Icons.account_balance_outlined,
-              color: totalOutstanding > 0 ? Colors.orange : Colors.green,
-            ),
-            const SizedBox(height: 8),
-            SectionHeader(
-              title: 'Subscriptions',
-              subtitle:
-                  '${sorted.length} subscription${sorted.length > 1 ? 's' : ''}',
-              icon: Icons.assignment_outlined,
-            ),
-          ],
+                ],
+              ),
+              const SizedBox(height: 8),
+              KpiCard(
+                label: 'Solde restant',
+                value: MoneyFormatter.format(totalOutstanding),
+                icon: Icons.account_balance_outlined,
+                color: totalOutstanding > 0 ? Colors.orange : Colors.green,
+              ),
+              const SizedBox(height: 8),
+              SectionHeader(
+                title: 'Subscriptions',
+                subtitle:
+                    '${sorted.length} subscription${sorted.length > 1 ? 's' : ''}',
+                icon: Icons.assignment_outlined,
+              ),
+            ],
+          ),
         ),
       ),
-    ));
+    );
 
-    slivers.add(SliverPadding(
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      sliver: SliverList.separated(
-        itemCount: sorted.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 4),
-        itemBuilder: (context, i) =>
-            _BalanceTile(subscription: sorted[i]),
+    slivers.add(
+      SliverPadding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        sliver: SliverList.separated(
+          itemCount: sorted.length,
+          separatorBuilder: (_, __) => const SizedBox(height: 4),
+          itemBuilder: (context, i) => _BalanceTile(subscription: sorted[i]),
+        ),
       ),
-    ));
+    );
     slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 24)));
     return slivers;
   }
@@ -249,8 +259,11 @@ class _OfflineBanner extends ConsumerWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         child: Row(
           children: [
-            Icon(Icons.cloud_off,
-                size: 18, color: theme.colorScheme.onSecondaryContainer),
+            Icon(
+              Icons.cloud_off,
+              size: 18,
+              color: theme.colorScheme.onSecondaryContainer,
+            ),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -331,13 +344,14 @@ class _ClassroomFilter extends StatelessWidget {
               onTap: () => Navigator.pop(ctx, -1),
             ),
             const Divider(height: 1),
-            ...classrooms.map((c) => ListTile(
-                  title: Text(c.name),
-                  trailing: filter.classroomId == c.id
-                      ? const Icon(Icons.check)
-                      : null,
-                  onTap: () => Navigator.pop(ctx, c.id),
-                )),
+            ...classrooms.map(
+              (c) => ListTile(
+                title: Text(c.name),
+                trailing:
+                    filter.classroomId == c.id ? const Icon(Icons.check) : null,
+                onTap: () => Navigator.pop(ctx, c.id),
+              ),
+            ),
           ],
         ),
       ),
@@ -424,8 +438,7 @@ class _BalanceTile extends StatelessWidget {
                             if (sub.matricule != null &&
                                 sub.matricule!.isNotEmpty)
                               sub.matricule!,
-                            if (sub.classroomName != null)
-                              sub.classroomName!,
+                            if (sub.classroomName != null) sub.classroomName!,
                           ].join(' • '),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
@@ -450,24 +463,30 @@ class _BalanceTile extends StatelessWidget {
                   Expanded(
                     child: _AmountColumn(
                       label: 'Convenu',
-                      value: MoneyFormatter.format(sub.agreedAmount,
-                          withSymbol: false),
+                      value: MoneyFormatter.format(
+                        sub.agreedAmount,
+                        withSymbol: false,
+                      ),
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
                   Expanded(
                     child: _AmountColumn(
                       label: 'Payé',
-                      value: MoneyFormatter.format(sub.totalPaid,
-                          withSymbol: false),
+                      value: MoneyFormatter.format(
+                        sub.totalPaid,
+                        withSymbol: false,
+                      ),
                       color: Colors.green.shade700,
                     ),
                   ),
                   Expanded(
                     child: _AmountColumn(
                       label: 'Reste',
-                      value: MoneyFormatter.format(sub.balanceDue,
-                          withSymbol: false),
+                      value: MoneyFormatter.format(
+                        sub.balanceDue,
+                        withSymbol: false,
+                      ),
                       color: sub.balanceDue > 0
                           ? Colors.orange.shade700
                           : Colors.green.shade700,
@@ -483,8 +502,7 @@ class _BalanceTile extends StatelessWidget {
                 child: LinearProgressIndicator(
                   value: sub.paymentRate,
                   minHeight: 6,
-                  backgroundColor:
-                      theme.colorScheme.surfaceContainerHighest,
+                  backgroundColor: theme.colorScheme.surfaceContainerHighest,
                   color: settled ? Colors.green : Colors.orange,
                 ),
               ),

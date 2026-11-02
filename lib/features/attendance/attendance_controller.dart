@@ -86,7 +86,9 @@ class AttendanceController {
   /// Enregistre les absences d'une session (lot) :
   /// `POST /attendance/session/{sessionId}/absences`.
   Future<void> saveAbsences(
-      int sessionId, List<StudentAbsenceDto> absences) async {
+    int sessionId,
+    List<StudentAbsenceDto> absences,
+  ) async {
     _requireOnlineServer();
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
@@ -100,7 +102,9 @@ class AttendanceController {
 
   /// Marque une session comme terminée (PATCH /attendance/session/{id}).
   Future<CourseSessionDto> markSessionState(
-      int sessionId, String state) async {
+    int sessionId,
+    String state,
+  ) async {
     _requireOnlineServer();
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
@@ -136,7 +140,9 @@ class AttendanceController {
     );
     final resp = await _dio.post(
       buildUrl(
-          url, '${ApiEndpoints.attendanceSession}/$sessionId/lesson-record'),
+        url,
+        '${ApiEndpoints.attendanceSession}/$sessionId/lesson-record',
+      ),
       data: dto.toJson(),
     );
     final data = resp.data is Map
@@ -285,7 +291,9 @@ final lessonRecordProvider = FutureProvider.autoDispose
   try {
     final resp = await dio.get(
       buildUrl(
-          conn.serverUrl!, '${ApiEndpoints.attendanceSession}/$sessionId/lesson-record'),
+        conn.serverUrl!,
+        '${ApiEndpoints.attendanceSession}/$sessionId/lesson-record',
+      ),
     );
     if (resp.data is Map) {
       return LessonRecordDto.fromJson(resp.data as Map<String, dynamic>);
@@ -325,7 +333,9 @@ final absenceHistoryProvider = FutureProvider.autoDispose
 /// (tables `student_absences` + `course_sessions` + `subjects`, remplies
 /// par la synchro) — sert l'historique quand le serveur ne répond pas.
 Future<List<AbsenceHistoryEntry>> _absenceHistoryFromLocal(
-    Ref ref, int studentId) async {
+  Ref ref,
+  int studentId,
+) async {
   try {
     final db = ref.read(databaseProvider);
     final absences = await (db.select(db.studentAbsences)
@@ -355,8 +365,9 @@ Future<List<AbsenceHistoryEntry>> _absenceHistoryFromLocal(
         reason: a.reason,
       );
     }).toList();
-    entries.sort((a, b) =>
-        (b.date ?? DateTime(1970)).compareTo(a.date ?? DateTime(1970)));
+    entries.sort(
+      (a, b) => (b.date ?? DateTime(1970)).compareTo(a.date ?? DateTime(1970)),
+    );
     return entries;
   } catch (_) {
     return const [];
@@ -395,8 +406,7 @@ class AbsenceHistoryEntry {
         studentName: j['student_name'] as String? ?? '',
         courseSessionId: (j['course_session_id'] as num?)?.toInt() ?? 0,
         date: DateFormatter.parse(j['date'] as String?),
-        courseName:
-            j['course_name'] as String? ?? j['subject_name'] as String?,
+        courseName: j['course_name'] as String? ?? j['subject_name'] as String?,
         isJustified: (j['is_justified'] as bool?) ?? false,
         reason: j['reason'] as String?,
       );
@@ -421,11 +431,14 @@ final absenceHistoryEntriesProvider = FutureProvider.autoDispose
     final raw = <Map<String, dynamic>>[];
     if (resp.data is List) {
       raw.addAll(
-          (resp.data as List).whereType<Map>().map(Map<String, dynamic>.from));
+        (resp.data as List).whereType<Map>().map(Map<String, dynamic>.from),
+      );
     } else if (resp.data is Map && (resp.data as Map)['items'] is List) {
-      raw.addAll(((resp.data as Map)['items'] as List)
-          .whereType<Map>()
-          .map(Map<String, dynamic>.from));
+      raw.addAll(
+        ((resp.data as Map)['items'] as List)
+            .whereType<Map>()
+            .map(Map<String, dynamic>.from),
+      );
     }
     return raw.map(AbsenceHistoryEntry.fromJson).toList();
   } on DioException catch (e) {

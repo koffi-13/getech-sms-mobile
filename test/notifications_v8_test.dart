@@ -36,10 +36,20 @@ void main() {
 
     test('add + load : la plus récente en premier', () async {
       final store = NotificationStore();
-      await store.add(entry(1, 'Ancienne',
-          created: DateTime(2026, 10, 10)));
-      await store.add(entry(2, 'Récente',
-          created: DateTime(2026, 10, 12)));
+      await store.add(
+        entry(
+          1,
+          'Ancienne',
+          created: DateTime(2026, 10, 10),
+        ),
+      );
+      await store.add(
+        entry(
+          2,
+          'Récente',
+          created: DateTime(2026, 10, 12),
+        ),
+      );
       final entries = await store.load();
       expect(entries.length, 2);
       expect(entries.first.title, 'Récente');
@@ -76,8 +86,13 @@ void main() {
     test('plafonnement à 50 entrées (les plus anciennes sortent)', () async {
       final store = NotificationStore();
       for (var i = 0; i < 60; i++) {
-        await store.add(entry(i, 'N$i',
-            created: DateTime(2026, 10, 1).add(Duration(hours: i))));
+        await store.add(
+          entry(
+            i,
+            'N$i',
+            created: DateTime(2026, 10, 1).add(Duration(hours: i)),
+          ),
+        );
       }
       final entries = await store.load();
       expect(entries.length, 50);
@@ -88,15 +103,17 @@ void main() {
 
     test('round-trip JSON complet (catégorie + route + lu)', () async {
       final store = NotificationStore();
-      await store.add(NotificationEntry(
-        id: 42,
-        title: 'Titre',
-        body: 'Corps',
-        category: NotificationCategory.sync,
-        route: '/notifications',
-        createdAt: DateTime(2026, 10, 12, 9),
-        read: true,
-      ));
+      await store.add(
+        NotificationEntry(
+          id: 42,
+          title: 'Titre',
+          body: 'Corps',
+          category: NotificationCategory.sync,
+          route: '/notifications',
+          createdAt: DateTime(2026, 10, 12, 9),
+          read: true,
+        ),
+      );
       final e = (await store.load()).single;
       expect(e.category, NotificationCategory.sync);
       expect(e.route, '/notifications');
@@ -106,10 +123,10 @@ void main() {
   });
 
   group('AppErrorWidget.humanize — introuvable', () {
-    test('StateError « Classe #12 introuvable en local. » → message clair',
-        () {
+    test('StateError « Classe #12 introuvable en local. » → message clair', () {
       final msg = AppErrorWidget.humanize(
-          "Bad state: Classe #12 introuvable en local.");
+        'Bad state: Classe #12 introuvable en local.',
+      );
       expect(msg, contains('introuvable'));
       expect(msg, contains('rafraîchir'));
       // Plus JAMAIS le message générique « donnée inattendue ».
@@ -153,11 +170,15 @@ void main() {
 /// Miroir local du calcul (identique à WeekTypeHelper.weekTypeForDate).
 String? _weekTypeFor(DateTime date, DateTime? alternatingStart) {
   if (alternatingStart == null) return null;
-  final deltaDays = date.difference(DateTime(
-    alternatingStart.year,
-    alternatingStart.month,
-    alternatingStart.day,
-  )).inDays;
+  final deltaDays = date
+      .difference(
+        DateTime(
+          alternatingStart.year,
+          alternatingStart.month,
+          alternatingStart.day,
+        ),
+      )
+      .inDays;
   if (deltaDays < 0) return null;
   final weekNumber = deltaDays ~/ 7;
   return weekNumber % 2 == 0 ? 'A' : 'B';
@@ -165,4 +186,4 @@ String? _weekTypeFor(DateTime date, DateTime? alternatingStart) {
 
 // Silence les warnings de binding pour les méthodes statiques.
 // ignore: unused_element
-final _ = SystemChannels.platform;
+const _ = SystemChannels.platform;

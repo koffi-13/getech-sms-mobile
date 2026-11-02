@@ -67,7 +67,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
   });
 
-  ConnectionOnline() => ConnectionState(
+  ConnectionOnline() => const ConnectionState(
         status: ServerStatus.online,
         profileId: 'p-test',
         serverUrlOverride: 'http://192.168.1.10:8000/api/v1',
@@ -75,7 +75,7 @@ void main() {
         pairingToken: 'token-test',
       );
 
-  ConnectionOffline() => ConnectionState(
+  ConnectionOffline() => const ConnectionState(
         status: ServerStatus.offline,
         profileId: 'p-test',
         serverUrlOverride: 'http://192.168.1.10:8000/api/v1',
@@ -133,7 +133,8 @@ void main() {
       expect(resp.anyHasMore, isFalse);
     });
 
-    test('pull() réplique les tables de la forme `tables` dans Drift', () async {
+    test('pull() réplique les tables de la forme `tables` dans Drift',
+        () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
 
@@ -144,38 +145,40 @@ void main() {
             ref.onDispose(db.close);
             return db;
           }),
-          dioProvider.overrideWith((ref) => _jsonDio({
-                'server_time': serverTime,
-                'max_offline_days': 30,
-                'tables': {
-                  'students': {
-                    'rows': [
-                      {
-                        'id': 1,
-                        'establishment_id': 1,
-                        'matricule': 'M001',
-                        'nom': 'Koffi',
-                        'prenoms': 'Ange',
-                        'deleted': false,
-                      },
-                    ],
-                    'ids': [1],
-                    'has_more': false,
-                  },
-                  'student_class_assignments': {
-                    'rows': [
-                      {
-                        'id': 100,
-                        'student_id': 1,
-                        'classroom_id': 5,
-                        'school_year_id': 2,
-                      },
-                    ],
-                    'ids': [100],
-                    'has_more': false,
-                  },
+          dioProvider.overrideWith(
+            (ref) => _jsonDio({
+              'server_time': serverTime,
+              'max_offline_days': 30,
+              'tables': {
+                'students': {
+                  'rows': [
+                    {
+                      'id': 1,
+                      'establishment_id': 1,
+                      'matricule': 'M001',
+                      'nom': 'Koffi',
+                      'prenoms': 'Ange',
+                      'deleted': false,
+                    },
+                  ],
+                  'ids': [1],
+                  'has_more': false,
                 },
-              })),
+                'student_class_assignments': {
+                  'rows': [
+                    {
+                      'id': 100,
+                      'student_id': 1,
+                      'classroom_id': 5,
+                      'school_year_id': 2,
+                    },
+                  ],
+                  'ids': [100],
+                  'has_more': false,
+                },
+              },
+            }),
+          ),
         ],
       );
       addTearDown(container.dispose);
@@ -245,28 +248,52 @@ void main() {
       await seedGradesChain(db);
       container.read(connectionProvider.notifier).state = ConnectionOnline();
 
-      final online = await container.read(assessmentGradesProvider(
-        (assessmentId: 50, classSubjectId: 21, periodId: 3),
-      ).future);
+      final online = await container.read(
+        assessmentGradesProvider(
+          (
+            assessmentId: 50,
+            classSubjectId: 21,
+            periodId: 3,
+            classroomId: null
+          ),
+        ).future,
+      );
       expect(online, hasLength(2));
 
       // Le registre a été écrit par le cache-aside (le maillon manquant).
-      var assigns = await db.select(db.studentClassAssignments).get();
+      final assigns = await db.select(db.studentClassAssignments).get();
       expect(assigns, hasLength(2), reason: 'registre de classe vide');
       expect(assigns.map((a) => a.classroomId).toSet(), {5});
 
       // 2) Hors-ligne : la reconstruction doit retrouver les DEUX élèves.
       container.read(connectionProvider.notifier).state = ConnectionOffline();
-      container.invalidate(assessmentGradesProvider(
-        (assessmentId: 50, classSubjectId: 21, periodId: 3),
-      ));
+      container.invalidate(
+        assessmentGradesProvider(
+          (
+            assessmentId: 50,
+            classSubjectId: 21,
+            periodId: 3,
+            classroomId: null
+          ),
+        ),
+      );
 
-      final offline = await container.read(assessmentGradesProvider(
-        (assessmentId: 50, classSubjectId: 21, periodId: 3),
-      ).future);
-      expect(offline, hasLength(2),
-          reason: '« Aucun élève à noter » hors-ligne alors que les élèves '
-              'existent en base');
+      final offline = await container.read(
+        assessmentGradesProvider(
+          (
+            assessmentId: 50,
+            classSubjectId: 21,
+            periodId: 3,
+            classroomId: null
+          ),
+        ).future,
+      );
+      expect(
+        offline,
+        hasLength(2),
+        reason: '« Aucun élève à noter » hors-ligne alors que les élèves '
+            'existent en base',
+      );
       expect(offline.map((e) => e.studentId), containsAll([1, 2]));
       // Valeur répliquée conservée.
       final koffi = offline.firstWhere((e) => e.studentId == 1);
@@ -296,9 +323,16 @@ void main() {
       addTearDown(container.dispose);
       container.read(connectionProvider.notifier).state = ConnectionOffline();
 
-      final offline = await container.read(assessmentGradesProvider(
-        (assessmentId: 50, classSubjectId: 21, periodId: 3),
-      ).future);
+      final offline = await container.read(
+        assessmentGradesProvider(
+          (
+            assessmentId: 50,
+            classSubjectId: 21,
+            periodId: 3,
+            classroomId: null
+          ),
+        ).future,
+      );
       // Meilleur effort : liste partielle (l'élève noté) > liste vide.
       expect(offline, isNotEmpty);
       expect(offline.map((e) => e.studentId), contains(1));
@@ -328,31 +362,58 @@ void main() {
     });
 
     test('autoCourseFor : à 09h → créneau en cours (08-10) sélectionné', () {
-      final courses = [course('08:00', '10:00', id: 1), course('15:00', '17:00', id: 2)];
-      final picked = autoCourseFor(courses,
-          date: monday, now: DateTime(2025, 11, 10, 9, 0));
+      final courses = [
+        course('08:00', '10:00', id: 1),
+        course('15:00', '17:00', id: 2),
+      ];
+      final picked = autoCourseFor(
+        courses,
+        date: monday,
+        now: DateTime(2025, 11, 10, 9, 0),
+      );
       expect(picked?.id, 1);
     });
 
     test('autoCourseFor : à 11h → créneau à VENIR (15-17), pas le 1er', () {
-      final courses = [course('08:00', '10:00', id: 1), course('15:00', '17:00', id: 2)];
-      final picked = autoCourseFor(courses,
-          date: monday, now: DateTime(2025, 11, 10, 11, 0));
-      expect(picked?.id, 2,
-          reason: 'l\'ancien code sélectionnait le 1er créneau même fini');
+      final courses = [
+        course('08:00', '10:00', id: 1),
+        course('15:00', '17:00', id: 2),
+      ];
+      final picked = autoCourseFor(
+        courses,
+        date: monday,
+        now: DateTime(2025, 11, 10, 11, 0),
+      );
+      expect(
+        picked?.id,
+        2,
+        reason: 'l\'ancien code sélectionnait le 1er créneau même fini',
+      );
     });
 
     test('autoCourseFor : journée finie → dernier créneau (rattrapage)', () {
-      final courses = [course('08:00', '10:00', id: 1), course('15:00', '17:00', id: 2)];
-      final picked = autoCourseFor(courses,
-          date: monday, now: DateTime(2025, 11, 10, 18, 0));
+      final courses = [
+        course('08:00', '10:00', id: 1),
+        course('15:00', '17:00', id: 2),
+      ];
+      final picked = autoCourseFor(
+        courses,
+        date: monday,
+        now: DateTime(2025, 11, 10, 18, 0),
+      );
       expect(picked?.id, 2);
     });
 
     test('autoCourseFor : autre date → 1er créneau de la journée', () {
-      final courses = [course('08:00', '10:00', id: 1), course('15:00', '17:00', id: 2)];
-      final picked = autoCourseFor(courses,
-          date: DateTime(2025, 11, 11), now: DateTime(2025, 11, 10, 9, 0));
+      final courses = [
+        course('08:00', '10:00', id: 1),
+        course('15:00', '17:00', id: 2),
+      ];
+      final picked = autoCourseFor(
+        courses,
+        date: DateTime(2025, 11, 11),
+        now: DateTime(2025, 11, 10, 9, 0),
+      );
       expect(picked?.id, 1);
     });
 
@@ -387,20 +448,32 @@ void main() {
       ];
       // 09h → créneau 08-10 en cours → classe 5.
       expect(
-        defaultClassroomId(classes, scope, DateTime(2025, 11, 10, 9, 0),
-            effectiveWeek: WeekType.a),
+        defaultClassroomId(
+          classes,
+          scope,
+          DateTime(2025, 11, 10, 9, 0),
+          effectiveWeek: WeekType.a,
+        ),
         5,
       );
       // 11h → créneau 15-17 à venir → classe 8.
       expect(
-        defaultClassroomId(classes, scope, DateTime(2025, 11, 10, 11, 0),
-            effectiveWeek: WeekType.a),
+        defaultClassroomId(
+          classes,
+          scope,
+          DateTime(2025, 11, 10, 11, 0),
+          effectiveWeek: WeekType.a,
+        ),
         8,
       );
       // Admin / scope nul → pas de présélection (1re classe de la liste).
       expect(
-        defaultClassroomId(classes, null, DateTime(2025, 11, 10, 9, 0),
-            effectiveWeek: WeekType.a),
+        defaultClassroomId(
+          classes,
+          null,
+          DateTime(2025, 11, 10, 9, 0),
+          effectiveWeek: WeekType.a,
+        ),
         isNull,
       );
     });
@@ -410,8 +483,11 @@ void main() {
     test('les notifications de synchronisation sont OFF par défaut', () async {
       // Aucune préférence enregistrée → défauts.
       final settings = await NotificationSettings.load();
-      expect(settings.syncUpdates, isFalse,
-          reason: 'perçues comme des « notifications de développement »');
+      expect(
+        settings.syncUpdates,
+        isFalse,
+        reason: 'perçues comme des « notifications de développement »',
+      );
       expect(settings.courseReminders, isTrue);
       expect(settings.gradesValidation, isTrue);
     });
@@ -427,58 +503,83 @@ Future<void> seedGradesChain(
   bool withGrades = false,
 }) async {
   await db.batch((b) {
-    b.insert(db.classrooms, ClassroomsCompanion.insert(
-      id: const Value(5),
-      name: '2nde A',
-    ));
-    b.insert(db.subjects, SubjectsCompanion.insert(
-      id: const Value(10),
-      name: 'Mathématiques',
-    ));
-    b.insert(db.classSubjects, ClassSubjectsCompanion.insert(
-      id: const Value(21),
-      classroomId: 5,
-      subjectId: 10,
-    ));
-    b.insert(db.assessments, AssessmentsCompanion.insert(
-      id: const Value(50),
-      classSubjectId: 21,
-      periodId: const Value(3),
-      title: 'Devoir 1',
-      type: const Value('DEVOIR'),
-      maxScore: const Value(20),
-    ));
-    b.insert(db.students, StudentsCompanion.insert(
-      id: const Value(1),
-      nom: 'Koffi',
-      prenoms: const Value('Ange'),
-      matricule: 'M001',
-    ));
-    b.insert(db.students, StudentsCompanion.insert(
-      id: const Value(2),
-      nom: 'Aya',
-      prenoms: const Value('Grâce'),
-      matricule: 'M002',
-    ));
+    b.insert(
+      db.classrooms,
+      ClassroomsCompanion.insert(
+        id: const Value(5),
+        name: '2nde A',
+      ),
+    );
+    b.insert(
+      db.subjects,
+      SubjectsCompanion.insert(
+        id: const Value(10),
+        name: 'Mathématiques',
+      ),
+    );
+    b.insert(
+      db.classSubjects,
+      ClassSubjectsCompanion.insert(
+        id: const Value(21),
+        classroomId: 5,
+        subjectId: 10,
+      ),
+    );
+    b.insert(
+      db.assessments,
+      AssessmentsCompanion.insert(
+        id: const Value(50),
+        classSubjectId: 21,
+        periodId: const Value(3),
+        title: 'Devoir 1',
+        type: const Value('DEVOIR'),
+        maxScore: const Value(20),
+      ),
+    );
+    b.insert(
+      db.students,
+      StudentsCompanion.insert(
+        id: const Value(1),
+        nom: 'Koffi',
+        prenoms: const Value('Ange'),
+        matricule: 'M001',
+      ),
+    );
+    b.insert(
+      db.students,
+      StudentsCompanion.insert(
+        id: const Value(2),
+        nom: 'Aya',
+        prenoms: const Value('Grâce'),
+        matricule: 'M002',
+      ),
+    );
     if (withRoster) {
-      b.insert(db.studentClassAssignments,
-          StudentClassAssignmentsCompanion.insert(
-            studentId: 1,
-            classroomId: 5,
-          ));
-      b.insert(db.studentClassAssignments,
-          StudentClassAssignmentsCompanion.insert(
-            studentId: 2,
-            classroomId: 5,
-          ));
+      b.insert(
+        db.studentClassAssignments,
+        StudentClassAssignmentsCompanion.insert(
+          studentId: 1,
+          classroomId: 5,
+        ),
+      );
+      b.insert(
+        db.studentClassAssignments,
+        StudentClassAssignmentsCompanion.insert(
+          studentId: 2,
+          classroomId: 5,
+        ),
+      );
     }
     if (withGrades) {
-      b.insert(db.grades, GradesCompanion.insert(
-        id: const Value(11),
-        assessmentId: 50,
-        studentId: 1,
-        value: const Value(14.0),
-      ));
+      b.insert(
+        db.grades,
+        GradesCompanion.insert(
+          id: const Value(11),
+          assessmentId: 50,
+          studentId: 1,
+          value: const Value(14.0),
+        ),
+      );
     }
   });
 }

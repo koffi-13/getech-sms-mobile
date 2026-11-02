@@ -92,8 +92,10 @@ class AssessmentDto {
 
   /// Alias de compatibilité : title = name.
   String get title => name;
+
   /// Alias de compatibilité : date = dateTaken (parsé).
   DateTime? get date => DateFormatter.parse(dateTaken);
+
   /// Alias de compatibilité.
   AssessmentType get type => AssessmentType.values.firstWhere(
         (t) => t.code == assessmentTypeName.toUpperCase(),
@@ -262,7 +264,8 @@ class GradeEntryDto {
         modificationStatus: j['modification_status'] as String?,
         modification: j['modification'] is Map
             ? GradeModificationBriefDto.fromJson(
-                Map<String, dynamic>.from(j['modification'] as Map))
+                Map<String, dynamic>.from(j['modification'] as Map),
+              )
             : null,
       );
 
@@ -358,8 +361,11 @@ class SaveGradesResponse {
         queuedCount: (j['queued_count'] as num?)?.toInt() ?? 0,
         results: ((j['results'] as List?) ?? const [])
             .whereType<Map>()
-            .map((e) =>
-                SaveGradesLineResultDto.fromJson(Map<String, dynamic>.from(e)))
+            .map(
+              (e) => SaveGradesLineResultDto.fromJson(
+                Map<String, dynamic>.from(e),
+              ),
+            )
             .toList(),
       );
 }
@@ -484,8 +490,10 @@ class GradeDto {
         assessmentId: (j['assessment_id'] as num?)?.toInt() ?? 0,
         studentId: (j['student_id'] as num).toInt(),
         studentName: j['student_name'] as String? ?? '',
-        matricule: j['student_matricule'] as String? ?? j['matricule'] as String?,
-        value: (j['value'] as num?)?.toDouble() ?? (j['score'] as num?)?.toDouble(),
+        matricule:
+            j['student_matricule'] as String? ?? j['matricule'] as String?,
+        value: (j['value'] as num?)?.toDouble() ??
+            (j['score'] as num?)?.toDouble(),
         isAbsent: (j['is_absent'] as bool?) ?? false,
         comments: j['comment'] as String? ?? j['comments'] as String?,
         isLocked: (j['is_locked'] as bool?) ?? false,
@@ -556,8 +564,7 @@ class RankingRowDto {
   });
 
   /// Nom complet au format « NOM Prénoms » (convention desktop).
-  String get studentName =>
-      [nom, prenoms].where((s) => s.isNotEmpty).join(' ');
+  String get studentName => [nom, prenoms].where((s) => s.isNotEmpty).join(' ');
 
   /// Progression vs dernière période précédente.
   double get progression {
@@ -569,7 +576,7 @@ class RankingRowDto {
   factory RankingRowDto.fromJson(Map<String, dynamic> j) {
     // previous_period_averages peut être un Map {period_id: avg} ou une List.
     final ppa = j['previous_period_averages'];
-    Map<int, double> ppaMap = {};
+    final Map<int, double> ppaMap = {};
     if (ppa is Map) {
       ppa.forEach((k, v) {
         if (v is num) ppaMap[int.tryParse(k.toString()) ?? 0] = v.toDouble();
@@ -579,11 +586,13 @@ class RankingRowDto {
         if (ppa[i] is num) ppaMap[i + 1] = (ppa[i] as num).toDouble();
       }
     }
+    final rankLabelFromPayload = (j['rank_label'] as String?) ??
+        (j['rank'] is String ? j['rank'] as String? : null);
     // [Fix-RANK-PARSE] Résolu côté V5 utilisateur : `_parseRank` (rank_number
     // en priorité, puis rank num/chaîne « 3 B ») + `rankLabel` pour l'ex-æquo.
     return RankingRowDto(
       rank: _parseRank(j),
-      rankLabel: _rankLabel(j),
+      rankLabel: rankLabelFromPayload ?? _rankLabel(j),
       studentId: _asInt(j['student_id']) ?? 0,
       nom: j['nom'] as String? ?? '',
       prenoms: j['prenoms'] as String? ?? '',
@@ -678,8 +687,7 @@ class BulletinDto {
   });
 
   /// Nom complet au format « NOM Prénoms » (convention desktop).
-  String get studentName =>
-      [nom, prenoms].where((s) => s.isNotEmpty).join(' ');
+  String get studentName => [nom, prenoms].where((s) => s.isNotEmpty).join(' ');
 
   /// Alias de compatibilité.
   double get generalAverage => overallAverage ?? 0;
@@ -698,14 +706,15 @@ class BulletinDto {
       classroomName: j['classroom_name'] as String? ?? '',
       periodName: j['period_name'] as String? ?? '',
       schoolYearName: j['school_year_name'] as String?,
-      overallAverage: _asDouble(j['overall_average']) ??
-          _asDouble(j['general_average']),
+      overallAverage:
+          _asDouble(j['overall_average']) ?? _asDouble(j['general_average']),
       rank: j['rank']?.toString(),
       totalStudents: (j['total_students'] as num?)?.toInt(),
       mention: j['mention'] as String?,
       subjects: (j['subjects'] as List?)
-              ?.map((e) =>
-                  BulletinSubjectDto.fromJson(e as Map<String, dynamic>))
+              ?.map(
+                (e) => BulletinSubjectDto.fromJson(e as Map<String, dynamic>),
+              )
               .toList() ??
           const [],
       honors: j['honors'] == null
@@ -828,8 +837,10 @@ class BulletinSubjectDto {
         noteComposition: _asDouble(j['note_composition']),
         classAverage: _asDouble(j['class_average']),
         assessments: (j['assessments'] as List?)
-                ?.map((e) =>
-                    BulletinAssessmentDto.fromJson(e as Map<String, dynamic>))
+                ?.map(
+                  (e) =>
+                      BulletinAssessmentDto.fromJson(e as Map<String, dynamic>),
+                )
                 .toList() ??
             const [],
         mention: j['mention'] as String?,

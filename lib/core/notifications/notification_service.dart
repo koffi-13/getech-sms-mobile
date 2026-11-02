@@ -137,8 +137,7 @@ class NotificationService {
     }
 
     final plugin = FlutterLocalNotificationsPlugin();
-    const androidInit =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
+    const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
     const iosInit = DarwinInitializationSettings(
       requestAlertPermission: true,
       requestBadgePermission: true,
@@ -228,7 +227,8 @@ class NotificationService {
       final end = _parseHm(course.endTime);
       if (start == null) continue;
 
-      final startDt = DateTime(now.year, now.month, now.day, start.$1, start.$2);
+      final startDt =
+          DateTime(now.year, now.month, now.day, start.$1, start.$2);
       DateTime? endDt;
       if (end != null) {
         endDt = DateTime(now.year, now.month, now.day, end.$1, end.$2);
@@ -245,26 +245,30 @@ class NotificationService {
       // L'ancien 3e rappel « à l'heure du début » faisait doublon avec (a).
       final t2 = startDt.subtract(const Duration(minutes: 2));
       if (t2.isAfter(now.add(const Duration(seconds: 60)))) {
-        scheduled.add(_CourseReminder(
-          t2,
-          'Cours dans 2 minutes',
-          '$subject — $classroom'
-          '${room != null && room.isNotEmpty ? ' (salle $room)' : ''}. '
-          'Au démarrage, pensez à faire l\'appel (Présence).',
-          route: '/attendance',
-        ));
+        scheduled.add(
+          _CourseReminder(
+            t2,
+            'Cours dans 2 minutes',
+            '$subject — $classroom'
+                '${room != null && room.isNotEmpty ? ' (salle $room)' : ''}. '
+                'Au démarrage, pensez à faire l\'appel (Présence).',
+            route: '/attendance',
+          ),
+        );
       }
 
       if (endDt != null) {
         final tEnd = endDt.subtract(const Duration(minutes: 5));
         if (tEnd.isAfter(now.add(const Duration(seconds: 60)))) {
-          scheduled.add(_CourseReminder(
-            tEnd,
-            'Fin de cours dans 5 minutes',
-            'Pensez à remplir le cahier de texte de $subject ($classroom) '
-            'avant la fin du créneau.',
-            route: '/attendance',
-          ));
+          scheduled.add(
+            _CourseReminder(
+              tEnd,
+              'Fin de cours dans 5 minutes',
+              'Pensez à remplir le cahier de texte de $subject ($classroom) '
+                  'avant la fin du créneau.',
+              route: '/attendance',
+            ),
+          );
         }
       }
     }
@@ -408,8 +412,11 @@ class NotificationService {
       );
       final rows = ((resp.data as List?) ?? const [])
           .whereType<Map>()
-          .map((e) => GradeModificationListDto.fromJson(
-              Map<String, dynamic>.from(e)))
+          .map(
+            (e) => GradeModificationListDto.fromJson(
+              Map<String, dynamic>.from(e),
+            ),
+          )
           .toList();
 
       // Instantané précédent {id: status}.
@@ -435,7 +442,9 @@ class NotificationService {
         if (m.status == 'REJECTED' && before != null) rejected++;
       }
       await prefs.setString(
-          snapshotKey, jsonEncode(next.map((k, v) => MapEntry('$k', v))));
+        snapshotKey,
+        jsonEncode(next.map((k, v) => MapEntry('$k', v))),
+      );
 
       if (isAdmin) {
         final pending = rows.where((m) => m.status == 'PENDING').length;
@@ -451,8 +460,8 @@ class NotificationService {
             'modifications-pending',
             'Nouvelles modifications de notes',
             '$newOnes nouvelle(s) proposition(s) de note(s) à valider '
-            '($pending au total). Ouvrez le module Notes du serveur pour '
-            'les accorder ou les rejeter.',
+                '($pending au total). Ouvrez le module Notes du serveur pour '
+                'les accorder ou les rejeter.',
             category: NotificationCategory.grades,
             route: '/grades',
           );
@@ -466,7 +475,7 @@ class NotificationService {
           'modifications-decided',
           'Vos modifications de notes',
           'Mise à jour : ${parts.join(' et ')}. '
-          'Consultez le module Notes pour le détail.',
+              'Consultez le module Notes pour le détail.',
           category: NotificationCategory.grades,
           route: '/grades',
         );
@@ -498,8 +507,8 @@ class NotificationService {
         'sync-failed',
         'Synchronisation incomplète',
         '${result.errors.length} erreur(s) pendant la synchronisation. '
-        'Vos modifications locales sont conservées et seront renvoyées '
-        'à la prochaine tentative.',
+            'Vos modifications locales sont conservées et seront renvoyées '
+            'à la prochaine tentative.',
         category: NotificationCategory.sync,
       );
       return;
@@ -587,9 +596,8 @@ final courseRemindersSchedulerProvider = FutureProvider<int>((ref) async {
   final scopeAsync = ref.watch(teacherScopeProvider);
   // Attend que le scope ait tranché (enseignant ou non) avant de programmer.
   return scopeAsync.maybeWhen(
-    data: (scope) => ref
-        .read(notificationServiceProvider)
-        .scheduleTodayCourseReminders(),
+    data: (scope) =>
+        ref.read(notificationServiceProvider).scheduleTodayCourseReminders(),
     orElse: () => 0,
   );
 });

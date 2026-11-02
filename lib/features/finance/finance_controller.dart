@@ -38,8 +38,7 @@ class BalanceFilter {
     bool clearClassroom = false,
   }) =>
       BalanceFilter(
-        classroomId:
-            clearClassroom ? null : (classroomId ?? this.classroomId),
+        classroomId: clearClassroom ? null : (classroomId ?? this.classroomId),
         search: search ?? this.search,
       );
 
@@ -68,7 +67,9 @@ class FinanceRepository {
 
   Future<PaymentDto> recordPayment(PaymentRequest req) async {
     final conn = _ref.read(connectionProvider);
-    if (conn.serverUrl == null) throw const ApiException('Serveur non configuré');
+    if (conn.serverUrl == null) {
+      throw const ApiException('Serveur non configuré');
+    }
 
     if (!conn.canReachServer) {
       await _ref.read(outboxProvider).enqueue(
@@ -132,10 +133,13 @@ final balancesProvider = FutureProvider.autoDispose
 
     if (filter.search.isNotEmpty) {
       final q = filter.search.toLowerCase();
-      subs = subs.where((s) =>
-        (s.studentName?.toLowerCase().contains(q) ?? false) ||
-        (s.matricule?.toLowerCase().contains(q) ?? false)
-      ).toList();
+      subs = subs
+          .where(
+            (s) =>
+                (s.studentName?.toLowerCase().contains(q) ?? false) ||
+                (s.matricule?.toLowerCase().contains(q) ?? false),
+          )
+          .toList();
     }
     return subs;
   } catch (_) {

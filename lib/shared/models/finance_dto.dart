@@ -54,8 +54,8 @@ class PaymentDto {
         studentName: j['student_name'] as String?,
         matricule: j['matricule'] as String?,
         classroomName: j['classroom_name'] as String?,
-        reference: j['reference'] as String? ??
-            j['transaction_reference'] as String?,
+        reference:
+            j['reference'] as String? ?? j['transaction_reference'] as String?,
         subscriptionId: (j['subscription_id'] as num?)?.toInt(),
       );
 
@@ -183,8 +183,9 @@ class BalanceListResponse {
   factory BalanceListResponse.fromJson(Map<String, dynamic> j) =>
       BalanceListResponse(
         items: (j['items'] as List?)
-                ?.map((e) =>
-                    FeeSubscriptionDto.fromJson(e as Map<String, dynamic>))
+                ?.map(
+                  (e) => FeeSubscriptionDto.fromJson(e as Map<String, dynamic>),
+                )
                 .toList() ??
             const [],
         total: (j['total'] as num?)?.toInt() ?? 0,

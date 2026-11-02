@@ -8,7 +8,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/utils/formatters.dart';
-import '../../shared/models/student_dto.dart';
 import '../../shared/widgets/widgets.dart';
 import 'attendance_controller.dart';
 
@@ -70,9 +69,11 @@ class _StudentPickerState extends ConsumerState<_StudentPicker> {
                 final filtered = _query.isEmpty
                     ? list
                     : list
-                        .where((s) =>
-                            s.fullName.toLowerCase().contains(_query) ||
-                            s.matricule.toLowerCase().contains(_query))
+                        .where(
+                          (s) =>
+                              s.fullName.toLowerCase().contains(_query) ||
+                              s.matricule.toLowerCase().contains(_query),
+                        )
                         .toList();
                 if (filtered.isEmpty) {
                   return EmptyState(
@@ -87,26 +88,27 @@ class _StudentPickerState extends ConsumerState<_StudentPicker> {
                     final s = filtered[i];
                     return Card(
                       margin: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 4),
+                        horizontal: 16,
+                        vertical: 4,
+                      ),
                       child: ListTile(
                         leading: CircleAvatar(
-                          backgroundColor: Theme.of(context)
-                              .colorScheme
-                              .primaryContainer,
+                          backgroundColor:
+                              Theme.of(context).colorScheme.primaryContainer,
                           child: Text(s.displayInitials),
                         ),
                         title: Text(s.fullName),
                         subtitle: Text(s.matricule),
                         trailing: const Icon(Icons.chevron_right),
                         onTap: () => context.push(
-                            '/attendance/history?student_id=${s.id}'),
+                          '/attendance/history?student_id=${s.id}',
+                        ),
                       ),
                     );
                   },
                 );
               },
-              loading: () =>
-                  const AppLoading(label: 'Chargement des élèves…'),
+              loading: () => const AppLoading(label: 'Chargement des élèves…'),
               error: (e, _) => AppErrorWidget(
                 message: e.toString(),
                 onRetry: () => ref.invalidate(allStudentsProvider),
@@ -213,7 +215,7 @@ class _StatTile extends StatelessWidget {
         Container(
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
-            color: color.withOpacity(0.12),
+            color: color.withValues(alpha: 0.12),
             borderRadius: BorderRadius.circular(10),
           ),
           child: Icon(icon, size: 18, color: color),
@@ -222,11 +224,13 @@ class _StatTile extends StatelessWidget {
         Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(value,
-                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.w800,
-                      color: color,
-                    )),
+            Text(
+              value,
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w800,
+                    color: color,
+                  ),
+            ),
             Text(label, style: Theme.of(context).textTheme.bodySmall),
           ],
         ),
@@ -252,14 +256,13 @@ class _AbsenceCard extends StatelessWidget {
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
                 color: (entry.isJustified ? Colors.green : Colors.red.shade400)
-                    .withOpacity(0.12),
+                    .withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Icon(
                 entry.isJustified ? Icons.verified : Icons.event_busy,
                 size: 20,
-                color:
-                    entry.isJustified ? Colors.green : Colors.red.shade400,
+                color: entry.isJustified ? Colors.green : Colors.red.shade400,
               ),
             ),
             const SizedBox(width: 12),
@@ -274,9 +277,11 @@ class _AbsenceCard extends StatelessWidget {
                   const SizedBox(height: 2),
                   Row(
                     children: [
-                      Icon(Icons.calendar_today_outlined,
-                          size: 14,
-                          color: Theme.of(context).colorScheme.onSurfaceVariant),
+                      Icon(
+                        Icons.calendar_today_outlined,
+                        size: 14,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
                       const SizedBox(width: 4),
                       Text(
                         DateFormatter.date(entry.date),

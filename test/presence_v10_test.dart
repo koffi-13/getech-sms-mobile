@@ -6,8 +6,8 @@ library;
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:getech_sms_mobile/core/config/constants.dart';
-import 'package:getech_sms_mobile/features/attendance/course_selection.dart' as smart;
+import 'package:getech_sms_mobile/features/attendance/course_selection.dart'
+    as smart;
 import 'package:getech_sms_mobile/shared/models/attendance_dto.dart';
 
 WeeklyScheduleDto _course(
@@ -45,10 +45,24 @@ void main() {
     test('groupOverlappingCourses : chevauchement → UN groupe jumelé', () {
       // L'enseignant a 6A ET 6B sur le même créneau → classes jumelées.
       final groups = smart.groupOverlappingCourses([
-        _course(1, dayOfWeek: 1, start: '08:00', end: '10:00',
-            classroomId: 11, classroomName: '6A', subjectName: 'Maths'),
-        _course(2, dayOfWeek: 1, start: '08:00', end: '10:00',
-            classroomId: 12, classroomName: '6B', subjectName: 'Maths'),
+        _course(
+          1,
+          dayOfWeek: 1,
+          start: '08:00',
+          end: '10:00',
+          classroomId: 11,
+          classroomName: '6A',
+          subjectName: 'Maths',
+        ),
+        _course(
+          2,
+          dayOfWeek: 1,
+          start: '08:00',
+          end: '10:00',
+          classroomId: 12,
+          classroomName: '6B',
+          subjectName: 'Maths',
+        ),
       ]);
       expect(groups.length, 1);
       expect(groups.first.isMerged, isTrue);
@@ -125,10 +139,24 @@ void main() {
   group('[Présence-V10] libellés de groupe', () {
     test('matières distinctes séparées par « / »', () {
       final groups = smart.groupOverlappingCourses([
-        _course(1, dayOfWeek: 1, start: '08:00', end: '10:00',
-            classroomId: 11, classroomName: '6A', subjectName: 'Maths'),
-        _course(2, dayOfWeek: 1, start: '08:00', end: '10:00',
-            classroomId: 12, classroomName: '6B', subjectName: 'PC'),
+        _course(
+          1,
+          dayOfWeek: 1,
+          start: '08:00',
+          end: '10:00',
+          classroomId: 11,
+          classroomName: '6A',
+          subjectName: 'Maths',
+        ),
+        _course(
+          2,
+          dayOfWeek: 1,
+          start: '08:00',
+          end: '10:00',
+          classroomId: 12,
+          classroomName: '6B',
+          subjectName: 'PC',
+        ),
       ]);
       expect(groups.first.subjectLabel, 'Maths / PC');
     });
@@ -136,7 +164,7 @@ void main() {
     test('cours toutes semaines (weekTypeRaw null) parsable', () {
       // Les cours « toutes semaines » (week_type NULL serveur) doivent
       // passer dans le regroupement sans erreur.
-      final course = WeeklyScheduleDto(
+      const course = WeeklyScheduleDto(
         id: 1,
         classroomId: 11,
         classroomName: '6A',

@@ -233,7 +233,8 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
                       onSubmit: _submitManual,
                       submitting: _submitting,
                       tolerateClockSkew: _tolerateClockSkew,
-                      onTolerateChanged: (v) => setState(() => _tolerateClockSkew = v),
+                      onTolerateChanged: (v) =>
+                          setState(() => _tolerateClockSkew = v),
                       error: _submitError,
                     ),
                     _QrTab(
@@ -380,10 +381,12 @@ class _DiscoveryTab extends ConsumerWidget {
                       margin: const EdgeInsets.only(bottom: 8),
                       child: ListTile(
                         leading: CircleAvatar(
-                          backgroundColor:
-                              theme.colorScheme.primaryContainer.withOpacity(0.6),
-                          child: Icon(Icons.dns,
-                              color: theme.colorScheme.onPrimaryContainer),
+                          backgroundColor: theme.colorScheme.primaryContainer
+                              .withValues(alpha: 0.6),
+                          child: Icon(
+                            Icons.dns,
+                            color: theme.colorScheme.onPrimaryContainer,
+                          ),
                         ),
                         title: Text(s.establishmentName ?? s.name),
                         subtitle: Text('${s.ip}:${s.port}'
@@ -454,7 +457,8 @@ class _ManualForm extends StatelessWidget {
         children: [
           const SectionHeader(
             title: 'Appairage manuel',
-            subtitle: 'Saisissez les informations affichées sur le terminal desktop.',
+            subtitle:
+                'Saisissez les informations affichées sur le terminal desktop.',
             icon: Icons.edit_note,
           ),
           const SizedBox(height: 8),
@@ -525,7 +529,9 @@ class _ManualForm extends StatelessWidget {
             value: tolerateClockSkew,
             onChanged: (v) => onTolerateChanged(v ?? true),
             title: const Text('Tolérer les décalages d\'horloge'),
-            subtitle: const Text('Évite les erreurs d\'expiration prématurée (Mode Local Forcé)'),
+            subtitle: const Text(
+              'Évite les erreurs d\'expiration prématurée (Mode Local Forcé)',
+            ),
             controlAffinity: ListTileControlAffinity.leading,
             contentPadding: EdgeInsets.zero,
             dense: true,
@@ -556,7 +562,8 @@ class _ManualForm extends StatelessWidget {
           ),
           // [Fix-PAIRING-KEYBOARD] Espace sous le contenu = clavier ouvert.
           SizedBox(
-              height: MediaQuery.of(context).viewInsets.bottom),
+            height: MediaQuery.of(context).viewInsets.bottom,
+          ),
         ],
       ),
     );
@@ -588,11 +595,15 @@ class _QrTab extends StatelessWidget {
               width: 96,
               height: 96,
               decoration: BoxDecoration(
-                color: theme.colorScheme.primaryContainer.withOpacity(0.4),
+                color:
+                    theme.colorScheme.primaryContainer.withValues(alpha: 0.4),
                 shape: BoxShape.circle,
               ),
-              child: Icon(Icons.qr_code_scanner,
-                  size: 48, color: theme.colorScheme.primary),
+              child: Icon(
+                Icons.qr_code_scanner,
+                size: 48,
+                color: theme.colorScheme.primary,
+              ),
             ),
             const SizedBox(height: 20),
             Text(

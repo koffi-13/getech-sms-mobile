@@ -30,12 +30,14 @@ class ClassroomDetailPage extends ConsumerStatefulWidget {
   const ClassroomDetailPage({super.key, required this.id});
 
   @override
-  ConsumerState<ClassroomDetailPage> createState() => _ClassroomDetailPageState();
+  ConsumerState<ClassroomDetailPage> createState() =>
+      _ClassroomDetailPageState();
 }
 
-class _ClassroomDetailPageState extends ConsumerState<ClassroomDetailPage> with SingleTickerProviderStateMixin {
+class _ClassroomDetailPageState extends ConsumerState<ClassroomDetailPage>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
-  WeekType _weekType = WeekType.a;
+  final WeekType _weekType = WeekType.a;
 
   @override
   void initState() {
@@ -105,7 +107,8 @@ class _InfoTab extends StatelessWidget {
                 leading: const Icon(Icons.stairs_outlined),
                 title: const Text('Niveau'),
                 subtitle: Text(
-                    classroom.levelName ?? 'N/A'),
+                  classroom.levelName ?? 'N/A',
+                ),
               ),
               if (classroom.cycleName != null)
                 ListTile(
@@ -258,7 +261,8 @@ class _ScheduleTab extends ConsumerWidget {
           return Center(
             child: EmptyState(
               icon: Icons.event_busy,
-              title: onlyMine ? 'Aucun de vos créneaux' : 'Aucun cours programmé',
+              title:
+                  onlyMine ? 'Aucun de vos créneaux' : 'Aucun cours programmé',
               message: onlyMine
                   ? 'Vous n\'avez pas de créneau dans cette classe. Seuls vos '
                       'créneaux sont affichés ; le professeur principal voit '
@@ -276,11 +280,13 @@ class _ScheduleTab extends ConsumerWidget {
                     .colorScheme
                     .secondaryContainer
                     .withValues(alpha: 0.6),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 6),
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 6,
+                  ),
                   child: Row(
-                    children: const [
+                    children: [
                       Icon(Icons.info_outline, size: 16),
                       SizedBox(width: 8),
                       Expanded(
@@ -304,7 +310,8 @@ class _ScheduleTab extends ConsumerWidget {
           ],
         );
       },
-      loading: () => const AppLoading(label: 'Chargement de l\'emploi du temps…'),
+      loading: () =>
+          const AppLoading(label: 'Chargement de l\'emploi du temps…'),
       error: (e, _) => Center(
         child: AppErrorWidget(
           message: e.toString(),
@@ -338,39 +345,68 @@ class _WeeklyScheduleGrid extends StatelessWidget {
         child: DataTable(
           columnSpacing: 8,
           columns: [
-            const DataColumn(label: Text('Créneau', style: TextStyle(fontSize: 12))),
-            ..._days.map((d) => DataColumn(label: Text(d, style: const TextStyle(fontSize: 12)))),
+            const DataColumn(
+              label: Text('Créneau', style: TextStyle(fontSize: 12)),
+            ),
+            ..._days.map(
+              (d) => DataColumn(
+                label: Text(d, style: const TextStyle(fontSize: 12)),
+              ),
+            ),
           ],
           rows: sortedSlots.map((slot) {
             final parts = slot.split('-');
             final startTime = parts.isNotEmpty ? parts[0] : '';
             final endTime = parts.length > 1 ? parts[1] : '';
             final cells = <DataCell>[];
-            cells.add(DataCell(Text('$startTime\n$endTime', style: const TextStyle(fontSize: 10))));
+            cells.add(
+              DataCell(
+                Text(
+                  '$startTime\n$endTime',
+                  style: const TextStyle(fontSize: 10),
+                ),
+              ),
+            );
             for (int day = 1; day <= 6; day++) {
-              final entry = entries.where((e) => e.dayOfWeek == day && '${e.startTime}-${e.endTime}' == slot).firstOrNull;
-              cells.add(DataCell(
-                entry != null
-                    ? Container(
-                        padding: const EdgeInsets.all(4),
-                        decoration: BoxDecoration(
-                          color: Theme.of(context).colorScheme.primaryContainer,
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(entry.subjectName ?? '',
-                                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
-                            if (entry.teacherName != null)
-                              Text(entry.teacherName!,
-                                  style: const TextStyle(fontSize: 8)),
-                          ],
-                        ),
-                      )
-                    : const Text(''),
-              ));
+              final entry = entries
+                  .where(
+                    (e) =>
+                        e.dayOfWeek == day &&
+                        '${e.startTime}-${e.endTime}' == slot,
+                  )
+                  .firstOrNull;
+              cells.add(
+                DataCell(
+                  entry != null
+                      ? Container(
+                          padding: const EdgeInsets.all(4),
+                          decoration: BoxDecoration(
+                            color:
+                                Theme.of(context).colorScheme.primaryContainer,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                entry.subjectName ?? '',
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              if (entry.teacherName != null)
+                                Text(
+                                  entry.teacherName!,
+                                  style: const TextStyle(fontSize: 8),
+                                ),
+                            ],
+                          ),
+                        )
+                      : const Text(''),
+                ),
+              );
             }
             return DataRow(cells: cells);
           }).toList(),

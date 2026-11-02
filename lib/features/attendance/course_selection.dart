@@ -34,9 +34,8 @@ WeeklyScheduleDto? autoCourseFor(
   required DateTime now,
 }) {
   if (dayCourses.isEmpty) return null;
-  final isToday = date.year == now.year &&
-      date.month == now.month &&
-      date.day == now.day;
+  final isToday =
+      date.year == now.year && date.month == now.month && date.day == now.day;
   if (!isToday) return dayCourses.first;
 
   for (final c in dayCourses) {
@@ -45,7 +44,8 @@ WeeklyScheduleDto? autoCourseFor(
       // Fin inconnue : créneau « à venir » tant qu'il n'a pas commencé.
       final start = parseHm(c.startTime);
       if (start == null) continue;
-      final startDt = DateTime(now.year, now.month, now.day, start.$1, start.$2);
+      final startDt =
+          DateTime(now.year, now.month, now.day, start.$1, start.$2);
       if (!startDt.isBefore(now)) return c;
       continue;
     }
@@ -79,7 +79,8 @@ int? defaultClassroomId(
       final endDt = DateTime(now.year, now.month, now.day, end.$1, end.$2);
       if (endDt.isBefore(now)) continue; // créneau terminé.
     } else if (start != null) {
-      final startDt = DateTime(now.year, now.month, now.day, start.$1, start.$2);
+      final startDt =
+          DateTime(now.year, now.month, now.day, start.$1, start.$2);
       if (startDt.isBefore(now)) continue;
     }
     if (ids.contains(cid)) return cid; // en cours ou à venir.
@@ -106,12 +107,14 @@ class CourseGroup {
   const CourseGroup(this.courses);
 
   /// Heure de début du groupe (min depuis minuit).
-  int get startMinutes =>
-      courses.map((c) => _minutes(c.startTime) ?? 0).reduce((a, b) => a < b ? a : b);
+  int get startMinutes => courses
+      .map((c) => _minutes(c.startTime) ?? 0)
+      .reduce((a, b) => a < b ? a : b);
 
   /// Heure de fin du groupe (max des fins).
-  int get endMinutes =>
-      courses.map((c) => _minutes(c.endTime) ?? 0).reduce((a, b) => a > b ? a : b);
+  int get endMinutes => courses
+      .map((c) => _minutes(c.endTime) ?? 0)
+      .reduce((a, b) => a > b ? a : b);
 
   bool get isMerged => courses.length > 1;
 
@@ -128,10 +131,7 @@ class CourseGroup {
   /// Matière(s) du groupe (une en général ; les jumelages croisés gardent
   /// les matières distinctes séparées par « / »).
   String get subjectLabel {
-    final names = courses
-        .map((c) => c.subjectName ?? 'Cours')
-        .toSet()
-        .toList();
+    final names = courses.map((c) => c.subjectName ?? 'Cours').toSet().toList();
     return names.join(' / ');
   }
 }
@@ -142,9 +142,10 @@ class CourseGroup {
 /// (l'appartenance à un groupe est transitive). Un chevauchement =
 /// l'enseignant a JUMELÉ les classes : elles forment UN seul créneau.
 List<CourseGroup> groupOverlappingCourses(List<WeeklyScheduleDto> dayCourses) {
-  final sorted = [...dayCourses]
-    ..sort((a, b) => (_minutes(a.startTime) ?? 0)
-        .compareTo(_minutes(b.startTime) ?? 0));
+  final sorted = [...dayCourses]..sort(
+      (a, b) =>
+          (_minutes(a.startTime) ?? 0).compareTo(_minutes(b.startTime) ?? 0),
+    );
   final groups = <CourseGroup>[];
   final groupEnds = <int>[];
 

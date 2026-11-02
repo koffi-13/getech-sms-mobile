@@ -119,59 +119,82 @@ void main() {
     bool poisonedAssessment = false,
   }) async {
     await db.batch((b) {
-      b.insert(db.classrooms, ClassroomsCompanion.insert(
-        id: const Value(5),
-        name: '2nde A',
-      ),);
-      b.insert(db.subjects, SubjectsCompanion.insert(
-        id: const Value(10),
-        name: 'Mathématiques',
-      ),);
-      b.insert(db.classSubjects, ClassSubjectsCompanion.insert(
-        id: const Value(21),
-        classroomId: 5,
-        subjectId: 10,
-      ),);
+      b.insert(
+        db.classrooms,
+        ClassroomsCompanion.insert(
+          id: const Value(5),
+          name: '2nde A',
+        ),
+      );
+      b.insert(
+        db.subjects,
+        SubjectsCompanion.insert(
+          id: const Value(10),
+          name: 'Mathématiques',
+        ),
+      );
+      b.insert(
+        db.classSubjects,
+        ClassSubjectsCompanion.insert(
+          id: const Value(21),
+          classroomId: 5,
+          subjectId: 10,
+        ),
+      );
       if (poisonedAssessment) {
         // Cache empoisonné par une version précédente : matière inconnue.
-        b.insert(db.assessments, AssessmentsCompanion.insert(
-          id: const Value(50),
-          classSubjectId: 0,
-          periodId: const Value(3),
-          title: 'Devoir 1',
-          type: const Value('DEVOIR'),
-          maxScore: const Value(20),
-        ),);
+        b.insert(
+          db.assessments,
+          AssessmentsCompanion.insert(
+            id: const Value(50),
+            classSubjectId: 0,
+            periodId: const Value(3),
+            title: 'Devoir 1',
+            type: const Value('DEVOIR'),
+            maxScore: const Value(20),
+          ),
+        );
       }
-      b.insert(db.students, StudentsCompanion.insert(
-        id: const Value(1),
-        nom: 'Koffi',
-        prenoms: const Value('Ange'),
-        matricule: 'M001',
-      ),);
-      b.insert(db.students, StudentsCompanion.insert(
-        id: const Value(2),
-        nom: 'Aya',
-        prenoms: const Value('Grâce'),
-        matricule: 'M002',
-      ),);
+      b.insert(
+        db.students,
+        StudentsCompanion.insert(
+          id: const Value(1),
+          nom: 'Koffi',
+          prenoms: const Value('Ange'),
+          matricule: 'M001',
+        ),
+      );
+      b.insert(
+        db.students,
+        StudentsCompanion.insert(
+          id: const Value(2),
+          nom: 'Aya',
+          prenoms: const Value('Grâce'),
+          matricule: 'M002',
+        ),
+      );
       // Registre de classe (page Élèves / sync pull).
-      b.insert(db.studentClassAssignments,
-          StudentClassAssignmentsCompanion.insert(
-            studentId: 1,
-            classroomId: 5,
-          ),);
-      b.insert(db.studentClassAssignments,
-          StudentClassAssignmentsCompanion.insert(
-            studentId: 2,
-            classroomId: 5,
-          ),);
+      b.insert(
+        db.studentClassAssignments,
+        StudentClassAssignmentsCompanion.insert(
+          studentId: 1,
+          classroomId: 5,
+        ),
+      );
+      b.insert(
+        db.studentClassAssignments,
+        StudentClassAssignmentsCompanion.insert(
+          studentId: 2,
+          classroomId: 5,
+        ),
+      );
     });
   }
 
   group('[Fix-OFFLINE-GRADES-SUBJECT-ID] réponse serveur sans class_subject_id',
       () {
-    test('la consultation EN LIGNE de la liste écrit l\'évaluation avec la '
+    test(
+        'la consultation EN LIGNE de la liste écrit l\'évaluation avec la '
         'matière du CONTEXTE (repli), pas 0', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
@@ -184,27 +207,34 @@ void main() {
             return db;
           }),
           dioProvider.overrideWith(
-              (ref) => _jsonDio(realPreV10AssessmentsBody),),
+            (ref) => _jsonDio(realPreV10AssessmentsBody),
+          ),
         ],
       );
       addTearDown(container.dispose);
       container.read(connectionProvider.notifier).state = online();
 
-      final list = await container.read(assessmentsProvider(
-        const AssessmentsQuery(classSubjectId: 21, periodId: 3),
-      ).future,);
+      final list = await container.read(
+        assessmentsProvider(
+          const AssessmentsQuery(classSubjectId: 21, periodId: 3),
+        ).future,
+      );
       expect(list, hasLength(1));
 
       final row = await (db.select(db.assessments)
             ..where((t) => t.id.equals(50)))
           .getSingle();
-      expect(row.classSubjectId, 21,
-          reason: 'l\'évaluation était écrite avec classSubjectId=0 → '
-              'chaîne hors-ligne cassée dès le premier maillon',);
+      expect(
+        row.classSubjectId,
+        21,
+        reason: 'l\'évaluation était écrite avec classSubjectId=0 → '
+            'chaîne hors-ligne cassée dès le premier maillon',
+      );
       expect(row.periodId, 3);
     });
 
-    test('réponse d\'un serveur à jour (V10) : class_subject_id de la '
+    test(
+        'réponse d\'un serveur à jour (V10) : class_subject_id de la '
         'réponse fait foi', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
@@ -222,18 +252,24 @@ void main() {
       addTearDown(container.dispose);
       container.read(connectionProvider.notifier).state = online();
 
-      await container.read(assessmentsProvider(
-        const AssessmentsQuery(classSubjectId: 99, periodId: 3),
-      ).future,);
+      await container.read(
+        assessmentsProvider(
+          const AssessmentsQuery(classSubjectId: 99, periodId: 3),
+        ).future,
+      );
 
       final row = await (db.select(db.assessments)
             ..where((t) => t.id.equals(51)))
           .getSingle();
-      expect(row.classSubjectId, 21,
-          reason: 'la valeur du serveur (21) prime sur le contexte (99)',);
+      expect(
+        row.classSubjectId,
+        21,
+        reason: 'la valeur du serveur (21) prime sur le contexte (99)',
+      );
     });
 
-    test('É2E : liste consultée en ligne (serveur pré-V10) → hors-ligne → '
+    test(
+        'É2E : liste consultée en ligne (serveur pré-V10) → hors-ligne → '
         '« Aucun élève » RÉPARÉ : les élèves du registre sont notables',
         () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
@@ -247,50 +283,71 @@ void main() {
             return db;
           }),
           dioProvider.overrideWith(
-              (ref) => _jsonDio(realPreV10AssessmentsBody),),
+            (ref) => _jsonDio(realPreV10AssessmentsBody),
+          ),
         ],
       );
       addTearDown(container.dispose);
 
       // 1) En ligne : le prof ouvre Notes → la liste des évaluations.
       container.read(connectionProvider.notifier).state = online();
-      await container.read(assessmentsProvider(
-        const AssessmentsQuery(classSubjectId: 21, periodId: 3),
-      ).future,);
+      await container.read(
+        assessmentsProvider(
+          const AssessmentsQuery(classSubjectId: 21, periodId: 3),
+        ).future,
+      );
 
       // 2) Hors-ligne : il ouvre l'évaluation pour saisir les notes.
       //    Aucune note n'existe encore (nouvelle évaluation) — le registre
       //    (page Élèves) doit donc suffire.
       container.read(connectionProvider.notifier).state = offline();
-      final entries = await container.read(assessmentGradesProvider(
-        (assessmentId: 50, classSubjectId: 21, periodId: 3),
-      ).future,);
+      final entries = await container.read(
+        assessmentGradesProvider(
+          (
+            assessmentId: 50,
+            classSubjectId: 21,
+            periodId: 3,
+            classroomId: null
+          ),
+        ).future,
+      );
 
-      expect(entries, hasLength(2),
-          reason: '« Aucun élève à noter pour cette évaluation » alors que '
-              'les élèves s\'affichent dans Élèves',);
-      expect(entries.map((e) => e.studentName), containsAll(
-          [contains('Koffi'), contains('Aya')],),);
+      expect(
+        entries,
+        hasLength(2),
+        reason: '« Aucun élève à noter pour cette évaluation » alors que '
+            'les élèves s\'affichent dans Élèves',
+      );
+      expect(
+        entries.map((e) => e.studentName),
+        containsAll(
+          [contains('Koffi'), contains('Aya')],
+        ),
+      );
     });
   });
 
   group('[Fix-OFFLINE-GRADES-SUBJECT-ID] réparation des caches empoisonnés',
       () {
-    test('consultation en ligne de la liste → la ligne classSubjectId=0 est '
+    test(
+        'consultation en ligne de la liste → la ligne classSubjectId=0 est '
         'réparée (sans déclasser une valeur correcte)', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
       // Une ligne empoisonnée (50) + une ligne saine (51, autre matière).
       await seedChainWithoutAssessment(db, poisonedAssessment: true);
       await db.batch((b) {
-        b.insert(db.assessments, AssessmentsCompanion.insert(
-          id: const Value(51),
-          classSubjectId: 77,
-          periodId: const Value(3),
-          title: 'Devoir 2',
-          type: const Value('DEVOIR'),
-          maxScore: const Value(20),
-        ),);
+        b.insert(
+          db.assessments,
+          AssessmentsCompanion.insert(
+            id: const Value(51),
+            classSubjectId: 77,
+            periodId: const Value(3),
+            title: 'Devoir 2',
+            type: const Value('DEVOIR'),
+            maxScore: const Value(20),
+          ),
+        );
       });
 
       final container = ProviderContainer(
@@ -299,26 +356,40 @@ void main() {
             ref.onDispose(db.close);
             return db;
           }),
-          dioProvider.overrideWith((ref) => _jsonDio([
-                ...realPreV10AssessmentsBody,
-                ...patchedAssessmentsBody,
-              ]),),
+          dioProvider.overrideWith(
+            (ref) => _jsonDio([
+              ...realPreV10AssessmentsBody,
+              ...patchedAssessmentsBody,
+            ]),
+          ),
         ],
       );
       addTearDown(container.dispose);
       container.read(connectionProvider.notifier).state = online();
 
-      await container.read(assessmentsProvider(
-        const AssessmentsQuery(classSubjectId: 21, periodId: 3),
-      ).future,);
+      await container.read(
+        assessmentsProvider(
+          const AssessmentsQuery(classSubjectId: 21, periodId: 3),
+        ).future,
+      );
 
-      final rows = {for (final r in await db.select(db.assessments).get()) r.id: r};
-      expect(rows[50]!.classSubjectId, 21, reason: 'ligne empoisonnée non réparée');
-      expect(rows[51]!.classSubjectId, 77,
-          reason: 'valeur correcte écrasée par le contexte',);
+      final rows = {
+        for (final r in await db.select(db.assessments).get()) r.id: r,
+      };
+      expect(
+        rows[50]!.classSubjectId,
+        21,
+        reason: 'ligne empoisonnée non réparée',
+      );
+      expect(
+        rows[51]!.classSubjectId,
+        77,
+        reason: 'valeur correcte écrasée par le contexte',
+      );
     });
 
-    test('hors-ligne : l\'indice de matière de la page répare à chaud → '
+    test(
+        'hors-ligne : l\'indice de matière de la page répare à chaud → '
         'élèves retrouvés + ligne guérie en base', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       addTearDown(db.close);
@@ -337,23 +408,43 @@ void main() {
       container.read(connectionProvider.notifier).state = offline();
 
       // Sans indice (ancien appel) : chaîne cassée → vide.
-      final withoutHint = await container.read(assessmentGradesProvider(
-        (assessmentId: 50, classSubjectId: null, periodId: 3),
-      ).future,);
+      final withoutHint = await container.read(
+        assessmentGradesProvider(
+          (
+            assessmentId: 50,
+            classSubjectId: null,
+            periodId: 3,
+            classroomId: null
+          ),
+        ).future,
+      );
       expect(withoutHint, isEmpty, reason: 'pré-conditions non respectées');
 
       // Avec l'indice de la page (matière 21) : élèves + guérison.
-      final entries = await container.read(assessmentGradesProvider(
-        (assessmentId: 50, classSubjectId: 21, periodId: 3),
-      ).future,);
-      expect(entries, hasLength(2),
-          reason: 'l\'indice de matière doit réparer la chaîne hors-ligne',);
+      final entries = await container.read(
+        assessmentGradesProvider(
+          (
+            assessmentId: 50,
+            classSubjectId: 21,
+            periodId: 3,
+            classroomId: null
+          ),
+        ).future,
+      );
+      expect(
+        entries,
+        hasLength(2),
+        reason: 'l\'indice de matière doit réparer la chaîne hors-ligne',
+      );
 
       final row = await (db.select(db.assessments)
             ..where((t) => t.id.equals(50)))
           .getSingle();
-      expect(row.classSubjectId, 21,
-          reason: 'la ligne doit être guérie pour les prochaines fois',);
+      expect(
+        row.classSubjectId,
+        21,
+        reason: 'la ligne doit être guérie pour les prochaines fois',
+      );
     });
   });
 }

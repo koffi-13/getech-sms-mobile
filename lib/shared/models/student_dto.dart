@@ -112,9 +112,11 @@ class StudentDto {
             StudentStatus.fromCode(j['student_status'] as String?) ??
             StudentStatus.fromLabel(j['student_status_label'] as String?),
         inscriptionType: InscriptionType.fromCode(
-                j['inscription_type'] as String?) ??
+              j['inscription_type'] as String?,
+            ) ??
             InscriptionType.fromLabel(
-                j['inscription_type_label'] as String?),
+              j['inscription_type_label'] as String?,
+            ),
         contact: j['contact'] == null
             ? null
             : StudentContactDto.fromJson(j['contact'] as Map<String, dynamic>),
@@ -124,9 +126,12 @@ class StudentDto {
         scholastic: j['scholastic'] == null
             ? null
             : StudentScholasticDto.fromJson(
-                j['scholastic'] as Map<String, dynamic>),
+                j['scholastic'] as Map<String, dynamic>,
+              ),
         parents: (j['parents'] as List?)
-                ?.map((e) => StudentParentDto.fromJson(e as Map<String, dynamic>))
+                ?.map(
+                  (e) => StudentParentDto.fromJson(e as Map<String, dynamic>),
+                )
                 .toList() ??
             const [],
         guardians: (j['guardians'] as List?)
@@ -189,9 +194,16 @@ class StudentContactDto {
   final String? address;
   final String? city;
 
-  const StudentContactDto({this.id, this.phone, this.email, this.address, this.city});
+  const StudentContactDto({
+    this.id,
+    this.phone,
+    this.email,
+    this.address,
+    this.city,
+  });
 
-  factory StudentContactDto.fromJson(Map<String, dynamic> j) => StudentContactDto(
+  factory StudentContactDto.fromJson(Map<String, dynamic> j) =>
+      StudentContactDto(
         id: (j['id'] as num?)?.toInt(),
         phone: j['phone'] as String?,
         email: j['email'] as String?,
@@ -214,9 +226,15 @@ class StudentMedicalDto {
   final String? allergies;
   final String? doctor;
 
-  const StudentMedicalDto({this.id, this.bloodType, this.allergies, this.doctor});
+  const StudentMedicalDto({
+    this.id,
+    this.bloodType,
+    this.allergies,
+    this.doctor,
+  });
 
-  factory StudentMedicalDto.fromJson(Map<String, dynamic> j) => StudentMedicalDto(
+  factory StudentMedicalDto.fromJson(Map<String, dynamic> j) =>
+      StudentMedicalDto(
         id: (j['id'] as num?)?.toInt(),
         // [Fix-BLOODTYPE] Le serveur stocke le CODE ('A+', 'O-'…) et non le
         // nom d'enum Dart ('aPlus'). L'ancien matching par nom ne matchait

@@ -220,7 +220,8 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
   ) {
     final now = DateTime.now();
     final groups = smart.groupOverlappingCourses(
-        scope.coursesForDate(now, currentWeek: effectiveWeek));
+      scope.coursesForDate(now, currentWeek: effectiveWeek),
+    );
     final current = smart.autoCourseGroup(groups, now: now);
 
     return Column(
@@ -231,8 +232,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
             Expanded(
               child: _LockedField(
                 label: 'Date',
-                value:
-                    '${DateFormatter.date(now)} (${_weekdayLabel(now)})',
+                value: '${DateFormatter.date(now)} (${_weekdayLabel(now)})',
                 icon: Icons.calendar_today,
               ),
             ),
@@ -270,7 +270,10 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
   /// Panneau « heure qui sonne » de l'enseignant : carte du créneau
   /// courant + déroulé de la journée (lecture seule) + démarrage.
   Widget _teacherCoursePanel(
-      BuildContext context, TeacherScope scope, WeekType effectiveWeek) {
+    BuildContext context,
+    TeacherScope scope,
+    WeekType effectiveWeek,
+  ) {
     final now = DateTime.now();
 
     // Dimanche : pas de cours.
@@ -283,12 +286,12 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
     }
 
     final groups = smart.groupOverlappingCourses(
-        scope.coursesForDate(now, currentWeek: effectiveWeek));
+      scope.coursesForDate(now, currentWeek: effectiveWeek),
+    );
     if (groups.isEmpty) {
       return EmptyState(
         title: 'Aucun cours aujourd\'hui',
-        message:
-            'Votre emploi du temps ne comporte aucun cours aujourd\'hui '
+        message: 'Votre emploi du temps ne comporte aucun cours aujourd\'hui '
             '(semaine ${effectiveWeek == WeekType.a ? 'A' : 'B'}).',
         icon: Icons.event_busy,
       );
@@ -309,16 +312,17 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
               children: [
                 Row(
                   children: [
-                    Icon(Icons.schedule,
-                        color: Theme.of(context).colorScheme.primary),
+                    Icon(
+                      Icons.schedule,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
                         _groupStateLabel(current, now),
-                        style:
-                            Theme.of(context).textTheme.titleSmall?.copyWith(
-                                  fontWeight: FontWeight.bold,
-                                ),
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.bold,
+                            ),
                       ),
                     ),
                   ],
@@ -336,11 +340,8 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                     Expanded(
                       child: Text(
                         current.classroomLabel +
-                            (current.isMerged
-                                ? '  (classes jumelées)'
-                                : ''),
-                        style: Theme.of(context).textTheme.bodySmall
-                            ?.copyWith(
+                            (current.isMerged ? '  (classes jumelées)' : ''),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
                               color: Theme.of(context)
                                   .colorScheme
                                   .onSurfaceVariant,
@@ -356,9 +357,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                     'Un seul appel pour l\'ensemble des classes jumelées : '
                     'les élèves des deux classes sont listés ensemble.',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(context)
-                              .colorScheme
-                              .onSurfaceVariant,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                   ),
                 ],
@@ -378,14 +377,15 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                 ? Theme.of(context).colorScheme.primaryContainer
                 : null,
             child: Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               child: Row(
                 children: [
                   Icon(
                     isCurrent
                         ? Icons.play_circle_fill
-                        : (isPast ? Icons.check_circle_outline : Icons.circle_outlined),
+                        : (isPast
+                            ? Icons.check_circle_outline
+                            : Icons.circle_outlined),
                     size: 18,
                     color: isCurrent
                         ? Theme.of(context).colorScheme.primary
@@ -423,9 +423,11 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
               : const Icon(Icons.play_arrow),
-          label: Text(current.isMerged
-              ? 'Démarrer les sessions (classes jumelées)'
-              : 'Démarrer la session'),
+          label: Text(
+            current.isMerged
+                ? 'Démarrer les sessions (classes jumelées)'
+                : 'Démarrer la session',
+          ),
         ),
       ],
     );
@@ -448,9 +450,10 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
   // ---------------------------------------------------------------------------
 
   Widget _adminSelectors(
-      BuildContext context,
-      AsyncValue<List<ClassroomDto>> classrooms,
-      WeekType effectiveWeek) {
+    BuildContext context,
+    AsyncValue<List<ClassroomDto>> classrooms,
+    WeekType effectiveWeek,
+  ) {
     final scopeAsync = ref.watch(teacherScopeProvider);
     final scope = scopeAsync.valueOrNull;
     final restricted =
@@ -476,7 +479,9 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
             }
             if (classList.isEmpty) {
               return const _DisabledField(
-                  label: 'Classe', hint: 'Aucune classe');
+                label: 'Classe',
+                hint: 'Aucune classe',
+              );
             }
             // [Présence-V9] Présélection intelligente : classe du
             // créneau EN COURS ou À VENIR aujourd'hui (emploi du
@@ -484,13 +489,18 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
             if (_classroomId == null ||
                 !classList.any((c) => c.id == _classroomId)) {
               _classroomId = smart.defaultClassroomId(
-                      classList, scope, DateTime.now(),
-                      effectiveWeek: effectiveWeek) ??
+                    classList,
+                    scope,
+                    DateTime.now(),
+                    effectiveWeek: effectiveWeek,
+                  ) ??
                   classList.first.id;
             }
             return DropdownButtonFormField<ClassroomDto>(
-              value: classList.firstWhere((c) => c.id == _classroomId,
-                  orElse: () => classList.first),
+              initialValue: classList.firstWhere(
+                (c) => c.id == _classroomId,
+                orElse: () => classList.first,
+              ),
               // [Fix-OVERFLOW] isExpanded : contraint la valeur
               // sélectionnée à la largeur du champ.
               isExpanded: true,
@@ -500,11 +510,16 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                 isDense: true,
               ),
               items: classList
-                  .map((c) => DropdownMenuItem(
-                        value: c,
-                        child: Text(c.name,
-                            overflow: TextOverflow.ellipsis, maxLines: 1),
-                      ))
+                  .map(
+                    (c) => DropdownMenuItem(
+                      value: c,
+                      child: Text(
+                        c.name,
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                      ),
+                    ),
+                  )
                   .toList(),
               onChanged: _hasActiveSession
                   ? null
@@ -515,8 +530,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
             );
           },
           loading: () => const LinearProgressIndicator(minHeight: 56),
-          error: (e, _) =>
-              _DisabledField(label: 'Classe', hint: 'Erreur : $e'),
+          error: (e, _) => _DisabledField(label: 'Classe', hint: 'Erreur : $e'),
         ),
         const SizedBox(height: 12),
         Row(
@@ -592,8 +606,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
     if (!conn.isPaired) {
       return EmptyState(
         title: 'Aucun serveur',
-        message:
-            'La présence ne peut être saisie qu\'en connexion au serveur. '
+        message: 'La présence ne peut être saisie qu\'en connexion au serveur. '
             'Appairez d\'abord un serveur GeTech-SMS.',
         icon: Icons.dns_outlined,
         actionLabel: 'Appairer un serveur',
@@ -603,8 +616,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
     if (conn.isChecking) {
       return EmptyState(
         title: 'Connexion au serveur…',
-        message:
-            'Vérification de la liaison en cours. La saisie des présences '
+        message: 'Vérification de la liaison en cours. La saisie des présences '
             'sera proposée dès que la connexion sera établie.',
         icon: Icons.wifi_find,
         actionLabel: 'Revérifier',
@@ -657,10 +669,14 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
       );
     }
     return ref
-        .watch(weeklyScheduleProvider(ScheduleQuery(
-          classroomId: _classroomId!,
-          weekType: effectiveWeek,
-        )))
+        .watch(
+          weeklyScheduleProvider(
+            ScheduleQuery(
+              classroomId: _classroomId!,
+              weekType: effectiveWeek,
+            ),
+          ),
+        )
         .when(
           data: (list) {
             final dayCourses = list
@@ -680,14 +696,17 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
             // sinon 1er cours de la journée.
             if (_selectedCourse == null ||
                 !dayCourses.any((c) => c.id == _selectedCourse!.id)) {
-              _selectedCourse = smart.autoCourseFor(dayCourses,
-                  date: _date, now: DateTime.now());
+              _selectedCourse = smart.autoCourseFor(
+                dayCourses,
+                date: _date,
+                now: DateTime.now(),
+              );
             }
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 DropdownButtonFormField<WeeklyScheduleDto>(
-                  value: _selectedCourse,
+                  initialValue: _selectedCourse,
                   // [Fix-COURSE-OVERFLOW-152] isExpanded : la valeur
                   // sélectionnée est contrainte à la largeur du champ.
                   isExpanded: true,
@@ -697,15 +716,17 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                     isDense: true,
                   ),
                   items: dayCourses
-                      .map((c) => DropdownMenuItem(
-                            value: c,
-                            child: Text(
-                              '${c.startTime} – ${c.subjectName ?? 'Cours'}'
-                              '${c.teacherName != null ? ' (${c.teacherName})' : ''}',
-                              overflow: TextOverflow.ellipsis,
-                              maxLines: 1,
-                            ),
-                          ))
+                      .map(
+                        (c) => DropdownMenuItem(
+                          value: c,
+                          child: Text(
+                            '${c.startTime} – ${c.subjectName ?? 'Cours'}'
+                            '${c.teacherName != null ? ' (${c.teacherName})' : ''}',
+                            overflow: TextOverflow.ellipsis,
+                            maxLines: 1,
+                          ),
+                        ),
+                      )
                       .toList(),
                   onChanged: (c) => setState(() => _selectedCourse = c),
                 ),
@@ -737,10 +758,14 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
               const AppLoading(label: 'Chargement de l\'emploi du temps…'),
           error: (e, _) => AppErrorWidget(
             message: e.toString(),
-            onRetry: () => ref.invalidate(weeklyScheduleProvider(ScheduleQuery(
-              classroomId: _classroomId!,
-              weekType: effectiveWeek,
-            ))),
+            onRetry: () => ref.invalidate(
+              weeklyScheduleProvider(
+                ScheduleQuery(
+                  classroomId: _classroomId!,
+                  weekType: effectiveWeek,
+                ),
+              ),
+            ),
           ),
         );
   }
@@ -759,21 +784,24 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
       for (final course in group.courses) {
         final cid = course.classroomId;
         if (cid == null) continue;
-        sessions.add(await controller.startSession(
-          classroomId: cid,
-          weeklyScheduleId: course.id,
-          subjectId: course.subjectId,
-          teacherId: course.teacherId,
-          // [Présence-V10] Flux enseignant : _date = aujourd'hui (jamais
-          // modifiable). Flux admin : date choisie (rattrapage possible).
-          date: _date,
-          startTime: course.startTime,
-          endTime: course.endTime,
-        ));
+        sessions.add(
+          await controller.startSession(
+            classroomId: cid,
+            weeklyScheduleId: course.id,
+            subjectId: course.subjectId,
+            teacherId: course.teacherId,
+            // [Présence-V10] Flux enseignant : _date = aujourd'hui (jamais
+            // modifiable). Flux admin : date choisie (rattrapage possible).
+            date: _date,
+            startTime: course.startTime,
+            endTime: course.endTime,
+          ),
+        );
       }
       if (sessions.isEmpty) {
         throw const ApiException(
-            'Impossible de démarrer : aucune classe associée à ce cours.');
+          'Impossible de démarrer : aucune classe associée à ce cours.',
+        );
       }
       setState(() {
         _activeSessions = sessions;
@@ -802,12 +830,19 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
   DateTime? _courseEndDateTime() {
     final group = _activeGroup;
     if (group != null && group.courses.isNotEmpty) {
-      final end = smart.parseHm(group.courses
-          .map((c) => c.endTime)
-          .reduce((a, b) => a.compareTo(b) > 0 ? a : b));
+      final end = smart.parseHm(
+        group.courses
+            .map((c) => c.endTime)
+            .reduce((a, b) => a.compareTo(b) > 0 ? a : b),
+      );
       if (end != null) {
         return DateTime(
-            _date.year, _date.month, _date.day, end.$1, end.$2);
+          _date.year,
+          _date.month,
+          _date.day,
+          end.$1,
+          end.$2,
+        );
       }
     }
     final end = _activeSession?.endTime;
@@ -833,8 +868,8 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
             .toList() ??
         [session.classroomId ?? _classroomId!])
       ..sort();
-    final studentsAsync =
-        ref.watch(mergedClassStudentsProvider(MergedStudentsQuery(classroomIds)));
+    final studentsAsync = ref
+        .watch(mergedClassStudentsProvider(MergedStudentsQuery(classroomIds)));
 
     // Cahier de texte : la fiche de la session principale pré-remplit le
     // formulaire (les classes jumelées partagent le même contenu).
@@ -913,9 +948,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                   children: [
                     Expanded(
                       child: Text(
-                        group?.subjectLabel ??
-                            session.subjectName ??
-                            'Cours',
+                        group?.subjectLabel ?? session.subjectName ?? 'Cours',
                         style: Theme.of(context).textTheme.titleMedium,
                       ),
                     ),
@@ -933,12 +966,8 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                   Text(
                     '${group.classroomLabel} — classes jumelées (un appel '
                     'pour l\'ensemble)',
-                    style: Theme.of(context)
-                        .textTheme
-                        .bodySmall
-                        ?.copyWith(
-                          color:
-                              Theme.of(context).colorScheme.onSurfaceVariant,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                   ),
                 ],
@@ -949,7 +978,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
         const SizedBox(height: 16),
 
         // --- 1er temps : APPEL (début de cours) — liste des élèves ---
-        SectionHeader(
+        const SectionHeader(
           title: 'Appel — début de cours',
           icon: Icons.fact_check_outlined,
           subtitle:
@@ -968,13 +997,12 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
             // [Présence-V10] Association élève → session de sa classe
             // (sauvegarde des absences vers la bonne session).
             final classByStudent = <int, String>{};
-            for (final course in group?.courses ?? const <WeeklyScheduleDto>[]) {
+            for (final course
+                in group?.courses ?? const <WeeklyScheduleDto>[]) {
               final cid = course.classroomId;
               if (cid == null) continue;
               final label = course.classroomName ?? 'Classe $cid';
-              final inClass = ref
-                  .read(classStudentsProvider(cid))
-                  .valueOrNull;
+              final inClass = ref.read(classStudentsProvider(cid)).valueOrNull;
               for (final s in inClass ?? const <StudentDto>[]) {
                 classByStudent[s.id] = label;
               }
@@ -1005,34 +1033,35 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                       const Spacer(),
                       Text(
                         '${_absencesDrafts.length} absent(s)',
-                        style:
-                            Theme.of(context).textTheme.bodySmall?.copyWith(
-                                  color: _absencesDrafts.isEmpty
-                                      ? Colors.green
-                                      : Colors.red.shade400,
-                                  fontWeight: FontWeight.w600,
-                                ),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: _absencesDrafts.isEmpty
+                                  ? Colors.green
+                                  : Colors.red.shade400,
+                              fontWeight: FontWeight.w600,
+                            ),
                       ),
                     ],
                   ),
                 ),
                 const SizedBox(height: 8),
-                ...students.map((s) => _StudentAbsenceRow(
-                      student: s,
-                      absence: _absencesDrafts[s.id],
-                      classLabel: merged ? classByStudent[s.id] : null,
-                      // [Présence-V9] Justification réservée à l'admin.
-                      canJustify: canJustify,
-                      onChanged: (absent, draft) {
-                        setState(() {
-                          if (absent && draft != null) {
-                            _absencesDrafts[s.id] = draft;
-                          } else {
-                            _absencesDrafts.remove(s.id);
-                          }
-                        });
-                      },
-                    )),
+                ...students.map(
+                  (s) => _StudentAbsenceRow(
+                    student: s,
+                    absence: _absencesDrafts[s.id],
+                    classLabel: merged ? classByStudent[s.id] : null,
+                    // [Présence-V9] Justification réservée à l'admin.
+                    canJustify: canJustify,
+                    onChanged: (absent, draft) {
+                      setState(() {
+                        if (absent && draft != null) {
+                          _absencesDrafts[s.id] = draft;
+                        } else {
+                          _absencesDrafts.remove(s.id);
+                        }
+                      });
+                    },
+                  ),
+                ),
               ],
             );
           },
@@ -1040,7 +1069,8 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
           error: (e, _) => AppErrorWidget(
             message: e.toString(),
             onRetry: () => ref.invalidate(
-                mergedClassStudentsProvider(MergedStudentsQuery(classroomIds))),
+              mergedClassStudentsProvider(MergedStudentsQuery(classroomIds)),
+            ),
           ),
         ),
         const SizedBox(height: 16),
@@ -1064,18 +1094,22 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                   padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
                   child: Row(
                     children: [
-                      Icon(Icons.menu_book_outlined,
-                          color: Theme.of(context).colorScheme.primary),
+                      Icon(
+                        Icons.menu_book_outlined,
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
                       const SizedBox(width: 12),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text('Cahier de texte — fin de cours',
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .titleSmall
-                                    ?.copyWith(fontWeight: FontWeight.bold)),
+                            Text(
+                              'Cahier de texte — fin de cours',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .titleSmall
+                                  ?.copyWith(fontWeight: FontWeight.bold),
+                            ),
                             const SizedBox(height: 2),
                             Text(
                               cahierSubtitle,
@@ -1085,9 +1119,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                         ),
                       ),
                       Icon(
-                        cahierExpanded
-                            ? Icons.expand_less
-                            : Icons.expand_more,
+                        cahierExpanded ? Icons.expand_less : Icons.expand_more,
                       ),
                     ],
                   ),
@@ -1151,9 +1183,11 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
           OutlinedButton.icon(
             onPressed: _saving ? null : _markCompleted,
             icon: const Icon(Icons.check_circle_outline),
-            label: Text(_activeSessions.length > 1
-                ? 'Marquer les sessions comme terminées'
-                : 'Marquer la session comme terminée'),
+            label: Text(
+              _activeSessions.length > 1
+                  ? 'Marquer les sessions comme terminées'
+                  : 'Marquer la session comme terminée',
+            ),
           ),
         const SizedBox(height: 8),
         TextButton.icon(
@@ -1190,16 +1224,15 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
       final content = _lessonContentCtrl.text.trim();
       if (content.isNotEmpty) {
         for (final session in _activeSessions) {
-          final saved = await ref
-              .read(attendanceControllerProvider)
-              .saveLessonRecord(
-                sessionId: session.id,
-                content: content,
-                homework: _lessonHomeworkCtrl.text.trim().isEmpty
-                    ? null
-                    : _lessonHomeworkCtrl.text.trim(),
-                recordId: _lessonRecordIds[session.id],
-              );
+          final saved =
+              await ref.read(attendanceControllerProvider).saveLessonRecord(
+                    sessionId: session.id,
+                    content: content,
+                    homework: _lessonHomeworkCtrl.text.trim().isEmpty
+                        ? null
+                        : _lessonHomeworkCtrl.text.trim(),
+                    recordId: _lessonRecordIds[session.id],
+                  );
           _lessonRecordIds[session.id] = saved.id ?? 0;
         }
       }
@@ -1212,15 +1245,17 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
       for (final a in _absencesDrafts.values) {
         final sessionId =
             _sessionByStudent[a.studentId] ?? _activeSessions.first.id;
-        bySession.putIfAbsent(sessionId, () => []).add(StudentAbsenceDto(
-              id: a.id,
-              courseSessionId: sessionId,
-              studentId: a.studentId,
-              studentName: a.studentName,
-              matricule: a.matricule,
-              isJustified: a.isJustified,
-              reason: a.reason,
-            ));
+        bySession.putIfAbsent(sessionId, () => []).add(
+              StudentAbsenceDto(
+                id: a.id,
+                courseSessionId: sessionId,
+                studentId: a.studentId,
+                studentName: a.studentName,
+                matricule: a.matricule,
+                isJustified: a.isJustified,
+                reason: a.reason,
+              ),
+            );
       }
       for (final session in _activeSessions) {
         // Chaque session reçoit SA liste (vide = tous présents), comme
@@ -1235,7 +1270,8 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-                'Enregistré : $total absent(s), cahier de texte ${content.isEmpty ? 'ignoré' : 'mis à jour'}.'),
+              'Enregistré : $total absent(s), cahier de texte ${content.isEmpty ? 'ignoré' : 'mis à jour'}.',
+            ),
           ),
         );
       }
@@ -1259,9 +1295,11 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
           updated.add(session);
           continue;
         }
-        updated.add(await ref
-            .read(attendanceControllerProvider)
-            .markSessionState(session.id, CourseSessionState.completed.code));
+        updated.add(
+          await ref
+              .read(attendanceControllerProvider)
+              .markSessionState(session.id, CourseSessionState.completed.code),
+        );
       }
       setState(() => _activeSessions = updated);
       if (mounted) {
@@ -1307,8 +1345,11 @@ class _LockedField extends StatelessWidget {
         border: const OutlineInputBorder(),
         isDense: true,
         // [Fix-OVERFLOW] valeur contrainte à la largeur du champ.
-        suffixIcon: Icon(icon,
-            size: 18, color: Theme.of(context).colorScheme.onSurfaceVariant),
+        suffixIcon: Icon(
+          icon,
+          size: 18,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
       ),
       child: Text(
         value,
@@ -1445,16 +1486,20 @@ class _StudentAbsenceRowState extends State<_StudentAbsenceRow> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(widget.student.fullName,
-                          style: Theme.of(context).textTheme.titleSmall,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis),
+                      Text(
+                        widget.student.fullName,
+                        style: Theme.of(context).textTheme.titleSmall,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                       Row(
                         children: [
                           if (widget.classLabel != null) ...[
                             Container(
                               padding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 1),
+                                horizontal: 6,
+                                vertical: 1,
+                              ),
                               decoration: BoxDecoration(
                                 color: Theme.of(context)
                                     .colorScheme
@@ -1511,8 +1556,10 @@ class _StudentAbsenceRowState extends State<_StudentAbsenceRow> {
                   },
                 ),
                 const SizedBox(width: 4),
-                Text('Absent',
-                    style: Theme.of(context).textTheme.labelMedium),
+                Text(
+                  'Absent',
+                  style: Theme.of(context).textTheme.labelMedium,
+                ),
               ],
             ),
             if (isAbsent) ...[
@@ -1553,8 +1600,11 @@ class _StudentAbsenceRowState extends State<_StudentAbsenceRow> {
               else if (widget.absence!.isJustified)
                 Row(
                   children: [
-                    Icon(Icons.verified,
-                        size: 16, color: Colors.green.shade700),
+                    Icon(
+                      Icons.verified,
+                      size: 16,
+                      color: Colors.green.shade700,
+                    ),
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text(
@@ -1571,21 +1621,21 @@ class _StudentAbsenceRowState extends State<_StudentAbsenceRow> {
               else
                 Row(
                   children: [
-                    Icon(Icons.info_outline,
-                        size: 16,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant),
+                    Icon(
+                      Icons.info_outline,
+                      size: 16,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text(
                         'La justification d\'une absence est réservée à '
                         'l\'administration.',
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodySmall
-                            ?.copyWith(
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .onSurfaceVariant),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
                       ),
                     ),
                   ],

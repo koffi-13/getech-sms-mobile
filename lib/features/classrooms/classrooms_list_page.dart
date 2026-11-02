@@ -58,7 +58,7 @@ class _ClassroomsListPageState extends ConsumerState<ClassroomsListPage> {
         onRefresh: _refresh,
         child: CustomScrollView(
           slivers: [
-            SliverToBoxAdapter(child: _OfflineBanner()),
+            const SliverToBoxAdapter(child: _OfflineBanner()),
             if (!scopeReady)
               const SliverFillRemaining(
                 hasScrollBody: false,
@@ -117,7 +117,9 @@ class _ClassroomsListPageState extends ConsumerState<ClassroomsListPage> {
                         final c = visible[i];
                         final isHead = headIds.contains(c.id);
                         return _ClassroomTile(
-                            classroom: c, isHeadTeacher: isHead);
+                          classroom: c,
+                          isHeadTeacher: isHead,
+                        );
                       },
                     ),
                   );
@@ -159,9 +161,11 @@ class _OfflineBanner extends ConsumerWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         child: Row(
           children: [
-            Icon(Icons.cloud_off,
-                size: 18,
-                color: Theme.of(context).colorScheme.onSecondaryContainer),
+            Icon(
+              Icons.cloud_off,
+              size: 18,
+              color: Theme.of(context).colorScheme.onSecondaryContainer,
+            ),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -248,7 +252,8 @@ class _ClassroomTile extends StatelessWidget {
                           Text(
                             subtitleParts.join(' · '),
                             style: theme.textTheme.bodySmall?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant),
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -258,7 +263,8 @@ class _ClassroomTile extends StatelessWidget {
                           Text(
                             'Titulaire : ${classroom.teacherName}',
                             style: theme.textTheme.bodySmall?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant),
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -303,7 +309,9 @@ class _ClassroomTile extends StatelessWidget {
                   Text(
                     '${(occupancy * 100).round()}%',
                     style: theme.textTheme.labelSmall?.copyWith(
-                        color: occupancyColor, fontWeight: FontWeight.w600),
+                      color: occupancyColor,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ],
               ),
@@ -330,7 +338,7 @@ class _OccupancyBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.14),
+        color: color.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Text(

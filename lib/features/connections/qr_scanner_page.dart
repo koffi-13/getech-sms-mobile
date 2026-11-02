@@ -227,12 +227,20 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
               ? trimmed.replaceFirst('getech://pair', 'http://getech-app/pair')
               : trimmed,
         );
-        
-        final ip = uri.queryParameters['ip'] ?? uri.queryParameters['host'] ?? 
-                  (uri.host == 'getech-app' ? '' : uri.host);
-        final port = int.tryParse(uri.queryParameters['port'] ?? uri.port.toString()) ?? 8000;
-        final code = uri.queryParameters['code'] ?? uri.queryParameters['establishment_code'] ?? uri.queryParameters['est_code'] ?? '';
-        final token = uri.queryParameters['token'] ?? uri.queryParameters['pairing_token'] ?? '';
+
+        final ip = uri.queryParameters['ip'] ??
+            uri.queryParameters['host'] ??
+            (uri.host == 'getech-app' ? '' : uri.host);
+        final port =
+            int.tryParse(uri.queryParameters['port'] ?? uri.port.toString()) ??
+                8000;
+        final code = uri.queryParameters['code'] ??
+            uri.queryParameters['establishment_code'] ??
+            uri.queryParameters['est_code'] ??
+            '';
+        final token = uri.queryParameters['token'] ??
+            uri.queryParameters['pairing_token'] ??
+            '';
 
         if (token.isNotEmpty) {
           return PairingPayload(
@@ -258,12 +266,17 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
       if (jsonStr.startsWith('{')) {
         final decoded = jsonDecode(jsonStr);
         if (decoded is Map) {
-          final data = decoded['pairing'] is Map ? decoded['pairing'] as Map : decoded;
+          final data =
+              decoded['pairing'] is Map ? decoded['pairing'] as Map : decoded;
           return PairingPayload(
             ip: data['ip']?.toString() ?? data['host']?.toString() ?? '',
             port: int.tryParse(data['port']?.toString() ?? '8000') ?? 8000,
-            establishmentCode: data['establishment_code']?.toString() ?? data['code']?.toString() ?? '',
-            pairingToken: data['pairing_token']?.toString() ?? data['token']?.toString() ?? '',
+            establishmentCode: data['establishment_code']?.toString() ??
+                data['code']?.toString() ??
+                '',
+            pairingToken: data['pairing_token']?.toString() ??
+                data['token']?.toString() ??
+                '',
           );
         }
       }
@@ -280,7 +293,9 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
           return PairingPayload(
             ip: payload['ip']?.toString() ?? payload['host']?.toString() ?? '',
             port: int.tryParse(payload['port']?.toString() ?? '8000') ?? 8000,
-            establishmentCode: payload['establishment_code']?.toString() ?? payload['code']?.toString() ?? '',
+            establishmentCode: payload['establishment_code']?.toString() ??
+                payload['code']?.toString() ??
+                '',
             pairingToken: trimmed,
           );
         }
@@ -336,10 +351,12 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text(msg),
-        behavior: SnackBarBehavior.floating,
-      ));
+      ..showSnackBar(
+        SnackBar(
+          content: Text(msg),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
   }
 
   void _enterManually() {
@@ -480,7 +497,7 @@ class _ScannerOverlay extends StatelessWidget {
               // Voile sombre autour du viseur
               ColorFiltered(
                 colorFilter: ColorFilter.mode(
-                  Colors.black.withOpacity(0.45),
+                  Colors.black.withValues(alpha: 0.45),
                   BlendMode.srcOut,
                 ),
                 child: Stack(
@@ -515,7 +532,7 @@ class _ScannerOverlay extends StatelessWidget {
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(16),
                     border: Border.all(
-                      color: colorScheme.primary.withOpacity(0.9),
+                      color: colorScheme.primary.withValues(alpha: 0.9),
                       width: 3,
                     ),
                   ),

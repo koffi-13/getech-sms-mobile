@@ -8,7 +8,6 @@ library;
 import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../core/utils/formatters.dart';
 import '../../shared/models/classroom_dto.dart';
 import '../../shared/widgets/widgets.dart';
 import '../classrooms/classroom_controller.dart';
@@ -25,7 +24,8 @@ class ClassSubjectsPage extends ConsumerStatefulWidget {
 class _ClassSubjectsPageState extends ConsumerState<ClassSubjectsPage> {
   @override
   Widget build(BuildContext context) {
-    final classroomAsync = ref.watch(classroomDetailProvider(widget.classroomId));
+    final classroomAsync =
+        ref.watch(classroomDetailProvider(widget.classroomId));
     final subjectsAsync = ref.watch(classSubjectsProvider(widget.classroomId));
     final theme = Theme.of(context);
 

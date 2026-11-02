@@ -1,7 +1,6 @@
 /// Contrôleur du module Paramètres : périodes scolaires et établissement courant.
 library;
 
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -40,7 +39,8 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
   void setForceOffline(bool v) => state = state.copyWith(forceOffline: v);
 }
 
-final settingsProvider = StateNotifierProvider<SettingsNotifier, AppSettings>((ref) {
+final settingsProvider =
+    StateNotifierProvider<SettingsNotifier, AppSettings>((ref) {
   return SettingsNotifier();
 });
 
@@ -71,8 +71,7 @@ final periodsProvider =
   }
 });
 
-final establishmentProvider =
-    FutureProvider<EstablishmentDto?>((ref) async {
+final establishmentProvider = FutureProvider<EstablishmentDto?>((ref) async {
   final conn = ref.watch(connectionProvider);
   if (!conn.isPaired || conn.serverUrl == null) return null;
 
@@ -82,7 +81,9 @@ final establishmentProvider =
       buildUrl(conn.serverUrl!, ApiEndpoints.settingsEstablishment),
     );
     if (resp.data is Map) {
-      return EstablishmentDto.fromJson(Map<String, dynamic>.from(resp.data as Map));
+      return EstablishmentDto.fromJson(
+        Map<String, dynamic>.from(resp.data as Map),
+      );
     }
   } catch (_) {}
   return null;
@@ -100,7 +101,9 @@ class SettingsController {
     Sexe? sexe,
   }) async {
     final conn = _ref.read(connectionProvider);
-    if (conn.serverUrl == null) throw const ApiException('Aucun serveur configuré.');
+    if (conn.serverUrl == null) {
+      throw const ApiException('Aucun serveur configuré.');
+    }
 
     final payload = <String, dynamic>{
       if (firstName != null) 'first_name': firstName,
@@ -119,4 +122,5 @@ class SettingsController {
   }
 }
 
-final settingsControllerProvider = Provider<SettingsController>((ref) => SettingsController(ref));
+final settingsControllerProvider =
+    Provider<SettingsController>((ref) => SettingsController(ref));

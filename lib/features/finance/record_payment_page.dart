@@ -168,15 +168,21 @@ class _SubscriptionPicker extends ConsumerWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Choisir la subscription', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Text(
+              'Choisir la subscription',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 8),
-            ...list.map((sub) => RadioListTile<FeeSubscriptionDto>(
-                  title: Text(sub.feeCategoryName ?? 'Frais'),
-                  subtitle: Text('Reste : ${MoneyFormatter.format(sub.balanceDue)}'),
-                  value: sub,
-                  groupValue: selected,
-                  onChanged: (v) => onSelect(v!),
-                )),
+            ...list.map(
+              (sub) => RadioListTile<FeeSubscriptionDto>(
+                title: Text(sub.feeCategoryName ?? 'Frais'),
+                subtitle:
+                    Text('Reste : ${MoneyFormatter.format(sub.balanceDue)}'),
+                value: sub,
+                groupValue: selected,
+                onChanged: (v) => onSelect(v!),
+              ),
+            ),
           ],
         );
       },
@@ -216,7 +222,7 @@ class _PaymentForm extends StatelessWidget {
         ),
         const SizedBox(height: 16),
         DropdownButtonFormField<PaymentMethod>(
-          value: method,
+          initialValue: method,
           items: PaymentMethod.values
               .map((m) => DropdownMenuItem(value: m, child: Text(m.label)))
               .toList(),
@@ -226,7 +232,8 @@ class _PaymentForm extends StatelessWidget {
         const SizedBox(height: 16),
         TextFormField(
           controller: referenceCtrl,
-          decoration: const InputDecoration(labelText: 'Référence / ID Transaction'),
+          decoration:
+              const InputDecoration(labelText: 'Référence / ID Transaction'),
         ),
         const SizedBox(height: 24),
         ElevatedButton(
@@ -241,7 +248,8 @@ class _PaymentForm extends StatelessWidget {
 class _StudentPickerDialog extends ConsumerStatefulWidget {
   const _StudentPickerDialog();
   @override
-  ConsumerState<_StudentPickerDialog> createState() => _StudentPickerDialogState();
+  ConsumerState<_StudentPickerDialog> createState() =>
+      _StudentPickerDialogState();
 }
 
 class _StudentPickerDialogState extends ConsumerState<_StudentPickerDialog> {
