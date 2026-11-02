@@ -1056,7 +1056,9 @@ class SyncEngine {
           _db.levels,
           LevelsCompanion.insert(
             id: Value(_rId(row)),
-            name: _rStr(row, 'name'),
+            // [Fix-SYNC-FIELD-MAP] V18 : le serveur réel envoie `label`
+            // (colonne Level.label) — `name` n'existe pas côté serveur.
+            name: _rStr(row, 'label', d: _rStr(row, 'name')),
             code: Value(_rStrN(row, 'code')),
             cycleId: Value(_rIntN(row, 'cycle_id')),
             order: Value(_rInt(row, 'order', d: 0)),
@@ -1088,6 +1090,71 @@ class SyncEngine {
           .write(ClassroomsCompanion(cycleId: Value(cycleId)));
       _log.i('Cycle résolu (levels) : classe #${classroom.id} '
           '« ${classroom.name} » → cycle $cycleId');
+    }
+  }
+
+  // [Fix-SYNC-EDT-FIELD-MAP] V18 — réplication de `weekly_schedules` au
+  // FORMAT RÉEL du serveur (vérifié sur un /sync/pull live) :
+  //   {id, class_subject_id, day_of_week (0=Mon..6=Sun), start_time,
+  //    end_time, room, active, notes}
+  // Le serveur n'envoie NI classroom_id/subject_id/teacher_id (résolus ici
+  // via la table locale `class_subjects`) NI week_type (un WeeklySchedule
+  // serveur vaut pour TOUTES les semaines → sentinel 'ALL' côté Drift).
+  // L'ancien batch lisait des colonnes inexistantes → EDT vide après pull.
+  Future<void> _applyWeeklySchedulesPull(
+    List<Map<String, dynamic>> rows,
+    DateTime syncedAt,
+  ) async {
+    // Lookup unique class_subjects → (classroom, subject, teacher).
+    final classSubjects = await _db.select(_db.classSubjects).get();
+    final csById = {
+      for (final cs in classSubjects) cs.id: cs,
+    };
+
+    await _db.transaction(() async {
+      for (final row in rows) {
+        final id = _rId(row);
+        final csId = _rIntN(row, 'class_subject_id');
+        final cs = csId == null ? null : csById[csId];
+        // day_of_week serveur : 0=Mon..6=Sun → convention mobile 1..6
+        // (Dimanche non affiché côté mobile).
+        final serverDay = _rInt(row, 'day_of_week', d: -1);
+        final mobileDay = serverDay >= 0 && serverDay <= 5
+            ? serverDay + 1
+            : (serverDay == 6 ? 7 : 1);
+        await _db.into(_db.weeklySchedules).insertOnConflictUpdate(
+              WeeklySchedulesCompanion.insert(
+                id: Value(id),
+                classroomId: Value(cs?.classroomId),
+                subjectId: Value(cs?.subjectId),
+                teacherId: Value(cs?.teacherId),
+                timeSlotId: 0,
+                dayOfWeek: mobileDay,
+                startTime: Value(
+                  _rStrN(row, 'start_time')?.length == 8
+                      ? _rStrN(row, 'start_time')!.substring(0, 5)
+                      : _rStrN(row, 'start_time'),
+                ),
+                endTime: Value(
+                  _rStrN(row, 'end_time')?.length == 8
+                      ? _rStrN(row, 'end_time')!.substring(0, 5)
+                      : _rStrN(row, 'end_time'),
+                ),
+                room: Value(_rStrN(row, 'room')),
+                // Pas de week_type côté serveur → cours TOUTES les semaines
+                // (sentinel 'ALL' du cache Drift, cf. schedule_controller).
+                weekType: const Value('ALL'),
+                syncedAt: Value(syncedAt),
+                isDirty: const Value(false),
+                isDeleted: Value(!_rBool(row, 'active', d: true)),
+              ),
+            );
+      }
+    });
+
+    if (rows.isNotEmpty) {
+      _log.i('EDT répliqué : ${rows.length} créneau(x) '
+          '(résolus via ${csById.length} class_subjects)');
     }
   }
 
@@ -1181,6 +1248,16 @@ class SyncEngine {
     // `_fetchFromApi()` qui persiste à nouveau la valeur).
     if (table == 'classrooms') {
       await _applyClassroomsPull(rows, syncedAt);
+      return;
+    }
+
+    // [Fix-SYNC-EDT-FIELD-MAP] V18 : weekly_schedules sorti du batch — la
+    // ligne serveur ne porte QUE class_subject_id (+ day_of_week 0..6) : il
+    // faut résoudre classe/matière/enseignant via la table locale
+    // `class_subjects` (répliquée avant, cf. priorité de tri) pour remplir
+    // les colonnes dénormalisées attendues par l'UI EDT.
+    if (table == 'weekly_schedules') {
+      await _applyWeeklySchedulesPull(rows, syncedAt);
       return;
     }
 
@@ -1582,42 +1659,39 @@ class SyncEngine {
               break;
 
             case 'time_slots':
+              // [Fix-SYNC-FIELD-MAP] V18 : le serveur envoie day_of_week
+              // 1..6 (TimeSlot serveur, Lundi=1) et start_time/end_time
+              // 'HH:MM:SS' ; is_break remplace l'ancien break_after (colonne
+              // inexistante → pauses jamais détectées).
+              final tsDay = _rInt(row, 'day_of_week', d: 1);
+              String _hhmm(String v) =>
+                  v.length >= 8 ? v.substring(0, 5) : v;
               b.insert(
                 _db.timeSlots,
                 TimeSlotsCompanion.insert(
                   id: Value(_rId(row)),
-                  dayOfWeek: _rInt(row, 'day_of_week'),
-                  startTime: _rStr(row, 'start_time'),
-                  endTime: _rStr(row, 'end_time'),
+                  dayOfWeek: tsDay < 1 || tsDay > 6 ? 1 : tsDay,
+                  startTime: _hhmm(_rStr(row, 'start_time')),
+                  endTime: _hhmm(_rStr(row, 'end_time')),
                   breakAfter: Value(_rIntN(row, 'break_after')),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
-                  isDeleted: const Value(false),
+                  isDeleted: Value(!_rBool(row, 'is_active', d: true)),
                 ),
                 mode: InsertMode.insertOrReplace,
               );
               break;
 
             case 'weekly_schedules':
-              b.insert(
-                _db.weeklySchedules,
-                WeeklySchedulesCompanion.insert(
-                  id: Value(_rId(row)),
-                  classroomId: Value(_rIntN(row, 'classroom_id')),
-                  subjectId: Value(_rIntN(row, 'subject_id')),
-                  teacherId: Value(_rIntN(row, 'teacher_id')),
-                  timeSlotId: _rInt(row, 'time_slot_id'),
-                  dayOfWeek: _rInt(row, 'day_of_week'),
-                  startTime: Value(_rStrN(row, 'start_time')),
-                  endTime: Value(_rStrN(row, 'end_time')),
-                  room: Value(_rStrN(row, 'room')),
-                  weekType: Value(_rStr(row, 'week_type', d: 'A')),
-                  syncedAt: Value(syncedAt),
-                  isDirty: const Value(false),
-                  isDeleted: const Value(false),
-                ),
-                mode: InsertMode.insertOrReplace,
-              );
+              // [Fix-SYNC-EDT-FIELD-MAP] V18 : le registre serveur envoie
+              // `class_subject_id` + `day_of_week` 0..6 (Lundi=0) et PAS de
+              // week_type (WeeklySchedule serveur : cours TOUTES les
+              // semaines) — l'ancienne lecture `classroom_id`/`subject_id`/
+              // `teacher_id`/`time_slot_id`/`week_type` ne matchait AUCUNE
+              // colonne réelle → EDT local vide après pull.
+              // La résolution class_subject_id → (classe, matière,
+              // enseignant) est faite dans _applyWeeklySchedulesPull (sorti
+              // du batch : lookup Drift nécessaire par ligne).
               break;
 
             case 'course_sessions':
@@ -1727,6 +1801,15 @@ class SyncEngine {
                 ),
                 mode: InsertMode.insertOrReplace,
               );
+              break;
+
+            case 'cycles':
+              // [Fix-SYNC-LEVELS-CYCLES] V18 : table serveur réelle (code,
+              // label) — acceptée silencieusement : le mobile ne la stocke
+              // pas (pas de table Drift dédiée), la résolution
+              // classroom→cycle passe par levels.cycle_id.
+              _log.d('Table cycles : ${rows.length} ligne(s) '
+                  '(résolution via levels.cycle_id)');
               break;
 
             default:
