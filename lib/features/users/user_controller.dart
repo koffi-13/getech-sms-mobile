@@ -1,24 +1,24 @@
 /// Contrôleur du module Utilisateurs : liste (recherche), détail, et
 /// repository (création / mise à jour / activation) offline-first.
 ///
-/// - En ligne (`connection.canReachServer`) : appels REST `/users/*` via
-///   [dioProvider] + [buildUrl]. Aucun cache Drift en V1 (les utilisateurs
-///   sont des données d'administration — surface de codegen limitée).
-/// - Hors-ligne : les écritures sont mises en file d'attente via
-///   [outboxProvider] pour être poussées ultérieurement par le [SyncEngine].
+/// - En ligne : appels REST `/users/*` et cache Drift des listes consultées.
+/// - Hors-ligne : lecture du cache local et écritures différées par outbox.
 ///
 /// RBAC : USER_READ pour la lecture, USER_MANAGE pour les écritures.
 library;
 
 import 'package:dio/dio.dart';
+import 'package:drift/drift.dart' as d;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart' as log_pkg;
 
 import '../../core/config/constants.dart';
+import '../../core/database/database.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
 import '../../core/sync/outbox.dart';
+import '../../core/sync/sync_engine.dart' show syncGenerationProvider;
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/auth_dto.dart';
 
@@ -75,10 +75,25 @@ class UserWriteRequest {
 ///
 /// Renvoie une liste vide si le serveur est non appairé. Les erreurs 403
 /// (RBAC insuffisant) sont transformées en liste vide pour ne pas bloquer l'UI.
-final usersListProvider =
-    FutureProvider.autoDispose.family<List<UserDto>, String>((ref, search) async {
-  final conn = ref.watch(connectionProvider);
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+final usersListProvider = FutureProvider.autoDispose
+    .family<List<UserDto>, String>((ref, search) async {
+  ref.watch(syncGenerationProvider);
+  final conn = ref.watch(
+    connectionProvider.select(
+      (c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      ),
+    ),
+  );
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return _usersFromLocal(ref, search);
+  }
+  if (!conn.canReachServer && !conn.isChecking) {
+    return _usersFromLocal(ref, search);
+  }
 
   final dio = ref.watch(dioProvider);
   try {
@@ -89,19 +104,98 @@ final usersListProvider =
         'per_page': 100,
       },
     );
-    return _parseUserList(resp.data);
-  } on DioException catch (e) {
-    final api = (e.error is ApiException)
-        ? e.error as ApiException
-        : dioErrorToApiException(e);
+    final users = _parseUserList(resp.data);
+    await _cacheUsersFromDtos(ref, users);
+    return users;
+  } on ApiException catch (api) {
     if (api.statusCode == 403) return const [];
     _log.w('usersListProvider : ${api.message}');
+    if (api is NetworkException) {
+      return _usersFromLocal(ref, search);
+    }
+    rethrow;
+  } on DioException catch (e) {
+    final api = dioErrorToApiException(e);
+    if (api.statusCode == 403) return const [];
+    _log.w('usersListProvider : ${api.message}');
+    if (api is NetworkException) {
+      return _usersFromLocal(ref, search);
+    }
     rethrow;
   } catch (e) {
     _log.w('usersListProvider : $e');
     rethrow;
   }
 });
+
+Future<List<UserDto>> _usersFromLocal(Ref ref, String search) async {
+  final db = ref.read(databaseProvider);
+  final query = db.select(db.users)
+    ..where((t) => t.isDeleted.equals(false))
+    ..orderBy([(t) => d.OrderingTerm.asc(t.username)]);
+  final rows = await query.get();
+  final needle = search.trim().toLowerCase();
+  return rows
+      .where((user) {
+        if (needle.isEmpty) return true;
+        return [
+          user.username,
+          user.firstName ?? '',
+          user.lastName ?? '',
+          user.email ?? '',
+          user.phone ?? '',
+        ].any((field) => field.toLowerCase().contains(needle));
+      })
+      .map(
+        (user) => UserDto(
+          id: user.id,
+          username: user.username,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          email: user.email ?? '',
+          phone: user.phone,
+          photoPath: user.photoPath,
+          sexe: Sexe.fromCode(user.sexe),
+          isActive: user.isActive,
+          isSuperuser: user.isSuperuser,
+        ),
+      )
+      .toList();
+}
+
+Future<void> _cacheUsersFromDtos(Ref ref, List<UserDto> users) async {
+  if (users.isEmpty) return;
+  try {
+    final db = ref.read(databaseProvider);
+    final now = DateTime.now();
+    await db.batch((batch) {
+      for (final user in users) {
+        if (user.username.isEmpty) continue;
+        batch.insert(
+          db.users,
+          UsersCompanion.insert(
+            id: d.Value(user.id),
+            username: user.username,
+            firstName: d.Value(user.firstName),
+            lastName: d.Value(user.lastName),
+            email: d.Value(user.email.isEmpty ? null : user.email),
+            phone: d.Value(user.phone),
+            photoPath: d.Value(user.photoPath),
+            sexe: d.Value(user.sexe?.code),
+            isActive: d.Value(user.isActive),
+            isSuperuser: d.Value(user.isSuperuser),
+            syncedAt: d.Value(now),
+            isDirty: const d.Value(false),
+            isDeleted: const d.Value(false),
+          ),
+          mode: d.InsertMode.insertOrReplace,
+        );
+      }
+    });
+  } catch (e) {
+    _log.w('Cache local des utilisateurs indisponible : $e');
+  }
+}
 
 /// [Fix-TEACHERS-DROPDOWN] Liste CANONIQUE des enseignants :
 /// `GET /users?role=teacher` (endpoint dédié du serveur — filtre par rôle
@@ -114,26 +208,33 @@ final usersListProvider =
 /// si le serveur ne supporte pas le paramètre `role`.
 final teachersListProvider =
     FutureProvider.autoDispose<List<UserDto>>((ref) async {
-  final conn = ref.watch(connectionProvider
-      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
+  final conn = ref.watch(
+    connectionProvider
+        .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)),
+  );
   if (!conn.isPaired || conn.serverUrl == null) return const [];
 
   final dio = ref.watch(dioProvider);
   final url = buildUrl(conn.serverUrl!, ApiEndpoints.users);
 
   List<UserDto> clientSideFilter(List<UserDto> users) => users
-      .where((u) =>
-          u.isActive &&
-          ((u.role ?? '').toLowerCase().contains('teacher') ||
-              (u.role ?? '').toLowerCase().contains('enseignant')))
+      .where(
+        (u) =>
+            u.isActive &&
+            ((u.role ?? '').toLowerCase().contains('teacher') ||
+                (u.role ?? '').toLowerCase().contains('enseignant')),
+      )
       .toList()
     ..sort((a, b) => _teacherLabel(a).compareTo(_teacherLabel(b)));
 
   try {
-    final resp = await dio.getJson<dynamic>(url, query: {
-      'role': 'teacher',
-      'per_page': 200,
-    });
+    final resp = await dio.getJson<dynamic>(
+      url,
+      query: {
+        'role': 'teacher',
+        'per_page': 200,
+      },
+    );
     final teachers = _parseUserList(resp.data)
       ..sort((a, b) => _teacherLabel(a).compareTo(_teacherLabel(b)));
     if (teachers.isNotEmpty) return teachers;
@@ -156,8 +257,7 @@ final teachersListProvider =
 });
 
 /// Libellé de tri d'un enseignant (nom complet, sinon username).
-String _teacherLabel(UserDto u) =>
-    u.fullName.isEmpty ? u.username : u.fullName;
+String _teacherLabel(UserDto u) => u.fullName.isEmpty ? u.username : u.fullName;
 
 /// Détail d'un utilisateur par ID : `GET /users/{id}`.
 final userDetailProvider =
@@ -195,8 +295,7 @@ class UserRepositoryException implements Exception {
   final int? statusCode;
 
   @override
-  String toString() =>
-      'UserRepositoryException(${statusCode ?? ''}): $message';
+  String toString() => 'UserRepositoryException(${statusCode ?? ''}): $message';
 }
 
 /// Repository des utilisateurs : gère les écritures distantes (POST/PATCH)

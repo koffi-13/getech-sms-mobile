@@ -76,7 +76,8 @@ class ConnectionState {
     this.discoveredServerName,
   });
 
-  bool get isPaired => pairingToken != null && (serverIp != null || serverUrlOverride != null);
+  bool get isPaired =>
+      pairingToken != null && (serverIp != null || serverUrlOverride != null);
   bool get isOnline => status == ServerStatus.online && !forceOffline;
   bool get canReachServer => isOnline && status != ServerStatus.offline;
 
@@ -183,8 +184,9 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
   Future<void> applyProfile(ServerProfile profile) async {
     final storage = _ref.read(secureStorageProvider);
     final token = await storage.read(
-          storage.profileKey(AppConfig.keyDeviceToken, profile.id)) ??
-      '';
+          storage.profileKey(AppConfig.keyDeviceToken, profile.id),
+        ) ??
+        '';
 
     state = state.copyWith(
       status: ServerStatus.checking,
@@ -343,7 +345,6 @@ final mdnsDiscoveryProvider =
 
     if (event.type == BonsoirDiscoveryEventType.discoveryServiceFound ||
         event.type == BonsoirDiscoveryEventType.discoveryServiceResolved) {
-
       final String resolvedIp;
       if (bs is ResolvedBonsoirService) {
         resolvedIp = bs.host ?? bs.attributes['ip'] ?? '';

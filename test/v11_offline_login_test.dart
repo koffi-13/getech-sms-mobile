@@ -54,7 +54,8 @@ class _FakeSecureStorage extends SecureStorage {
 
   @override
   Future<({String username, String password})?> getCredentialsFor(
-      String profileId) async {
+    String profileId,
+  ) async {
     final raw = _store[profileKey('getech.credentials', profileId)];
     if (raw == null || !raw.contains(':::')) return null;
     final parts = raw.split(':::');
@@ -63,7 +64,10 @@ class _FakeSecureStorage extends SecureStorage {
 
   @override
   Future<void> saveCredentialsFor(
-      String profileId, String username, String password) async {
+    String profileId,
+    String username,
+    String password,
+  ) async {
     _store[profileKey('getech.credentials', profileId)] =
         '$username:::$password';
   }
@@ -103,10 +107,12 @@ class _FakeConnectionNotifier extends ConnectionNotifier {
 class _NetworkDownInterceptor extends Interceptor {
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
-    handler.reject(DioException.connectionError(
-      requestOptions: options,
-      reason: 'hors-ligne',
-    ));
+    handler.reject(
+      DioException.connectionError(
+        requestOptions: options,
+        reason: 'hors-ligne',
+      ),
+    );
   }
 }
 
@@ -115,22 +121,26 @@ class _UnauthorizedButReloginInterceptor extends Interceptor {
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
     if (options.uri.path.endsWith('/auth/login')) {
-      handler.resolve(Response(
-        requestOptions: options,
-        statusCode: 200,
-        data: _loginBody,
-      ));
+      handler.resolve(
+        Response(
+          requestOptions: options,
+          statusCode: 200,
+          data: _loginBody,
+        ),
+      );
       return;
     }
-    handler.reject(DioException(
-      requestOptions: options,
-      response: Response(
+    handler.reject(
+      DioException(
         requestOptions: options,
-        statusCode: 401,
-        data: {'detail': 'Token invalide'},
+        response: Response(
+          requestOptions: options,
+          statusCode: 401,
+          data: {'detail': 'Token invalide'},
+        ),
+        type: DioExceptionType.badResponse,
       ),
-      type: DioExceptionType.badResponse,
-    ));
+    );
   }
 }
 
@@ -138,15 +148,17 @@ class _UnauthorizedButReloginInterceptor extends Interceptor {
 class _AllUnauthorizedInterceptor extends Interceptor {
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
-    handler.reject(DioException(
-      requestOptions: options,
-      response: Response(
+    handler.reject(
+      DioException(
         requestOptions: options,
-        statusCode: 401,
-        data: {'detail': 'Invalid credentials'},
+        response: Response(
+          requestOptions: options,
+          statusCode: 401,
+          data: {'detail': 'Invalid credentials'},
+        ),
+        type: DioExceptionType.badResponse,
       ),
-      type: DioExceptionType.badResponse,
-    ));
+    );
   }
 }
 
@@ -199,23 +211,27 @@ void main() {
     SharedPreferences.setMockInitialValues({});
   });
 
-  ProviderContainer _container({
+  ProviderContainer container0({
     required SecureStorage storage,
     required Dio dio,
   }) {
-    final container = ProviderContainer(overrides: [
-      secureStorageProvider.overrideWith((ref) => storage),
-      dioProvider.overrideWith((ref) => dio),
-      connectionProvider.overrideWith((ref) => _FakeConnectionNotifier(ref)),
-      authProvider.overrideWith(() => _FakeAuthNotifier(const AuthState())),
-    ]);
+    final container = ProviderContainer(
+      overrides: [
+        secureStorageProvider.overrideWith((ref) => storage),
+        dioProvider.overrideWith((ref) => dio),
+        connectionProvider.overrideWith((ref) => _FakeConnectionNotifier(ref)),
+        authProvider.overrideWith(() => _FakeAuthNotifier(const AuthState())),
+      ],
+    );
     return container;
   }
 
-  Dio _networkDownDio() {
-    final dio = Dio(BaseOptions(
-      connectTimeout: const Duration(milliseconds: 50),
-    ));
+  Dio networkDownDio() {
+    final dio = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(milliseconds: 50),
+      ),
+    );
     dio.interceptors.add(_NetworkDownInterceptor());
     return dio;
   }
@@ -230,7 +246,7 @@ void main() {
       'session_snapshot_p-test': _snapshotBodyEncoded,
     });
 
-    final container = _container(storage: storage, dio: _networkDownDio());
+    final container = container0(storage: storage, dio: networkDownDio());
     addTearDown(container.dispose);
     (container.read(connectionProvider.notifier) as _FakeConnectionNotifier)
         .forceOffline();
@@ -256,7 +272,7 @@ void main() {
       'session_snapshot_p-test': _snapshotBodyEncoded,
     });
 
-    final container = _container(storage: storage, dio: _networkDownDio());
+    final container = container0(storage: storage, dio: networkDownDio());
     addTearDown(container.dispose);
     (container.read(connectionProvider.notifier) as _FakeConnectionNotifier)
         .forceOffline();
@@ -289,17 +305,23 @@ void main() {
 
     // Session OUVERTE avec le token périmé (le 401 frappe un utilisateur
     // connecté, pas un état vide).
-    final container = ProviderContainer(overrides: [
-      secureStorageProvider.overrideWith((ref) => storage),
-      dioProvider.overrideWith((ref) => dio),
-      connectionProvider.overrideWith((ref) => _FakeConnectionNotifier(ref)),
-      authProvider.overrideWith(() => _FakeAuthNotifier(const AuthState(
-        token: 'jeton-perime',
-        user: UserDto(id: 7, username: 'prof', role: 'teacher'),
-        permissions: ['GRADE_READ'],
-        roles: ['TEACHER'],
-      ))),
-    ]);
+    final container = ProviderContainer(
+      overrides: [
+        secureStorageProvider.overrideWith((ref) => storage),
+        dioProvider.overrideWith((ref) => dio),
+        connectionProvider.overrideWith((ref) => _FakeConnectionNotifier(ref)),
+        authProvider.overrideWith(
+          () => _FakeAuthNotifier(
+            const AuthState(
+              token: 'jeton-perime',
+              user: UserDto(id: 7, username: 'prof', role: 'teacher'),
+              permissions: ['GRADE_READ'],
+              roles: ['TEACHER'],
+            ),
+          ),
+        ),
+      ],
+    );
     addTearDown(container.dispose);
     (container.read(connectionProvider.notifier) as _FakeConnectionNotifier)
         .forceOnline();
@@ -308,16 +330,25 @@ void main() {
     await notifier.handleUnauthorized();
 
     final auth = container.read(authProvider);
-    expect(auth.isAuthenticated, isFalse,
-        reason: 'le token refusé ne doit plus être utilisé');
+    expect(
+      auth.isAuthenticated,
+      isFalse,
+      reason: 'le token refusé ne doit plus être utilisé',
+    );
     // L'instantané DOIT survivre : reconnexion hors-ligne possible.
     final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getString('session_snapshot_p-test'), isNotNull,
-        reason:
-            '[Fix-401-RELOGIN] l\'instantané ne doit plus être effacé par un 401');
+    expect(
+      prefs.getString('session_snapshot_p-test'),
+      isNotNull,
+      reason:
+          '[Fix-401-RELOGIN] l\'instantané ne doit plus être effacé par un 401',
+    );
     final creds = await storage.getCredentialsFor('p-test');
-    expect(creds, isNotNull,
-        reason: 'les identifiants stockés doivent survivre au 401');
+    expect(
+      creds,
+      isNotNull,
+      reason: 'les identifiants stockés doivent survivre au 401',
+    );
   });
 
   test(
@@ -332,17 +363,23 @@ void main() {
 
     // Session OUVERTE avec le token périmé (le 401 frappe un utilisateur
     // connecté, pas un état vide).
-    final container = ProviderContainer(overrides: [
-      secureStorageProvider.overrideWith((ref) => storage),
-      dioProvider.overrideWith((ref) => dio),
-      connectionProvider.overrideWith((ref) => _FakeConnectionNotifier(ref)),
-      authProvider.overrideWith(() => _FakeAuthNotifier(const AuthState(
-        token: 'jeton-perime',
-        user: UserDto(id: 7, username: 'prof', role: 'teacher'),
-        permissions: ['GRADE_READ'],
-        roles: ['TEACHER'],
-      ))),
-    ]);
+    final container = ProviderContainer(
+      overrides: [
+        secureStorageProvider.overrideWith((ref) => storage),
+        dioProvider.overrideWith((ref) => dio),
+        connectionProvider.overrideWith((ref) => _FakeConnectionNotifier(ref)),
+        authProvider.overrideWith(
+          () => _FakeAuthNotifier(
+            const AuthState(
+              token: 'jeton-perime',
+              user: UserDto(id: 7, username: 'prof', role: 'teacher'),
+              permissions: ['GRADE_READ'],
+              roles: ['TEACHER'],
+            ),
+          ),
+        ),
+      ],
+    );
     addTearDown(container.dispose);
     (container.read(connectionProvider.notifier) as _FakeConnectionNotifier)
         .forceOnline();
@@ -353,8 +390,11 @@ void main() {
     await notifier.handleUnauthorized();
 
     final auth = container.read(authProvider);
-    expect(auth.isAuthenticated, isTrue,
-        reason: 'le re-login silencieux doit restaurer la session');
+    expect(
+      auth.isAuthenticated,
+      isTrue,
+      reason: 'le re-login silencieux doit restaurer la session',
+    );
     expect(auth.token, 'jeton-neuf-apres-relogin');
     expect(auth.user?.username, 'prof');
     // Le nouveau jeton est persisté pour les prochains démarrages.

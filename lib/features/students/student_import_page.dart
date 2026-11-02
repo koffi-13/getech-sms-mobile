@@ -48,7 +48,8 @@ class _StudentImportPageState extends ConsumerState<StudentImportPage> {
   @override
   Widget build(BuildContext context) {
     final auth = ref.watch(authProvider);
-    final canCreate = hasPermission(auth.permissions, RbacPermissions.studentCreate);
+    final canCreate =
+        hasPermission(auth.permissions, RbacPermissions.studentCreate);
     final conn = ref.watch(connectionProvider);
     final online = conn.canReachServer;
 
@@ -111,8 +112,7 @@ class _StudentImportPageState extends ConsumerState<StudentImportPage> {
       _templateTotal = null;
     });
     try {
-      final controller =
-          ref.read(studentImportExportProvider);
+      final controller = ref.read(studentImportExportProvider);
       final path = await controller.downloadTemplate(
         onProgress: (received, total) {
           if (!mounted) return;
@@ -176,7 +176,9 @@ class _StudentImportPageState extends ConsumerState<StudentImportPage> {
       });
     } on PlatformException catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Sélection impossible : ${e.message ?? e.code}')),
+        SnackBar(
+          content: Text('Sélection impossible : ${e.message ?? e.code}'),
+        ),
       );
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -281,8 +283,11 @@ class _OfflineBanner extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         child: Row(
           children: [
-            Icon(Icons.cloud_off,
-                size: 20, color: theme.colorScheme.onErrorContainer),
+            Icon(
+              Icons.cloud_off,
+              size: 20,
+              color: theme.colorScheme.onErrorContainer,
+            ),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
@@ -336,7 +341,8 @@ class _TemplateSection extends StatelessWidget {
         children: [
           const SectionHeader(
             title: 'Modèle',
-            subtitle: 'Téléchargez le modèle Excel, remplissez-le, puis importez-le.',
+            subtitle:
+                'Téléchargez le modèle Excel, remplissez-le, puis importez-le.',
             icon: Icons.download_outlined,
           ),
           Card(
@@ -354,8 +360,11 @@ class _TemplateSection extends StatelessWidget {
                           color: theme.colorScheme.primaryContainer,
                           borderRadius: BorderRadius.circular(10),
                         ),
-                        child: Icon(Icons.table_view_outlined,
-                            color: theme.colorScheme.primary, size: 24),
+                        child: Icon(
+                          Icons.table_view_outlined,
+                          color: theme.colorScheme.primary,
+                          size: 24,
+                        ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
@@ -473,14 +482,17 @@ class _ImportSection extends StatelessWidget {
                     child: Container(
                       width: double.infinity,
                       padding: const EdgeInsets.symmetric(
-                          vertical: 20, horizontal: 16),
+                        vertical: 20,
+                        horizontal: 16,
+                      ),
                       decoration: BoxDecoration(
                         border: Border.all(
-                          color: theme.colorScheme.outline.withOpacity(0.5),
+                          color:
+                              theme.colorScheme.outline.withValues(alpha: 0.5),
                         ),
                         borderRadius: BorderRadius.circular(12),
                         color: theme.colorScheme.surfaceContainerHighest
-                            .withOpacity(0.4),
+                            .withValues(alpha: 0.4),
                       ),
                       child: Column(
                         children: [
@@ -526,7 +538,8 @@ class _ImportSection extends StatelessWidget {
                       spacing: 8,
                       children: [
                         OutlinedButton.icon(
-                          onPressed: (online && !isImporting) ? onPickFile : null,
+                          onPressed:
+                              (online && !isImporting) ? onPickFile : null,
                           icon: const Icon(Icons.swap_horiz, size: 18),
                           label: const Text('Changer'),
                         ),
@@ -548,7 +561,10 @@ class _ImportSection extends StatelessWidget {
                   ],
                   if (result != null) ...[
                     const SizedBox(height: 16),
-                    _ImportResultCard(result: result!, onCopyErrors: onCopyErrors),
+                    _ImportResultCard(
+                      result: result!,
+                      onCopyErrors: onCopyErrors,
+                    ),
                   ],
                   if (error != null) ...[
                     const SizedBox(height: 12),
@@ -591,17 +607,20 @@ class _ImportResultCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.08),
+        color: color.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withOpacity(0.3)),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(hasErrors ? Icons.warning_amber : Icons.check_circle,
-                  color: color, size: 22),
+              Icon(
+                hasErrors ? Icons.warning_amber : Icons.check_circle,
+                color: color,
+                size: 22,
+              ),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
@@ -634,7 +653,7 @@ class _ImportResultCard extends StatelessWidget {
               constraints: const BoxConstraints(maxHeight: 220),
               decoration: BoxDecoration(
                 color: theme.colorScheme.surfaceContainerHighest
-                    .withOpacity(0.5),
+                    .withValues(alpha: 0.5),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: ListView.separated(
@@ -643,7 +662,7 @@ class _ImportResultCard extends StatelessWidget {
                 itemCount: result.errors.length,
                 separatorBuilder: (_, __) => Divider(
                   height: 1,
-                  color: theme.dividerColor.withOpacity(0.4),
+                  color: theme.dividerColor.withValues(alpha: 0.4),
                 ),
                 itemBuilder: (context, i) {
                   final e = result.errors[i];
@@ -651,7 +670,7 @@ class _ImportResultCard extends StatelessWidget {
                     dense: true,
                     leading: CircleAvatar(
                       radius: 12,
-                      backgroundColor: color.withOpacity(0.15),
+                      backgroundColor: color.withValues(alpha: 0.15),
                       child: Text(
                         '${i + 1}',
                         style: TextStyle(
@@ -735,10 +754,10 @@ class _FileSavedCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: theme.colorScheme.primaryContainer.withOpacity(0.3),
+        color: theme.colorScheme.primaryContainer.withValues(alpha: 0.3),
         borderRadius: BorderRadius.circular(10),
         border: Border.all(
-          color: theme.colorScheme.primary.withOpacity(0.3),
+          color: theme.colorScheme.primary.withValues(alpha: 0.3),
         ),
       ),
       child: Row(

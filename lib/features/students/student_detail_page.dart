@@ -244,11 +244,13 @@ class _SectionCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              Icon(icon, size: 20, color: theme.colorScheme.primary),
-              const SizedBox(width: 8),
-              Text(title, style: theme.textTheme.titleMedium),
-            ]),
+            Row(
+              children: [
+                Icon(icon, size: 20, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Text(title, style: theme.textTheme.titleMedium),
+              ],
+            ),
             const SizedBox(height: 12),
             ...children,
           ],
@@ -317,16 +319,27 @@ class _IdentiteCard extends StatelessWidget {
       title: 'Identité',
       icon: Icons.person_outline,
       children: [
-        _InfoRow('Date de naissance', DateFormatter.date(student.dob),
-            icon: Icons.cake_outlined),
-        _InfoRow('Âge',
-            student.age != null ? '${student.age} ans' : _computeAge(student.dob),
-            icon: Icons.cake_outlined),
+        _InfoRow(
+          'Date de naissance',
+          DateFormatter.date(student.dob),
+          icon: Icons.cake_outlined,
+        ),
+        _InfoRow(
+          'Âge',
+          student.age != null ? '${student.age} ans' : _computeAge(student.dob),
+          icon: Icons.cake_outlined,
+        ),
         if (birthParts.isNotEmpty)
-          _InfoRow('Lieu de naissance', birthParts.join(', '),
-              icon: Icons.place_outlined),
-        _InfoRow('Groupe / Groupe sanguin', student.groupe,
-            icon: Icons.group_outlined),
+          _InfoRow(
+            'Lieu de naissance',
+            birthParts.join(', '),
+            icon: Icons.place_outlined,
+          ),
+        _InfoRow(
+          'Groupe / Groupe sanguin',
+          student.groupe,
+          icon: Icons.group_outlined,
+        ),
       ],
     );
   }
@@ -412,9 +425,16 @@ class _ScolariteCard extends StatelessWidget {
       title: 'Scolarité',
       icon: Icons.school_outlined,
       children: [
-        _InfoRow('Établissement précédent', s?.previousSchool,
-            icon: Icons.history_edu_outlined),
-        _InfoRow('Transport', s?.transport, icon: Icons.directions_bus_outlined),
+        _InfoRow(
+          'Établissement précédent',
+          s?.previousSchool,
+          icon: Icons.history_edu_outlined,
+        ),
+        _InfoRow(
+          'Transport',
+          s?.transport,
+          icon: Icons.directions_bus_outlined,
+        ),
       ],
     );
   }
@@ -442,49 +462,54 @@ class _ParentsCard extends StatelessWidget {
       title: 'Parents',
       icon: Icons.family_restroom_outlined,
       children: student.parents
-          .map((p) => Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(
-                      p.role == 'MERE' ? Icons.female : Icons.male,
-                      size: 18,
-                      color: p.role == 'MERE'
-                          ? Colors.pink.shade300
-                          : Colors.blue.shade300,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
+          .map(
+            (p) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    p.role == 'MERE' ? Icons.female : Icons.male,
+                    size: 18,
+                    color: p.role == 'MERE'
+                        ? Colors.pink.shade300
+                        : Colors.blue.shade300,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          p.role == 'MERE' ? 'Mère' : 'Père',
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                        Text(
+                          p.fullName.isEmpty ? '—' : p.fullName,
+                          style: Theme.of(context).textTheme.bodyMedium,
+                        ),
+                        if (p.profession != null && p.profession!.isNotEmpty)
                           Text(
-                            p.role == 'MERE' ? 'Mère' : 'Père',
-                            style: Theme.of(context).textTheme.labelSmall,
+                            p.profession!,
+                            style: Theme.of(context).textTheme.bodySmall,
                           ),
+                        if (p.phone != null && p.phone!.isNotEmpty)
                           Text(
-                            p.fullName.isEmpty ? '—' : p.fullName,
-                            style: Theme.of(context).textTheme.bodyMedium,
+                            p.phone!,
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodySmall
+                                ?.copyWith(
+                                  color: Theme.of(context).colorScheme.primary,
+                                ),
                           ),
-                          if (p.profession != null && p.profession!.isNotEmpty)
-                            Text(
-                              p.profession!,
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                          if (p.phone != null && p.phone!.isNotEmpty)
-                            Text(
-                              p.phone!,
-                              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                    color: Theme.of(context).colorScheme.primary,
-                                  ),
-                            ),
-                        ],
-                      ),
+                      ],
                     ),
-                  ],
-                ),
-              ))
+                  ),
+                ],
+              ),
+            ),
+          )
           .toList(),
     );
   }
@@ -512,39 +537,44 @@ class _TuteursCard extends StatelessWidget {
       title: 'Tuteurs',
       icon: Icons.supervisor_account_outlined,
       children: student.guardians
-          .map((g) => Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Icon(Icons.person_outline, size: 18),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
+          .map(
+            (g) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.person_outline, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          g.fullName.isEmpty ? '—' : g.fullName,
+                          style: Theme.of(context).textTheme.bodyMedium,
+                        ),
+                        if (g.relation != null && g.relation!.isNotEmpty)
                           Text(
-                            g.fullName.isEmpty ? '—' : g.fullName,
-                            style: Theme.of(context).textTheme.bodyMedium,
+                            g.relation!,
+                            style: Theme.of(context).textTheme.labelSmall,
                           ),
-                          if (g.relation != null && g.relation!.isNotEmpty)
-                            Text(
-                              g.relation!,
-                              style: Theme.of(context).textTheme.labelSmall,
-                            ),
-                          if (g.phone != null && g.phone!.isNotEmpty)
-                            Text(
-                              g.phone!,
-                              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                    color: Theme.of(context).colorScheme.primary,
-                                  ),
-                            ),
-                        ],
-                      ),
+                        if (g.phone != null && g.phone!.isNotEmpty)
+                          Text(
+                            g.phone!,
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodySmall
+                                ?.copyWith(
+                                  color: Theme.of(context).colorScheme.primary,
+                                ),
+                          ),
+                      ],
                     ),
-                  ],
-                ),
-              ))
+                  ),
+                ],
+              ),
+            ),
+          )
           .toList(),
     );
   }
@@ -569,7 +599,7 @@ class _Badge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.14),
+        color: color.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(

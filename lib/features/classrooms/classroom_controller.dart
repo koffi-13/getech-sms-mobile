@@ -31,7 +31,8 @@ final log_pkg.Logger _log = log_pkg.Logger(
 // Providers
 // ---------------------------------------------------------------------------
 
-final classroomsProvider = StateNotifierProvider.autoDispose<ClassroomController, AsyncValue<List<ClassroomDto>>>((ref) {
+final classroomsProvider = StateNotifierProvider.autoDispose<
+    ClassroomController, AsyncValue<List<ClassroomDto>>>((ref) {
   // [Fix-CLASSES-REACTIVE] Surveille le compteur de génération de sync :
   // après une synchro qui rafraîchit le cache (et potentiellement écrase
   // `current_students_count` — voir fix sync_engine case 'classrooms'),
@@ -41,7 +42,8 @@ final classroomsProvider = StateNotifierProvider.autoDispose<ClassroomController
   return ClassroomController(ref);
 });
 
-final classroomDetailProvider = FutureProvider.autoDispose.family<ClassroomDto, int>((ref, id) async {
+final classroomDetailProvider =
+    FutureProvider.autoDispose.family<ClassroomDto, int>((ref, id) async {
   final controller = ref.read(classroomsProvider.notifier);
   return controller.getById(id);
 });
@@ -50,7 +52,8 @@ final classroomDetailProvider = FutureProvider.autoDispose.family<ClassroomDto, 
 // ClassroomController
 // ---------------------------------------------------------------------------
 
-class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> {
+class ClassroomController
+    extends StateNotifier<AsyncValue<List<ClassroomDto>>> {
   final Ref _ref;
 
   ClassroomController(this._ref) : super(const AsyncValue.loading()) {
@@ -69,11 +72,10 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
       // bloquer : on tente l'API, la requête échouera d'elle-même si le
       // serveur est injoignable — le cache local reste affiché.
       final conn = _ref.read(connectionProvider);
-      final definitivelyOffline =
-          !conn.canReachServer && !conn.isChecking;
+      final definitivelyOffline = !conn.canReachServer && !conn.isChecking;
       if (definitivelyOffline) {
         if (localClassrooms.isEmpty) {
-          state = AsyncValue.data(const []);
+          state = const AsyncValue.data([]);
         }
         return;
       }
@@ -86,7 +88,9 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
       }
 
       // 3. Re-charger depuis le local (avec les champs dénormalisés persistés)
-      final updatedLocal = await _fetchFromLocal();
+      final updatedLocal = await _fetchFromLocal(
+        preferLocalCounts: apiClassrooms.isEmpty,
+      );
       state = AsyncValue.data(updatedLocal);
     } catch (e, st) {
       if (state.hasValue && state.value!.isNotEmpty) {
@@ -100,8 +104,7 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
   Future<ClassroomDto> getById(int id) async {
     final conn = _ref.read(connectionProvider);
     final serverUrl = conn.serverUrl;
-    final definitivelyOffline =
-        !conn.canReachServer && !conn.isChecking;
+    final definitivelyOffline = !conn.canReachServer && !conn.isChecking;
     if (!definitivelyOffline && serverUrl != null) {
       try {
         final dio = _ref.read(dioProvider);
@@ -110,7 +113,8 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
         );
         if (response.data is Map) {
           final remote = ClassroomDto.fromJson(
-              Map<String, dynamic>.from(response.data as Map));
+            Map<String, dynamic>.from(response.data as Map),
+          );
           // Fusion avec l'état local (effectif rattrapé par le comptage local).
           final local = (state.value ?? const <ClassroomDto>[])
               .where((c) => c.id == id)
@@ -119,7 +123,8 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
               (remote.currentStudentsCount ?? 0) <
                   (local.currentStudentsCount ?? 0)) {
             return remote.copyWith(
-                currentStudentsCount: local.currentStudentsCount);
+              currentStudentsCount: local.currentStudentsCount,
+            );
           }
           return remote;
         }
@@ -143,11 +148,10 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
     if (local != null) return local;
 
     try {
-      final scope = await _ref.read(teacherScopeProvider.future)
+      final scope = await _ref
+          .read(teacherScopeProvider.future)
           .timeout(const Duration(seconds: 3));
-      final fromScope = scope.myClassrooms
-          .where((c) => c.id == id)
-          .firstOrNull;
+      final fromScope = scope.myClassrooms.where((c) => c.id == id).firstOrNull;
       if (fromScope != null) return fromScope;
     } catch (_) {
       // Scope indisponible (hors-ligne complet) — on continue.
@@ -178,8 +182,10 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
     }
   }
 
-  Future<List<ClassroomDto>> _fetchFromApiPaged(int perPage,
-      {int maxPages = 20}) async {
+  Future<List<ClassroomDto>> _fetchFromApiPaged(
+    int perPage, {
+    int maxPages = 20,
+  }) async {
     final dio = _ref.read(dioProvider);
     final serverUrl = _ref.read(connectionProvider).serverUrl!;
     final result = <ClassroomDto>[];
@@ -216,7 +222,9 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
   /// (current_students_count persisté) et le comptage local des assignations :
   /// le serveur reste la source de vérité, le comptage local rattrape le cas
   /// où le serveur renverrait 0 alors que des élèves sont synchronisés.
-  Future<List<ClassroomDto>> _fetchFromLocal() async {
+  Future<List<ClassroomDto>> _fetchFromLocal({
+    bool preferLocalCounts = true,
+  }) async {
     final db = _ref.read(databaseProvider);
 
     final classrooms = await (db.select(db.classrooms)
@@ -227,28 +235,46 @@ class ClassroomController extends StateNotifier<AsyncValue<List<ClassroomDto>>> 
     // [Fix-COUNTS-EXITED] + [Fix-COUNTS-YEAR-FILTER] — voir
     // `localActiveStudentCounts` (helper mutualisé avec `teacher_scope`).
     final localCounts = await localActiveStudentCounts(db);
+    final classIds = classrooms.map((c) => c.id).toList();
+    final assignmentClassRows = classIds.isEmpty
+        ? const <d.TypedResult>[]
+        : await (db.selectOnly(db.studentClassAssignments)
+              ..addColumns([db.studentClassAssignments.classroomId])
+              ..where(db.studentClassAssignments.classroomId.isIn(classIds))
+              ..groupBy([db.studentClassAssignments.classroomId]))
+            .get();
+    final classesWithCachedAssignments = assignmentClassRows
+        .map((row) => row.read(db.studentClassAssignments.classroomId))
+        .whereType<int>()
+        .toSet();
 
     final dtos = <ClassroomDto>[];
     for (final c in classrooms) {
       final localCount = localCounts[c.id] ?? 0;
       final serverCount = c.currentStudentsCount ?? 0;
-      // Effectif effectif : valeur serveur si renseignée (> 0), sinon le
-      // comptage local des assignations synchronisées.
-      final effectiveCount = serverCount > 0 ? serverCount : localCount;
-      dtos.add(ClassroomDto(
-        id: c.id,
-        name: c.name,
-        establishmentId: c.establishmentId,
-        maxStudents: c.capacity,
-        isActive: c.isActive,
-        headTeacherId: c.teacherId,
-        headTeacherName: c.headTeacherName,
-        levelName: c.levelName,
-        cycleName: c.cycleName,
-        cycleId: c.cycleId,
-        seriesName: c.seriesName,
-        currentStudentsCount: effectiveCount,
-      ));
+      // Le roster local prime dès qu'il existe, car le compteur serveur mis
+      // en cache peut être périmé (sorties, changements d'année). Le compteur
+      // serveur reste un repli si les assignations n'ont jamais été répliquées.
+      final effectiveCount =
+          preferLocalCounts && classesWithCachedAssignments.contains(c.id)
+              ? localCount
+              : (serverCount > 0 ? serverCount : localCount);
+      dtos.add(
+        ClassroomDto(
+          id: c.id,
+          name: c.name,
+          establishmentId: c.establishmentId,
+          maxStudents: c.capacity,
+          isActive: c.isActive,
+          headTeacherId: c.teacherId,
+          headTeacherName: c.headTeacherName,
+          levelName: c.levelName,
+          cycleName: c.cycleName,
+          cycleId: c.cycleId,
+          seriesName: c.seriesName,
+          currentStudentsCount: effectiveCount,
+        ),
+      );
     }
     dtos.sort((a, b) => a.name.compareTo(b.name));
     return dtos;
@@ -323,13 +349,16 @@ Future<Map<int, int>> localActiveStudentCounts(
   }
   if (activeYearId != null) {
     query = query
-      ..where(db.studentClassAssignments.schoolYearId.equals(activeYearId) |
-          db.studentClassAssignments.schoolYearId.isNull());
+      ..where(
+        db.studentClassAssignments.schoolYearId.equals(activeYearId) |
+            db.studentClassAssignments.schoolYearId.isNull(),
+      );
   }
   query = query
-    ..where(db.studentClassAssignments.inscriptionType
-            .isNotIn(['EXCLU', 'ABANDON']) |
-        db.studentClassAssignments.inscriptionType.isNull())
+    ..where(
+      db.studentClassAssignments.inscriptionType.isNotIn(['EXCLU', 'ABANDON']) |
+          db.studentClassAssignments.inscriptionType.isNull(),
+    )
     ..groupBy([db.studentClassAssignments.classroomId]);
   final rows = await query.get();
   final out = <int, int>{};

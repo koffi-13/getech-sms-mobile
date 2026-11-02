@@ -7,21 +7,26 @@ library;
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../shared/models/auth_dto.dart'
-    show ChangePasswordRequest, LoginRequest, LoginResponse, MeResponse, UserDto;
+    show
+        LoginRequest,
+        LoginResponse,
+        MeResponse,
+        ChangePasswordRequest,
+        UserDto,
+        EstablishmentDto,
+        RoleBrief;
+import '../../features/connections/connection_state.dart';
 import '../config/app_config.dart';
 import '../config/constants.dart';
 import '../network/api_endpoints.dart';
 import '../network/api_exceptions.dart';
 import '../network/dio_client.dart';
-import '../sync/auto_sync.dart';
 import 'secure_storage.dart';
-import '../../features/connections/connection_state.dart';
-import '../../features/connections/server_profiles.dart';
 
 /// État immuable d'authentification.
 class AuthState {
@@ -43,54 +48,30 @@ class AuthState {
     this.error,
   });
 
-  bool get isAuthenticated => token != null && token!.isNotEmpty && user != null;
+  bool get isAuthenticated =>
+      token != null && token!.isNotEmpty && user != null;
   bool get isSuperuser => permissions.contains('*');
 
-  /// Vrai si l'utilisateur possède le rôle [role] (code MAJUSCULES, ex. `TEACHER`).
-  ///
-  /// [Fix-ROLE-CODE-CASE] Comparaison insensible à la casse : une base
-  /// serveur seedée par l'ancien script porte des codes minuscules
-  /// (« teacher », « admin ») — le profil doit être reconnu quelle que
-  /// soit la convention du serveur.
-  bool hasRole(String role) =>
-      roles.any((r) => r.toUpperCase() == role.toUpperCase());
+  bool get hasDeclaredTeacherRole =>
+      roles.any(
+        (r) =>
+            r == RoleCodes.teacher ||
+            r == RoleCodes.admin ||
+            r == RoleCodes.headmaster,
+      ) ||
+      user?.role?.toUpperCase() == 'TEACHER';
 
-  /// Administrateur au sens large : superuser, `ADMIN` ou `HEADMASTER`.
-  ///
-  /// Miroir de `_user_is_admin_or_headmaster` du desktop : accès à toutes les
-  /// classes/matières, suppression d'évaluations, modification des notes
-  /// existantes (non verrouillées pour un enseignant).
+  bool get isTeacherOnly => hasDeclaredTeacherRole && !isAdminOrHeadmaster;
+
   bool get isAdminOrHeadmaster =>
       isSuperuser ||
-      roles.any((r) => RoleCodes.adminLike
-          .map((a) => a.toUpperCase())
-          .contains(r.toUpperCase())) ||
-      _adminLegacyUserRole;
-
-  /// Détection admin via la colonne legacy ``User.role`` (« admin »,
-  /// « administrateur », « headmaster », « directeur ») — certains comptes
-  /// de production ne portent AUCUN rôle RBAC et aucune permission, la
-  /// navigation restait alors limitée à Accueil/Plus.
-  bool get _adminLegacyUserRole {
-    final r = user?.role?.toLowerCase();
-    if (r == null) return false;
-    return r.contains('admin') ||
-        r.contains('headmaster') ||
-        r.contains('directeur') ||
-        r.contains('proviseur');
-  }
-
-  /// Le rôle « enseignant » est déclaré sur le compte (rôle `TEACHER` ou
-  /// `UserDto.role` contenant teacher/enseignant).
-  bool get hasDeclaredTeacherRole {
-    if (roles.any((r) => r.toUpperCase() == RoleCodes.teacher)) return true;
-    final r = user?.role?.toLowerCase();
-    return r != null && (r.contains('teacher') || r.contains('enseignant'));
-  }
-
-  /// Enseignant « pur » : rôle enseignant déclaré SANS droits admin élargis.
-  /// (Un admin qui enseigne aussi garde son statut admin.)
-  bool get isTeacherOnly => !isAdminOrHeadmaster && hasDeclaredTeacherRole;
+      roles.any(
+        (r) => r == RoleCodes.admin || r == RoleCodes.headmaster,
+      ) ||
+      permissions.contains('ADMIN') ||
+      permissions.contains('HEADMASTER') ||
+      user?.role?.toUpperCase() == 'ADMIN' ||
+      user?.role?.toUpperCase() == 'HEADMASTER';
 
   AuthState copyWith({
     UserDto? user,
@@ -116,22 +97,13 @@ class AuthState {
 }
 
 /// Provider d'authentification.
-final authProvider =
-    NotifierProvider<AuthNotifier, AuthState>(AuthNotifier.new);
+final authProvider = NotifierProvider<AuthNotifier, AuthState>(
+  AuthNotifier.new,
+);
 
 class AuthNotifier extends Notifier<AuthState> {
   @override
   AuthState build() {
-    // [Fix-SESSION-RESTORE] Régression v2 corrigée : au démarrage à froid,
-    // le registre multi-serveurs n'est PAS encore chargé (bootstrap async)
-    // donc `activeProfileIdProvider` vaut null et l'ancien code sortait
-    // immédiatement de _restoreSession → l'utilisateur était renvoyé au
-    // login à CHAQUE lancement de l'app (et bloqué hors-ligne).
-    // On SURVEILLE le profil actif : dès que le bootstrap le pose, ce
-    // provider se reconstruit et restaure la session.
-    // select(profileId) : ne pas se reconstruire au heartbeat 30 s.
-    ref.watch(activeProfileIdProvider);
-    ref.watch(connectionProvider.select((c) => c.profileId));
     _restoreSession();
     return const AuthState();
   }
@@ -139,137 +111,84 @@ class AuthNotifier extends Notifier<AuthState> {
   Dio get _dio => ref.read(dioProvider);
   SecureStorage get _storage => ref.read(secureStorageProvider);
 
+  String get _profileId => ref.read(connectionProvider).profileId ?? 'default';
   String? get _serverUrl => ref.read(connectionProvider).serverUrl;
 
-  /// Id du profil serveur actif (ou null si registre non chargé).
-  String? get _activeProfileId =>
-      ref.read(activeProfileIdProvider) ??
-          ref.read(connectionProvider).profileId;
-
-  // [Fix-401-RELOGIN] V11 — garde de réentrance : le re-login silencieux
-  // déclenché par un 401 ne doit pas se relancer sur l'échec de SA propre
-  // requête (sinon boucle infinie 401 → re-login → 401 → …).
-  bool _silentReloginInFlight = false;
-
-  /// Restaure la session JWT du serveur ACTIF (clé par profil) au démarrage
-  /// ou après une bascule de serveur.
-  ///
-  /// [Fix-OFFLINE-SESSION] Un instantané de session (utilisateur,
-  /// permissions, rôles, établissement) est persisté par profil : il est
-  /// réhydraté AVANT l'appel réseau → l'app reste utilisable hors-ligne
-  /// (modules + données locales). `/auth/me` n'est plus qu'un refresh
-  /// silencieux quand le serveur est joignable.
-  Future<void> _restoreSession() async {
-    final pid = ref.read(activeProfileIdProvider) ??
-        ref.read(connectionProvider).profileId;
-    if (pid == null) return;
-    final token = await _storage.getJwtFor(pid);
-    if (token == null || token.isEmpty) return;
-
-    // 1) Réhydratation locale immédiate (hors-ligne OK).
-    final snap = await _readSnapshot(pid);
-    state = state.copyWith(
-      token: token,
-      user: snap?['user'],
-      permissions: (snap?['permissions'] as List<String>? ?? const []),
-      roles: (snap?['roles'] as List<String>? ?? const []),
-      establishmentId: snap?['establishmentId'] as int?,
-    );
-
-    // 2) Refresh silencieux si le serveur répond (les erreurs réseau
-    //    sont ignorées : la session locale reste valide).
-    await fetchMe();
+  Future<void> _persistSessionSnapshot(
+    LoginResponse login, {
+    required String username,
+    required String password,
+  }) async {
+    final profileId = _profileId;
+    final payload = {
+      'user': login.user.toJson(),
+      'permissions': login.permissions,
+      'roles': login.roles.map((r) => r.code).toList(),
+      'establishmentId': login.establishment?.id,
+    };
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('session_snapshot_$profileId', jsonEncode(payload));
+    await _storage.saveJwtFor(profileId, login.accessToken);
+    await _storage.saveCredentialsFor(profileId, username, password);
+    await _storage.saveJwt(login.accessToken);
+    await _storage.saveCredentials(username, password);
   }
 
-  /// Clé de l'instantané de session pour un profil serveur.
-  static String _snapshotKey(String pid) => 'session_snapshot_$pid';
-
-  /// Lit l'instantané de session persisté pour [pid] (null si absent/corrompu).
-  Future<Map<String, dynamic>?> _readSnapshot(String pid) async {
+  Future<AuthState?> _restoreSessionFromSnapshot() async {
+    final profileId = _profileId;
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('session_snapshot_$profileId');
+    if (raw == null || raw.isEmpty) return null;
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_snapshotKey(pid));
-      if (raw == null || raw.isEmpty) return null;
-      final j = Map<String, dynamic>.from(
-          jsonDecode(raw) as Map<String, dynamic>);
-      return {
-        'user': UserDto.fromJson(
-            Map<String, dynamic>.from(j['user'] as Map<String, dynamic>)),
-        'permissions': (j['permissions'] as List?)
-                ?.map((e) => e.toString())
-                .toList() ??
-            const <String>[],
-        'roles': (j['roles'] as List?)
-                ?.map((e) => e.toString())
-                .toList() ??
-            const <String>[],
-        'establishmentId': j['establishmentId'] as int?,
-      };
+      final map = Map<String, dynamic>.from(jsonDecode(raw) as Map);
+      final user = UserDto.fromJson(
+        Map<String, dynamic>.from(map['user'] as Map? ?? const {}),
+      );
+      final roles =
+          (map['roles'] as List? ?? const []).map((e) => e.toString()).toList();
+      final permissions = (map['permissions'] as List? ?? const [])
+          .map((e) => e.toString())
+          .toList();
+      final establishmentId = (map['establishmentId'] as num?)?.toInt();
+      final token =
+          await _storage.getJwtFor(profileId) ?? await _storage.getJwt();
+      if (token == null || token.isEmpty) return null;
+      return AuthState(
+        token: token,
+        user: user,
+        permissions: permissions,
+        roles: roles,
+        establishmentId: establishmentId,
+      );
     } catch (_) {
       return null;
     }
   }
 
-  /// Persiste l'instantané de session courant pour [pid].
-  Future<void> _writeSnapshot(String pid) async {
-    try {
-      final user = state.user;
-      if (user == null) return;
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(
-        _snapshotKey(pid),
-        jsonEncode({
-          'user': user.toJson(),
-          'permissions': state.permissions,
-          'roles': state.roles,
-          'establishmentId': state.establishmentId,
-        }),
-      );
-    } catch (_) {
-      // Best-effort : la persistance ne doit jamais casser la connexion.
+  /// Restaure la session JWT depuis le stockage sécurisé au démarrage.
+  Future<void> _restoreSession() async {
+    final token = await _storage.getJwt();
+    if (token == null || token.isEmpty) {
+      final snapshot = await _restoreSessionFromSnapshot();
+      if (snapshot != null) {
+        state = snapshot;
+      }
+      return;
     }
-  }
-
-  /// Permissions effectives : un super-utilisateur dont le RBAC serveur
-  /// n'est pas seedé reçoit quand même tous les droits (le serveur envoie
-  /// normalement '*', ce repli couvre les serveurs non patchés).
-  List<String> _effectivePermissions(UserDto user, List<String> permissions) {
-    if (permissions.contains('*')) return permissions;
-    if (user.isSuperuser) return const ['*'];
-    return permissions;
+    state = state.copyWith(token: token);
+    // Vérifie la validité du token via /auth/me.
+    await fetchMe();
   }
 
   /// Connexion : `POST /auth/login`.
-  ///
-  /// [Fix-OFFLINE-LOGIN] V11 — repli hors-ligne : si la requête échoue pour
-  /// une RAISON RÉSEAU (serveur injoignable, délai dépassé — PAS un 401/403
-  /// « mauvais identifiants ») et que les identifiants saisis correspondent
-  /// EXACTEMENT à ceux stockés pour ce profil serveur (Keystore), la session
-  /// locale est restaurée depuis l'instantané persisté : l'enseignant peut
-  /// travailler hors-ligne (cache Drift + outbox) comme sur son poste.
-  /// Un mauvais mot de passe reste refusé (comparaison locale).
   Future<bool> login({
     required String username,
     required String password,
     required String establishmentCode,
   }) async {
     if (_serverUrl == null) {
-      state = state.copyWith(error: 'Aucun serveur configuré. Appairez d\'abord un terminal.');
-      return false;
-    }
-    // [Fix-DEV-URL-LEAK] V16 — pré-flight : si l'URL du profil actif pointe
-    // vers localhost/127.0.0.1, on n'envoie PAS la requête (elle échouerait
-    // en connectant le mobile à lui-même, et le message d'erreur final en
-    // deviendrait trompeur). On renvoye un message actionnable invitant
-    // l'utilisateur à corriger le profil dans « Gérer les connexions
-    // serveur ». Idempotent avec [_humanizeDioError] qui détecte aussi ce
-    // cas mais, lui, APRÈS l'échec — ce pré-flight l'évite carrément.
-    if (_isLocalhostUrl(_serverUrl!)) {
       state = state.copyWith(
-        error: 'Adresse invalide : « localhost » désigne le mobile '
-            'lui-même. Modifiez le profil dans « Gérer les connexions '
-            'serveur » pour utiliser l\'IP LAN du desktop (ex: '
-            '192.168.1.10).',
+        error: 'Aucun serveur configuré. Appairez d\'abord un terminal.',
       );
       return false;
     }
@@ -284,72 +203,54 @@ class AuthNotifier extends Notifier<AuthState> {
         ).toJson(),
       );
       final login = LoginResponse.fromJson(resp.data as Map<String, dynamic>);
-      // [Multi-serveurs] JWT + identifiants stockés PAR PROFIL : la session
-      // d'un autre serveur n'est jamais écrasée.
-      final pid = ref.read(activeProfileIdProvider) ??
-          ref.read(connectionProvider).profileId;
-      if (pid != null) {
-        await _storage.saveJwtFor(pid, login.accessToken);
-        await _storage.saveCredentialsFor(pid, username, password);
-      } else {
-        await _storage.saveJwt(login.accessToken);
-        await _storage.saveCredentials(username, password);
-      }
+      await _persistSessionSnapshot(
+        login,
+        username: username,
+        password: password,
+      );
       state = state.copyWith(
         token: login.accessToken,
         user: login.user,
-        permissions: _effectivePermissions(
-            login.user, login.permissions),
+        permissions: login.permissions,
         roles: login.roles.map((r) => r.code).toList(),
         establishmentId: login.establishment?.id,
         isLoading: false,
       );
-      // [Fix-OFFLINE-SESSION] persister l'instantané pour ce profil.
-      if (pid != null) await _writeSnapshot(pid);
-      // [Fix-POST-LOGIN-SYNC] V16 — déclencher une synchro immédiate après
-      // un login (re)réussi : l'utilisateur qui revient d'une longue
-      // déconnexion récupère ses données sans attendre le prochain battement
-      // du heartbeat (30 s) ni la prochaine exécution WorkManager (15 min).
-      // Le [AutoSyncController] débouncera si une synchro est déjà en cours
-      // et refusera (single-flight) si l'état de connexion est hors-ligne.
-      // Post-frame callback : laisser l'état Riverpod se propager (le
-      // `connectionProvider` se reconstruit après le login) avant de lire
-      // l'orchestrateur — évite une lecture d'état partiellement mis à
-      // jour pendant les tests unitaires (ProviderContainer sans pump).
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        try {
-          ref.read(autoSyncControllerProvider).syncIfIdle();
-        } catch (e) {
-          // Best-effort : ignorer si le provider n'est pas prêt (tests).
-          debugPrint('[AUTH] syncIfIdle post-login ignoré : $e');
-        }
-      });
       return true;
     } on DioException catch (e) {
-      // [Fix-OFFLINE-LOGIN] V11 — échec RÉSEAU (pas mauvais identifiants)
-      // → tentative de connexion locale si les identifiants correspondent.
-      final isNetworkFailure = e.type == DioExceptionType.connectionError ||
+      final profileId = _profileId;
+      final stored = await _storage.getCredentialsFor(profileId) ??
+          await _storage.getCredentials();
+      final snapshot = await _restoreSessionFromSnapshot();
+      final isNetworkProblem = e.type == DioExceptionType.connectionError ||
           e.type == DioExceptionType.connectionTimeout ||
+          e.type == DioExceptionType.receiveTimeout ||
           e.type == DioExceptionType.sendTimeout ||
-          e.type == DioExceptionType.receiveTimeout;
-      if (isNetworkFailure) {
-        final offlineOk = await _tryOfflineLogin(username, password);
-        if (offlineOk) return true;
-        state = state.copyWith(
-          isLoading: false,
-          error: 'Serveur injoignable et aucune session locale ne '
-              'correspond à ces identifiants. Connectez-vous au moins une '
-              'fois avec le serveur démarré, ou vérifiez le module '
-              'Connexions.',
-        );
-        return false;
+          e.response == null;
+      if (isNetworkProblem && snapshot != null && stored != null) {
+        final credsMatch =
+            stored.username == username && stored.password == password;
+        if (credsMatch) {
+          state = state.copyWith(
+            token: snapshot.token,
+            user: snapshot.user,
+            permissions: snapshot.permissions,
+            roles: snapshot.roles,
+            establishmentId: snapshot.establishmentId,
+            isLoading: false,
+            error: null,
+          );
+          return true;
+        }
       }
-      // Logger l'erreur complète pour diagnostic.
-      debugPrint('[AUTH] Login DioException: type=${e.type}, message=${e.message}, '
-          'error=${e.error}, statusCode=${e.response?.statusCode}, '
-          'response=${e.response?.data}');
+      // [Fix-AUTH] Logger l'erreur complète pour diagnostic.
+      debugPrint(
+        '[AUTH] Login DioException: type=${e.type}, message=${e.message}, '
+        'error=${e.error}, statusCode=${e.response?.statusCode}, '
+        'response=${e.response?.data}',
+      );
       // Message d'erreur actionnable pour les problèmes réseau courants.
-      final msg = _humanizeDioError(e, _serverUrl!);
+      final msg = _humanizeDioError(e, _serverUrl ?? '');
       state = state.copyWith(isLoading: false, error: msg);
       return false;
     } catch (e) {
@@ -359,53 +260,12 @@ class AuthNotifier extends Notifier<AuthState> {
     }
   }
 
-  /// [Fix-OFFLINE-LOGIN] V11 — restaure la session depuis l'instantané
-  /// local si les identifiants saisis correspondent à ceux stockés pour le
-  /// profil actif. Retourne true si la session offline est ouverte.
-  Future<bool> _tryOfflineLogin(String username, String password) async {
-    try {
-      final pid = _activeProfileId;
-      if (pid == null) return false;
-      final creds = await _storage.getCredentialsFor(pid);
-      if (creds == null) return false;
-      if (creds.username != username || creds.password != password) {
-        return false;
-      }
-      final snap = await _readSnapshot(pid);
-      final user = snap?['user'];
-      if (user is! UserDto) return false; // aucun instantané → impossible
-
-      final token = await _storage.getJwtFor(pid);
-      state = state.copyWith(
-        token: token ?? 'offline-session',
-        user: user,
-        permissions: (snap?['permissions'] as List<String>? ?? const []),
-        roles: (snap?['roles'] as List<String>? ?? const []),
-        establishmentId: snap?['establishmentId'] as int?,
-        isLoading: false,
-        clearError: true,
-      );
-      return true;
-    } catch (e) {
-      debugPrint('[AUTH] Offline login échoué : $e');
-      return false;
-    }
-  }
-
   /// Transforme une [DioException] en message d'erreur clair et actionnable,
   /// avec détection des causes courantes (localhost sur appareil physique,
   /// serveur injoignable, délai dépassé).
-  ///
-  /// [Fix-LOGIN-DETAIL] V16 — pour les réponses 401/403, on lit désormais
-  /// le `detail` renvoyé par FastAPI dans le corps de la réponse
-  /// (`e.response.data['detail']`). Avant, TOUT 401 mappait à
-  /// « Nom d'utilisateur ou mot de passe incorrect. » même quand le
-  /// serveur renvoyait « Unknown establishment code: <code> » ou qu'un
-  /// portail captif WiFi répondait 401 à /auth/login. Idem pour 403
-  /// (« Account is disabled » vs « User not linked »…).
   String _humanizeDioError(DioException e, String serverUrl) {
     // Détecter l'usage de localhost/127.0.0.1 sur un appareil physique.
-    if (_isLocalhostUrl(serverUrl)) {
+    if (serverUrl.contains('localhost') || serverUrl.contains('127.0.0.1')) {
       return 'L\'adresse « localhost » ou « 127.0.0.1 » désigne le mobile '
           'lui-même, pas le serveur desktop. Utilisez l\'IP LAN du desktop '
           '(ex: 192.168.1.10).';
@@ -425,10 +285,12 @@ class AuthNotifier extends Notifier<AuthState> {
             'le port, et que le serveur desktop est démarré.';
       case DioExceptionType.badResponse:
         final code = e.response?.statusCode;
-        if (code == 401) return _humanize401(e);
-        if (code == 403) return _humanize403(e);
-        if (code == 404) return 'Endpoint introuvable (404). L\'API du serveur '
-            'desktop ne correspond peut-être pas à la version attendue.';
+        if (code == 401) return 'Nom d\'utilisateur ou mot de passe incorrect.';
+        if (code == 403) return 'Accès refusé. Permissions insuffisantes.';
+        if (code == 404) {
+          return 'Endpoint introuvable (404). L\'API du serveur '
+              'desktop ne correspond peut-être pas à la version attendue.';
+        }
         if (code == 422) {
           final apiError = dioErrorToApiException(e);
           return 'Requête de connexion invalide : ${apiError.message}';
@@ -456,110 +318,26 @@ class AuthNotifier extends Notifier<AuthState> {
     }
   }
 
-  /// Vrai si [url] pointe vers localhost/127.0.0.1 (le mobile lui-même sur
-  /// un appareil physique). Réutilisé par le pré-flight de [login] et par
-  /// [_humanizeDioError] pour éviter une requête réseau vouée à l'échec.
-  ///
-  /// [Fix-DEV-URL-LEAK] V16 — voir aussi la purge des profils localhost
-  /// dans [ServerProfileRegistry.load] (lib/features/connections/).
-  static bool _isLocalhostUrl(String url) {
-    final lower = url.toLowerCase();
-    return lower.contains('localhost') || lower.contains('127.0.0.1');
-  }
-
-  /// Extrait le champ `detail` d'une réponse FastAPI (HTTPException) en
-  /// tant que chaîne. Renvoie null si le body est absent, malformé, ou si
-  /// `detail` est une List (erreurs de validation 422 — non gérées ici).
-  static String? _extractFastApiDetail(DioException e) {
-    final data = e.response?.data;
-    if (data is! Map) return null;
-    final detail = data['detail'];
-    if (detail is String && detail.isNotEmpty) return detail;
-    return null;
-  }
-
-  /// Humanise un 401 en lisant le `detail` FastAPI :
-  ///   - « Invalid credentials » → identifiants erronés (message historique) ;
-  ///   - « Unknown establishment code: <code> » → code établissement inconnu ;
-  ///   - tout autre détail texte → renvoyé tel quel (transparence serveur) ;
-  ///   - détail absent / illisible (portail captif WiFi, proxy) → message
-  ///     invitant à vérifier l'URL du serveur dans Connexions.
-  String _humanize401(DioException e) {
-    final detail = _extractFastApiDetail(e);
-    if (detail == null) {
-      // Pas de body FastAPI lisible : la plupart du temps, un portail captif
-      // WiFi ou un proxy qui répond 401 à /auth/login sans respecter le
-      // contrat d'API. On ne dit PAS « mot de passe incorrect ».
-      return 'Réponse inattendue du serveur — vérifiez l\'URL du serveur '
-          'dans Connexions (un portail captif WiFi ou un proxy renvoie '
-          'peut-être cette page à la place du serveur GeTech).';
-    }
-    if (detail == 'Invalid credentials') {
-      return 'Nom d\'utilisateur ou mot de passe incorrect.';
-    }
-    if (detail.startsWith('Unknown establishment code')) {
-      return 'Code établissement inconnu. Vérifiez le code saisi ou '
-          'contactez l\'administrateur.';
-    }
-    // Tout autre détail texte renvoyé par FastAPI : transparence.
-    return detail;
-  }
-
-  /// Humanise un 403 en lisant le `detail` FastAPI :
-  ///   - « Account is disabled » → compte désactivé (contact admin) ;
-  ///   - « Account is temporarily locked... » → verrouillage temporaire ;
-  ///   - « User is not linked to this establishment » (ou variantes) →
-  ///     rattachement établissement perdu ;
-  ///   - sinon → repli générique « Permissions insuffisantes ».
-  String _humanize403(DioException e) {
-    final detail = _extractFastApiDetail(e);
-    if (detail == null) {
-      return 'Accès refusé. Permissions insuffisantes.';
-    }
-    if (detail == 'Account is disabled') {
-      return 'Votre compte est désactivé. Contactez l\'administrateur.';
-    }
-    if (detail.startsWith('Account is temporarily locked')) {
-      return 'Compte temporairement verrouillé. Réessayez dans quelques '
-          'minutes.';
-    }
-    if (detail.contains('not linked to this establishment') ||
-        detail.contains('no longer linked')) {
-      return 'Votre compte n\'est plus rattaché à cet établissement.';
-    }
-    return 'Accès refusé. Permissions insuffisantes.';
-  }
-
   /// Récupère le profil courant : `GET /auth/me`.
   Future<void> fetchMe() async {
     if (_serverUrl == null || state.token == null) return;
     try {
       final resp = await _dio.get(buildUrl(_serverUrl!, ApiEndpoints.authMe));
       final me = MeResponse.fromJson(
-          Map<String, dynamic>.from(resp.data as Map));
+        Map<String, dynamic>.from(resp.data as Map),
+      );
       state = state.copyWith(
         user: me.user,
-        permissions: _effectivePermissions(me.user, me.permissions),
+        permissions: me.permissions,
         roles: me.roles.map((r) => r.code).toList(),
         establishmentId: me.establishment?.id,
         clearError: true,
       );
-      // [Fix-OFFLINE-SESSION] mettre à jour l'instantané persisté.
-      final pid = ref.read(activeProfileIdProvider) ??
-          ref.read(connectionProvider).profileId;
-      if (pid != null) await _writeSnapshot(pid);
     } on DioException catch (e) {
       // On ne déconnecte QUE si c'est une erreur 401 (token invalide/expiré).
       // Les erreurs réseau (503, timeout, etc.) ne doivent pas forcer le logout.
-      //
-      // [Fix-401-RELOGIN] V11 — un 401 ne détruit PLUS la session locale :
-      // d'abord un re-login TRANSPARENT avec les identifiants stockés (le
-      // serveur vient de répondre, il est joignable : c'est le token qui est
-      // périmé — ex. serveur desktop redémarré). Sans ce correctif, chaque
-      // redémarrage du serveur déconnectait l'enseignant ET effaçait son
-      // instantané → plus aucune connexion possible hors-ligne.
       if (e.response?.statusCode == 401) {
-        await handleUnauthorized();
+        await logoutLocal();
       }
     } catch (_) {
       // Erreur inattendue → on reste sur l'état actuel (cache).
@@ -582,27 +360,17 @@ class AuthNotifier extends Notifier<AuthState> {
       );
       return true;
     } on DioException catch (e) {
-      final api = (e.error is ApiException) ? e.error as ApiException : dioErrorToApiException(e);
+      final api = (e.error is ApiException)
+          ? e.error as ApiException
+          : dioErrorToApiException(e);
       state = state.copyWith(error: api.message);
       return false;
     }
   }
 
-  /// Déconnexion locale — efface UNIQUEMENT le JWT du serveur actif
-  /// (les sessions des autres serveurs enregistrés sont conservées).
+  /// Déconnexion locale (efface le JWT).
   Future<void> logoutLocal() async {
-    final pid = ref.read(activeProfileIdProvider) ??
-        ref.read(connectionProvider).profileId;
-    if (pid != null) {
-      await _storage.deleteJwtFor(pid);
-      // [Fix-OFFLINE-SESSION] effacer aussi l'instantané de session.
-      try {
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.remove(_snapshotKey(pid));
-      } catch (_) {}
-    } else {
-      await _storage.deleteJwt();
-    }
+    await _storage.deleteJwt();
     state = const AuthState();
   }
 
@@ -619,82 +387,22 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   /// Appelé par l'interceptor Dio en cas de 401.
-  ///
-  /// [Fix-401-RELOGIN] V11 — un 401 signifie que le token n'est plus
-  /// accepté (expiré OU serveur redémarré avec un nouveau secret) mais le
-  /// serveur EST joignable (il vient de répondre). Avant de déconnecter :
-  /// 1. re-login silencieux avec les identifiants stockés du profil actif
-  ///    → session restaurée SANS interruption pour l'utilisateur ;
-  /// 2. si le re-login échoue (mot de passe changé, compte désactivé) :
-  ///    on efface UNIQUEMENT le JWT — l'instantané de session et les
-  ///    identifiants restent en place pour permettre la connexion
-  ///    hors-ligne (cf. [Fix-OFFLINE-LOGIN]) depuis l'écran de login.
   Future<void> handleUnauthorized() async {
     if (state.token == null) return;
 
-    // 1) Re-login silencieux (une seule tentative, pas de boucle).
-    if (!_silentReloginInFlight) {
-      _silentReloginInFlight = true;
-      try {
-        final healed = await _silentRelogin();
-        if (healed) return; // session restaurée, aucune interruption.
-      } finally {
-        _silentReloginInFlight = false;
-      }
-    }
-
-    // 2) Re-login impossible → on ne garde PAS un token refusé, mais on
-    //    CONSERVE l'instantané + les identifiants (reconnexion hors-ligne
-    //    possible avec le bon mot de passe).
-    final pid = _activeProfileId;
-    if (pid != null) {
-      await _storage.deleteJwtFor(pid);
-    } else {
-      await _storage.deleteJwt();
-    }
-    state = const AuthState();
-  }
-
-  /// [Fix-401-RELOGIN] V11 — re-login transparent avec les identifiants
-  /// stockés (profil actif). Réussit si le mot de passe n'a pas changé.
-  Future<bool> _silentRelogin() async {
-    try {
-      final pid = _activeProfileId;
-      final url = _serverUrl;
-      if (pid == null || url == null) return false;
-      final creds = await _storage.getCredentialsFor(pid);
-      if (creds == null) return false;
-      final estab =
-          ref.read(connectionProvider).establishmentCode ?? '';
-      if (estab.isEmpty) return false;
-
-      final resp = await _dio.post(
-        buildUrl(url, ApiEndpoints.authLogin),
-        data: LoginRequest(
-          username: creds.username,
-          password: creds.password,
-          establishmentCode: estab,
-        ).toJson(),
+    final profileId = _profileId;
+    final saved = await _storage.getCredentialsFor(profileId) ??
+        await _storage.getCredentials();
+    final estabCode = ref.read(connectionProvider).establishmentCode ?? '';
+    if (saved != null && estabCode.isNotEmpty) {
+      final ok = await login(
+        username: saved.username,
+        password: saved.password,
+        establishmentCode: estabCode,
       );
-      final login = LoginResponse.fromJson(
-          Map<String, dynamic>.from(resp.data as Map));
-      await _storage.saveJwtFor(pid, login.accessToken);
-      await _storage.saveCredentialsFor(pid, creds.username, creds.password);
-      state = state.copyWith(
-        token: login.accessToken,
-        user: login.user,
-        permissions:
-            _effectivePermissions(login.user, login.permissions),
-        roles: login.roles.map((r) => r.code).toList(),
-        establishmentId: login.establishment?.id,
-        clearError: true,
-      );
-      await _writeSnapshot(pid);
-      debugPrint('[AUTH] 401 → session restaurée par re-login silencieux');
-      return true;
-    } catch (e) {
-      debugPrint('[AUTH] Re-login silencieux impossible : $e');
-      return false;
+      if (ok) return;
     }
+
+    await logoutLocal();
   }
 }

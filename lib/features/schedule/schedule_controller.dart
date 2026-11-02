@@ -64,9 +64,20 @@ final classroomsForScheduleProvider =
     FutureProvider.autoDispose<List<ClassroomDto>>((ref) async {
   // [Fix-HEARTBEAT-REBUILD] select : le heartbeat émet un nouvel état toutes
   // les 30 s (latence) — ne pas invalider le sélecteur de classes pour autant.
-  final conn = ref.watch(connectionProvider
-      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
+  final conn = ref.watch(
+    connectionProvider.select(
+      (c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      ),
+    ),
+  );
   if (!conn.isPaired || conn.serverUrl == null) {
+    return _classroomsFromLocal(ref);
+  }
+  if (!conn.canReachServer && !conn.isChecking) {
     return _classroomsFromLocal(ref);
   }
   final dio = ref.watch(dioProvider);
@@ -75,7 +86,9 @@ final classroomsForScheduleProvider =
       buildUrl(conn.serverUrl!, ApiEndpoints.classrooms),
       queryParameters: {'per_page': 200},
     );
-    return _parseClassroomList(resp.data);
+    final classrooms = _parseClassroomList(resp.data);
+    await _saveClassroomsToLocal(ref, classrooms);
+    return classrooms;
   } on DioException {
     // [Fix-TEACHER-CLASSES-403] 403 → cache local (plus de liste vide
     // silencieuse).
@@ -89,24 +102,79 @@ Future<List<ClassroomDto>> _classroomsFromLocal(Ref ref) async {
   try {
     final db = ref.read(databaseProvider);
     final rows = await (db.select(db.classrooms)
-          ..where((t) => t.isDeleted.equals(false)))
+          ..where((t) => t.isDeleted.equals(false))
+          ..where((t) => t.isActive.equals(true)))
         .get();
     return rows
-        .map((c) => ClassroomDto(
-              id: c.id,
-              name: c.name,
-              headTeacherId: c.teacherId,
-              headTeacherName: c.headTeacherName,
-              levelName: c.levelName,
-              cycleName: c.cycleName,
-              cycleId: c.cycleId,
-              seriesName: c.seriesName,
-              currentStudentsCount: c.currentStudentsCount,
-              maxStudents: c.capacity == 0 ? null : c.capacity,
-            ))
+        .map(
+          (c) => ClassroomDto(
+            id: c.id,
+            name: c.name,
+            headTeacherId: c.teacherId,
+            headTeacherName: c.headTeacherName,
+            levelName: c.levelName,
+            cycleName: c.cycleName,
+            cycleId: c.cycleId,
+            seriesName: c.seriesName,
+            currentStudentsCount: c.currentStudentsCount,
+            maxStudents: c.capacity == 0 ? null : c.capacity,
+          ),
+        )
         .toList();
   } catch (_) {
     return const [];
+  }
+}
+
+Future<void> _saveClassroomsToLocal(
+  Ref ref,
+  List<ClassroomDto> classrooms,
+) async {
+  if (classrooms.isEmpty) return;
+  try {
+    final db = ref.read(databaseProvider);
+    final now = DateTime.now();
+    for (final classroom in classrooms) {
+      await db.into(db.classrooms).insertOnConflictUpdate(
+            ClassroomsCompanion.insert(
+            id: d.Value(classroom.id),
+            name: classroom.name,
+            teacherId: classroom.headTeacherId == null
+                ? const d.Value.absent()
+                : d.Value(classroom.headTeacherId),
+            capacity: classroom.capacity == 0
+                ? const d.Value.absent()
+                : d.Value(classroom.capacity),
+            establishmentId: classroom.establishmentId == null
+                ? const d.Value.absent()
+                : d.Value(classroom.establishmentId),
+            headTeacherName: classroom.headTeacherName == null
+                ? const d.Value.absent()
+                : d.Value(classroom.headTeacherName),
+            levelName: classroom.levelName == null
+                ? const d.Value.absent()
+                : d.Value(classroom.levelName),
+            cycleName: classroom.cycleName == null
+                ? const d.Value.absent()
+                : d.Value(classroom.cycleName),
+            cycleId: classroom.cycleId == null
+                ? const d.Value.absent()
+                : d.Value(classroom.cycleId),
+            seriesName: classroom.seriesName == null
+                ? const d.Value.absent()
+                : d.Value(classroom.seriesName),
+            currentStudentsCount: classroom.currentStudentsCount == null
+                ? const d.Value.absent()
+                : d.Value(classroom.currentStudentsCount),
+            isActive: d.Value(classroom.isActive),
+            syncedAt: d.Value(now),
+            isDirty: const d.Value(false),
+            isDeleted: const d.Value(false),
+          ),
+          );
+    }
+  } catch (_) {
+    // A non-essential cache must not prevent the schedule from rendering.
   }
 }
 
@@ -124,12 +192,16 @@ final classroomScheduleProvider = FutureProvider.autoDispose
     .family<List<WeeklyScheduleDto>, int>((ref, classroomId) async {
   // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForScheduleProvider.
   // canReachServer/isChecking ne changent qu'aux transitions d'état.
-  final conn = ref.watch(connectionProvider.select((c) => (
+  final conn = ref.watch(
+    connectionProvider.select(
+      (c) => (
         isPaired: c.isPaired,
         serverUrl: c.serverUrl,
         canReachServer: c.canReachServer,
         isChecking: c.isChecking,
-      )));
+      ),
+    ),
+  );
 
   // 1) Cache local immédiat (seule source hors-ligne).
   final local = await _scheduleFromLocal(ref, classroomId);
@@ -164,7 +236,9 @@ final classroomScheduleProvider = FutureProvider.autoDispose
 /// EDT d'une classe depuis le cache Drift (noms de matières résolus via
 /// la table locale `subjects`).
 Future<List<WeeklyScheduleDto>> _scheduleFromLocal(
-    Ref ref, int? classroomId) async {
+  Ref ref,
+  int? classroomId,
+) async {
   try {
     final db = ref.read(databaseProvider);
     final query = db.select(db.weeklySchedules)
@@ -183,20 +257,22 @@ Future<List<WeeklyScheduleDto>> _scheduleFromLocal(
     };
 
     return rows
-        .map((r) => WeeklyScheduleDto(
-              id: r.id,
-              classroomId: r.classroomId,
-              classroomName: classrooms[r.classroomId],
-              subjectId: r.subjectId,
-              subjectName: subjects[r.subjectId],
-              teacherId: r.teacherId,
-              timeSlotId: r.timeSlotId,
-              dayOfWeek: r.dayOfWeek,
-              startTime: r.startTime ?? '',
-              endTime: r.endTime ?? '',
-              room: r.room,
-              weekTypeRaw: _weekTypeFromLocal(r.weekType),
-            ))
+        .map(
+          (r) => WeeklyScheduleDto(
+            id: r.id,
+            classroomId: r.classroomId,
+            classroomName: classrooms[r.classroomId],
+            subjectId: r.subjectId,
+            subjectName: subjects[r.subjectId],
+            teacherId: r.teacherId,
+            timeSlotId: r.timeSlotId,
+            dayOfWeek: r.dayOfWeek,
+            startTime: r.startTime ?? '',
+            endTime: r.endTime ?? '',
+            room: r.room,
+            weekTypeRaw: _weekTypeFromLocal(r.weekType),
+          ),
+        )
         .toList();
   } catch (_) {
     return const [];
@@ -216,7 +292,9 @@ String? _weekTypeFromLocal(String? raw) =>
 
 /// Persiste les entrées EDT dans le cache Drift (upsert par id).
 Future<void> _saveScheduleToLocal(
-    Ref ref, List<WeeklyScheduleDto> entries) async {
+  Ref ref,
+  List<WeeklyScheduleDto> entries,
+) async {
   try {
     final db = ref.read(databaseProvider);
     await db.batch((batch) {
@@ -234,7 +312,8 @@ Future<void> _saveScheduleToLocal(
             endTime: d.Value(e.endTime),
             room: d.Value(e.room),
             weekType: d.Value(
-                e.weekTypeRaw ?? kWeekTypeAllSentinel),
+              e.weekTypeRaw ?? kWeekTypeAllSentinel,
+            ),
             syncedAt: d.Value(DateTime.now()),
           ),
         );
@@ -249,7 +328,8 @@ Future<void> _saveScheduleToLocal(
 /// (utilisé par le module Présence et l'onglet EDT du détail de classe).
 final weeklyScheduleProvider = FutureProvider.autoDispose
     .family<List<WeeklyScheduleDto>, ScheduleQuery>((ref, query) async {
-  final all = await ref.watch(classroomScheduleProvider(query.classroomId).future);
+  final all =
+      await ref.watch(classroomScheduleProvider(query.classroomId).future);
   return all.where((s) => s.matchesWeek(query.weekType)).toList();
 });
 
@@ -260,9 +340,19 @@ final weeklyScheduleProvider = FutureProvider.autoDispose
 final teacherScheduleByIdProvider = FutureProvider.autoDispose
     .family<List<WeeklyScheduleDto>, int>((ref, teacherId) async {
   // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForScheduleProvider.
-  final conn = ref.watch(connectionProvider
-      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
+  final conn = ref.watch(
+    connectionProvider
+        .select((c) => (
+              isPaired: c.isPaired,
+              serverUrl: c.serverUrl,
+              canReachServer: c.canReachServer,
+              isChecking: c.isChecking,
+            )),
+  );
   if (!conn.isPaired || conn.serverUrl == null) {
+    return _teacherScheduleFromLocal(ref, teacherId);
+  }
+  if (!conn.canReachServer && !conn.isChecking) {
     return _teacherScheduleFromLocal(ref, teacherId);
   }
   final dio = ref.watch(dioProvider);
@@ -271,7 +361,9 @@ final teacherScheduleByIdProvider = FutureProvider.autoDispose
       buildUrl(conn.serverUrl!, ApiEndpoints.schedule),
       queryParameters: {'teacher_id': teacherId},
     );
-    return _parseWeeklyScheduleList(resp.data);
+    final schedule = _parseWeeklyScheduleList(resp.data);
+    await _saveScheduleToLocal(ref, schedule);
+    return schedule;
   } on DioException catch (e) {
     final api = (e.error is ApiException)
         ? e.error as ApiException
@@ -287,7 +379,9 @@ final teacherScheduleByIdProvider = FutureProvider.autoDispose
 
 /// EDT d'un enseignant depuis le cache Drift local.
 Future<List<WeeklyScheduleDto>> _teacherScheduleFromLocal(
-    Ref ref, int teacherId) async {
+  Ref ref,
+  int teacherId,
+) async {
   try {
     final db = ref.read(databaseProvider);
     final rows = await (db.select(db.weeklySchedules)
@@ -299,19 +393,21 @@ Future<List<WeeklyScheduleDto>> _teacherScheduleFromLocal(
       for (final s in await db.select(db.subjects).get()) s.id: s.name,
     };
     return rows
-        .map((r) => WeeklyScheduleDto(
-              id: r.id,
-              classroomId: r.classroomId,
-              subjectId: r.subjectId,
-              subjectName: subjects[r.subjectId],
-              teacherId: r.teacherId,
-              timeSlotId: r.timeSlotId,
-              dayOfWeek: r.dayOfWeek,
-              startTime: r.startTime ?? '',
-              endTime: r.endTime ?? '',
-              room: r.room,
-              weekTypeRaw: _weekTypeFromLocal(r.weekType),
-            ))
+        .map(
+          (r) => WeeklyScheduleDto(
+            id: r.id,
+            classroomId: r.classroomId,
+            subjectId: r.subjectId,
+            subjectName: subjects[r.subjectId],
+            teacherId: r.teacherId,
+            timeSlotId: r.timeSlotId,
+            dayOfWeek: r.dayOfWeek,
+            startTime: r.startTime ?? '',
+            endTime: r.endTime ?? '',
+            room: r.room,
+            weekTypeRaw: _weekTypeFromLocal(r.weekType),
+          ),
+        )
         .toList();
   } catch (_) {
     return const [];
@@ -355,8 +451,9 @@ List<WeeklyScheduleDto> _parseWeeklyScheduleList(dynamic data) {
     if (items is List) {
       return items
           .whereType<Map>()
-          .map((e) =>
-              WeeklyScheduleDto.fromJson(Map<String, dynamic>.from(e)))
+          .map(
+            (e) => WeeklyScheduleDto.fromJson(Map<String, dynamic>.from(e)),
+          )
           .toList();
     }
   }
@@ -404,7 +501,11 @@ class TimeSlotDto {
   /// Libellé « Lundi 08:00 — 10:00 » (miroir du dropdown desktop).
   String get displayLabel {
     const days = {
-      1: 'Lundi', 2: 'Mardi', 3: 'Mercredi', 4: 'Jeudi', 5: 'Vendredi',
+      1: 'Lundi',
+      2: 'Mardi',
+      3: 'Mercredi',
+      4: 'Jeudi',
+      5: 'Vendredi',
       6: 'Samedi',
     };
     final day = days[dayOfWeek] ?? '?';
@@ -420,8 +521,10 @@ class TimeSlotDto {
 /// la saisie manuelle jour + heures, le serveur créant le créneau).
 final timeSlotsProvider =
     FutureProvider.autoDispose<List<TimeSlotDto>>((ref) async {
-  final conn = ref.watch(connectionProvider
-      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
+  final conn = ref.watch(
+    connectionProvider
+        .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)),
+  );
   if (!conn.isPaired || conn.serverUrl == null) return const [];
   final dio = ref.watch(dioProvider);
   try {
@@ -550,8 +653,11 @@ class ScheduleEditException implements Exception {
   /// serveur GeTech-SMS non appliqué).
   final bool patchRequired;
 
-  const ScheduleEditException(this.message,
-      {this.statusCode, this.patchRequired = false});
+  const ScheduleEditException(
+    this.message, {
+    this.statusCode,
+    this.patchRequired = false,
+  });
 
   @override
   String toString() => 'ScheduleEditException(${statusCode ?? ''}): $message';
@@ -567,7 +673,8 @@ class ScheduleEditController {
   String? get _serverUrl => _ref.read(connectionProvider).serverUrl;
 
   Future<Map<String, dynamic>> _send(
-      Future<Map<String, dynamic>> Function(String url) send) async {
+    Future<Map<String, dynamic>> Function(String url) send,
+  ) async {
     final url = _serverUrl;
     if (url == null) throw const ScheduleEditException('Serveur non configuré');
     try {
@@ -605,7 +712,9 @@ class ScheduleEditController {
 
   /// Modifie un cours : `PUT /schedule/entries/{id}`.
   Future<WeeklyScheduleDto> updateEntry(
-      int id, ScheduleEntryUpdateRequest req) async {
+    int id,
+    ScheduleEntryUpdateRequest req,
+  ) async {
     final data = await _send((url) async {
       final resp = await _dio.put(
         buildUrl(url, ApiEndpoints.scheduleEntry(id)),

@@ -66,7 +66,7 @@ class ScheduleGridScreen extends ConsumerStatefulWidget {
 }
 
 class _ScheduleGridScreenState extends ConsumerState<ScheduleGridScreen> {
-  bool _editUnsupported = false;
+  final bool _editUnsupported = false;
 
   @override
   Widget build(BuildContext context) {
@@ -191,7 +191,7 @@ class _TeacherField extends ConsumerWidget {
           });
         }
         return DropdownButtonFormField<int>(
-          value: effective,
+          initialValue: effective,
           // [Fix-OVERFLOW] libellés longs contraints à la largeur du champ.
           isExpanded: true,
           decoration: const InputDecoration(
@@ -200,14 +200,16 @@ class _TeacherField extends ConsumerWidget {
             isDense: true,
           ),
           items: teachers
-              .map((t) => DropdownMenuItem(
-                    value: t.id,
-                    child: Text(
-                      t.fullName.isEmpty ? t.username : t.fullName,
-                      overflow: TextOverflow.ellipsis,
-                      maxLines: 1,
-                    ),
-                  ))
+              .map(
+                (t) => DropdownMenuItem(
+                  value: t.id,
+                  child: Text(
+                    t.fullName.isEmpty ? t.username : t.fullName,
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                  ),
+                ),
+              )
               .toList(),
           onChanged: (v) => onChanged(v),
         );
@@ -216,9 +218,10 @@ class _TeacherField extends ConsumerWidget {
         padding: EdgeInsets.symmetric(vertical: 12),
         child: LinearProgressIndicator(),
       ),
-      error: (e, _) => Text('Erreur enseignants : $e',
-          style:
-              TextStyle(color: Theme.of(context).colorScheme.error)),
+      error: (e, _) => Text(
+        'Erreur enseignants : $e',
+        style: TextStyle(color: Theme.of(context).colorScheme.error),
+      ),
     );
   }
 }
@@ -226,7 +229,12 @@ class _TeacherField extends ConsumerWidget {
 /// Résultat du sélecteur de créneau : soit un créneau de la grille
 /// ([slotId]), soit une saisie manuelle (jour + heures).
 class _SlotSelection {
-  const _SlotSelection({this.slotId, this.dayOfWeek, this.startTime, this.endTime});
+  const _SlotSelection({
+    this.slotId,
+    this.dayOfWeek,
+    this.startTime,
+    this.endTime,
+  });
   final int? slotId;
   final int? dayOfWeek;
   final String? startTime;
@@ -265,11 +273,13 @@ class _SlotPickerState extends ConsumerState<_SlotPicker> {
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 
   void _emitManual() {
-    widget.onChanged(_SlotSelection(
-      dayOfWeek: _manualDay.dayIndex,
-      startTime: _hhmm(_manualStart),
-      endTime: _hhmm(_manualEnd),
-    ));
+    widget.onChanged(
+      _SlotSelection(
+        dayOfWeek: _manualDay.dayIndex,
+        startTime: _hhmm(_manualStart),
+        endTime: _hhmm(_manualEnd),
+      ),
+    );
   }
 
   @override
@@ -284,16 +294,19 @@ class _SlotPickerState extends ConsumerState<_SlotPicker> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               DropdownButtonFormField<SchoolDay>(
-                value: _manualDay,
+                initialValue: _manualDay,
                 isExpanded: true,
                 decoration: const InputDecoration(
                   labelText: 'Jour *',
-                  helperText: 'Grille horaire non configurée — saisie manuelle.',
+                  helperText:
+                      'Grille horaire non configurée — saisie manuelle.',
                   border: OutlineInputBorder(),
                   isDense: true,
                 ),
                 items: SchoolDay.values
-                    .map((d) => DropdownMenuItem(value: d, child: Text(d.label)))
+                    .map(
+                      (d) => DropdownMenuItem(value: d, child: Text(d.label)),
+                    )
                     .toList(),
                 onChanged: (v) {
                   if (v != null) {
@@ -309,7 +322,9 @@ class _SlotPickerState extends ConsumerState<_SlotPicker> {
                     child: InkWell(
                       onTap: () async {
                         final t = await showTimePicker(
-                            context: context, initialTime: _manualStart);
+                          context: context,
+                          initialTime: _manualStart,
+                        );
                         if (t != null) {
                           setState(() => _manualStart = t);
                           _emitManual();
@@ -330,7 +345,9 @@ class _SlotPickerState extends ConsumerState<_SlotPicker> {
                     child: InkWell(
                       onTap: () async {
                         final t = await showTimePicker(
-                            context: context, initialTime: _manualEnd);
+                          context: context,
+                          initialTime: _manualEnd,
+                        );
                         if (t != null) {
                           setState(() => _manualEnd = t);
                           _emitManual();
@@ -360,16 +377,18 @@ class _SlotPickerState extends ConsumerState<_SlotPicker> {
         if (effective != selectedId) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             final slot = slots.where((s) => s.id == effective).first;
-            widget.onChanged(_SlotSelection(
-              slotId: slot.id,
-              dayOfWeek: slot.dayOfWeek,
-              startTime: slot.startTime,
-              endTime: slot.endTime,
-            ));
+            widget.onChanged(
+              _SlotSelection(
+                slotId: slot.id,
+                dayOfWeek: slot.dayOfWeek,
+                startTime: slot.startTime,
+                endTime: slot.endTime,
+              ),
+            );
           });
         }
         return DropdownButtonFormField<int>(
-          value: effective,
+          initialValue: effective,
           isExpanded: true,
           decoration: const InputDecoration(
             labelText: 'Créneau *',
@@ -377,24 +396,28 @@ class _SlotPickerState extends ConsumerState<_SlotPicker> {
             isDense: true,
           ),
           items: slots
-              .map((s) => DropdownMenuItem(
-                    value: s.id,
-                    child: Text(
-                      s.displayLabel,
-                      overflow: TextOverflow.ellipsis,
-                      maxLines: 1,
-                    ),
-                  ))
+              .map(
+                (s) => DropdownMenuItem(
+                  value: s.id,
+                  child: Text(
+                    s.displayLabel,
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                  ),
+                ),
+              )
               .toList(),
           onChanged: (id) {
             final slot = slots.where((s) => s.id == id).firstOrNull;
             if (slot != null) {
-              widget.onChanged(_SlotSelection(
-                slotId: slot.id,
-                dayOfWeek: slot.dayOfWeek,
-                startTime: slot.startTime,
-                endTime: slot.endTime,
-              ));
+              widget.onChanged(
+                _SlotSelection(
+                  slotId: slot.id,
+                  dayOfWeek: slot.dayOfWeek,
+                  startTime: slot.startTime,
+                  endTime: slot.endTime,
+                ),
+              );
             }
           },
         );
@@ -403,8 +426,10 @@ class _SlotPickerState extends ConsumerState<_SlotPicker> {
         padding: EdgeInsets.symmetric(vertical: 12),
         child: LinearProgressIndicator(),
       ),
-      error: (e, _) => Text('Erreur créneaux : $e',
-          style: TextStyle(color: Theme.of(context).colorScheme.error)),
+      error: (e, _) => Text(
+        'Erreur créneaux : $e',
+        style: TextStyle(color: Theme.of(context).colorScheme.error),
+      ),
     );
   }
 }
@@ -420,7 +445,7 @@ class _WeekTypeField extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DropdownButtonFormField<String?>(
-      value: value,
+      initialValue: value,
       isExpanded: true,
       decoration: const InputDecoration(
         labelText: 'Semaine',
@@ -490,7 +515,8 @@ class _AddCourseSheetState extends ConsumerState<_AddCourseSheet> {
               startTime: _slot.startTime!,
               endTime: _slot.endTime!,
               weekType: _weekType,
-              room: _roomCtrl.text.trim().isEmpty ? null : _roomCtrl.text.trim(),
+              room:
+                  _roomCtrl.text.trim().isEmpty ? null : _roomCtrl.text.trim(),
               // [Fix-EDT-FORM-DESKTOP] miroir desktop : l'enseignant choisi
               // devient l'enseignant affecté de la matière.
               teacherId: _teacherId,
@@ -503,7 +529,9 @@ class _AddCourseSheetState extends ConsumerState<_AddCourseSheet> {
         );
       }
     } on ScheduleEditException catch (e) {
-      _showError(e.patchRequired ? e.message : 'Échec de l\'ajout : ${e.message}');
+      _showError(
+        e.patchRequired ? e.message : 'Échec de l\'ajout : ${e.message}',
+      );
     } catch (e) {
       _showError('Erreur : $e');
     } finally {
@@ -524,7 +552,11 @@ class _AddCourseSheetState extends ConsumerState<_AddCourseSheet> {
 
     return Padding(
       padding: EdgeInsets.fromLTRB(
-          16, 8, 16, 16 + MediaQuery.of(context).viewInsets.bottom),
+        16,
+        8,
+        16,
+        16 + MediaQuery.of(context).viewInsets.bottom,
+      ),
       child: Form(
         key: _formKey,
         child: SingleChildScrollView(
@@ -532,8 +564,10 @@ class _AddCourseSheetState extends ConsumerState<_AddCourseSheet> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text('Ajouter un cours',
-                  style: Theme.of(context).textTheme.titleLarge),
+              Text(
+                'Ajouter un cours',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
               const SizedBox(height: 16),
 
               // Matière (ClassSubject de la classe) — préselectionne
@@ -548,7 +582,7 @@ class _AddCourseSheetState extends ConsumerState<_AddCourseSheet> {
                     );
                   }
                   return DropdownButtonFormField<int>(
-                    value: _classSubjectId,
+                    initialValue: _classSubjectId,
                     isExpanded: true,
                     decoration: const InputDecoration(
                       labelText: 'Matière *',
@@ -556,13 +590,15 @@ class _AddCourseSheetState extends ConsumerState<_AddCourseSheet> {
                       isDense: true,
                     ),
                     items: list
-                        .map((cs) => DropdownMenuItem(
-                              value: cs.id,
-                              child: Text(
-                                '${cs.subjectName} (coef. ${cs.coefficient})',
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ))
+                        .map(
+                          (cs) => DropdownMenuItem(
+                            value: cs.id,
+                            child: Text(
+                              '${cs.subjectName} (coef. ${cs.coefficient})',
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        )
                         .toList(),
                     onChanged: (v) => setState(() {
                       _classSubjectId = v;
@@ -716,13 +752,13 @@ class _EditCourseSheetState extends ConsumerState<_EditCourseSheet> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Supprimer le cours'),
-        content: Text(
-            'Supprimer « ${e.subjectName ?? 'ce cours'} » '
+        content: Text('Supprimer « ${e.subjectName ?? 'ce cours'} » '
             '(${e.day?.label ?? ''} ${e.startTime}–${e.endTime}) ?'),
         actions: [
           TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('Annuler')),
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Annuler'),
+          ),
           FilledButton.tonal(
             style: FilledButton.styleFrom(
               backgroundColor: Colors.red.shade50,
@@ -764,13 +800,19 @@ class _EditCourseSheetState extends ConsumerState<_EditCourseSheet> {
   Widget build(BuildContext context) {
     return Padding(
       padding: EdgeInsets.fromLTRB(
-          16, 8, 16, 16 + MediaQuery.of(context).viewInsets.bottom),
+        16,
+        8,
+        16,
+        16 + MediaQuery.of(context).viewInsets.bottom,
+      ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text('Modifier le cours',
-              style: Theme.of(context).textTheme.titleLarge),
+          Text(
+            'Modifier le cours',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
           const SizedBox(height: 4),
           Text(
             [
@@ -795,9 +837,10 @@ class _EditCourseSheetState extends ConsumerState<_EditCourseSheet> {
           _SlotPicker(
             selection: _slot ??
                 _SlotSelection(
-                    dayOfWeek: e.dayOfWeek,
-                    startTime: e.startTime,
-                    endTime: e.endTime),
+                  dayOfWeek: e.dayOfWeek,
+                  startTime: e.startTime,
+                  endTime: e.endTime,
+                ),
             onChanged: (s) => setState(() => _slot = s),
           ),
           const SizedBox(height: 12),

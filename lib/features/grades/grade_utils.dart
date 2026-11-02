@@ -14,7 +14,6 @@ library;
 
 import 'package:flutter/material.dart';
 
-
 /// Calcul des mentions et couleurs associées (miroir de grade_service.py).
 class MentionHelper {
   MentionHelper._();
@@ -40,7 +39,8 @@ class MentionHelper {
   }
 
   /// Retourne la couleur de fond (clair) pour un badge de mention.
-  static Color backgroundColor(double? average) => color(average).withOpacity(0.12);
+  static Color backgroundColor(double? average) =>
+      color(average).withValues(alpha: 0.12);
 
   /// Indique si la moyenne est de réussite (≥ 10).
   static bool isPassing(double? average) => average != null && average >= 10;
@@ -91,9 +91,7 @@ class AssessmentTypeInfo {
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is AssessmentTypeInfo &&
-          other.id == id &&
-          other.code == code;
+      other is AssessmentTypeInfo && other.id == id && other.code == code;
 
   @override
   int get hashCode => Object.hash(id, code);

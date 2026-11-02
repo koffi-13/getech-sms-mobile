@@ -52,10 +52,16 @@ void main() {
       // Vérifier que chaque ligne a reçu idempotency_key + device_uuid
       for (final line in request.lines) {
         final data = line['data'] as Map<String, dynamic>;
-        expect(data['idempotency_key'], isNotNull,
-            reason: 'idempotency_key manquante dans ${line['table']}');
-        expect(data['device_uuid'], 'a3f2c1d0-4e5b-4f6a-8c7d-9e0f1a2b3c4d',
-            reason: 'device_uuid manquant dans ${line['table']}');
+        expect(
+          data['idempotency_key'],
+          isNotNull,
+          reason: 'idempotency_key manquante dans ${line['table']}',
+        );
+        expect(
+          data['device_uuid'],
+          'a3f2c1d0-4e5b-4f6a-8c7d-9e0f1a2b3c4d',
+          reason: 'device_uuid manquant dans ${line['table']}',
+        );
       }
     });
 
@@ -88,7 +94,7 @@ void main() {
     });
 
     test('n\'écrase pas une idempotency_key déjà présente', () {
-      final existingKey = '11111111-2222-4333-8444-555555555555';
+      const existingKey = '11111111-2222-4333-8444-555555555555';
       final lines = <Map<String, dynamic>>[
         {
           'line_id': 'l1',
@@ -109,8 +115,11 @@ void main() {
       );
 
       final data = request.lines.first['data'] as Map<String, dynamic>;
-      expect(data['idempotency_key'], existingKey,
-          reason: 'Une idempotency_key déjà présente ne doit pas être écrasée.');
+      expect(
+        data['idempotency_key'],
+        existingKey,
+        reason: 'Une idempotency_key déjà présente ne doit pas être écrasée.',
+      );
     });
 
     test('propage le device_uuid dans toutes les tables', () {
@@ -140,8 +149,11 @@ void main() {
 
       for (final line in request.lines) {
         final data = line['data'] as Map<String, dynamic>;
-        expect(data['device_uuid'], 'test-device-uuid-v4',
-            reason: 'device_uuid manquant dans la table ${line['table']}');
+        expect(
+          data['device_uuid'],
+          'test-device-uuid-v4',
+          reason: 'device_uuid manquant dans la table ${line['table']}',
+        );
       }
     });
 

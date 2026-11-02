@@ -22,6 +22,7 @@ import 'package:collection/collection.dart';
 import 'package:dio/dio.dart';
 import 'package:drift/drift.dart' as d;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:logger/logger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/auth/auth_state.dart';
@@ -31,13 +32,14 @@ import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
 import '../../core/sync/outbox.dart';
-import '../../core/sync/sync_engine.dart'
-    show syncGenerationProvider;
+import '../../core/sync/sync_engine.dart' show syncGenerationProvider;
 import '../../core/utils/formatters.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
 import '../../shared/models/grade_dto.dart';
 import 'grade_utils.dart';
+
+final _log = Logger();
 
 /// Mode de classement (PERIOD = moyenne de la période courante,
 /// SUBJECT = moyenne d'une matière spécifique).
@@ -172,9 +174,16 @@ class GradeController {
     // invalidation best-effort (l'instance regardée par le bas de page
     // porte l'indice de matière, mais la feuille se ferme après
     // enregistrement et l'autoDispose la nettoie).
-    _ref.invalidate(assessmentGradesProvider(
-      (assessmentId: assessmentId, classSubjectId: null, periodId: null),
-    ));
+    _ref.invalidate(
+      assessmentGradesProvider(
+        (
+          assessmentId: assessmentId,
+          classSubjectId: null,
+          periodId: null,
+          classroomId: null,
+        ),
+      ),
+    );
     return const SaveGradesResponse(
       offlineQueued: true,
       savedCount: 0,
@@ -241,7 +250,7 @@ class GradeController {
       rethrow;
     }
     final data = respData is Map
-        ? Map<String, dynamic>.from(respData as Map)
+        ? Map<String, dynamic>.from(respData)
         : <String, dynamic>{};
     final result = SaveGradesResponse.fromJson(data);
 
@@ -250,9 +259,16 @@ class GradeController {
 
     // [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : clé de famille record (voir
     // l'invalidation hors-ligne ci-dessus).
-    _ref.invalidate(assessmentGradesProvider(
-      (assessmentId: assessmentId, classSubjectId: null, periodId: null),
-    ));
+    _ref.invalidate(
+      assessmentGradesProvider(
+        (
+          assessmentId: assessmentId,
+          classSubjectId: null,
+          periodId: null,
+          classroomId: null,
+        ),
+      ),
+    );
     _invalidateAssessmentsFor(assessmentId);
     return result;
   }
@@ -275,13 +291,15 @@ class GradeController {
       final existing = byStudent[e.studentId];
       if (existing == null) continue; // note nouvelle : pas de ligne locale
       await (db.update(db.grades)..where((t) => t.id.equals(existing.id)))
-          .write(GradesCompanion(
-        syncStatus: const d.Value('pending'),
-        proposedValue: d.Value(e.value),
-        proposedIsAbsent: d.Value(e.isAbsent),
-        proposedComments: d.Value(e.comment),
-        isDirty: const d.Value(true),
-      ));
+          .write(
+        GradesCompanion(
+          syncStatus: const d.Value('pending'),
+          proposedValue: d.Value(e.value),
+          proposedIsAbsent: d.Value(e.isAbsent),
+          proposedComments: d.Value(e.comment),
+          isDirty: const d.Value(true),
+        ),
+      );
     }
   }
 
@@ -306,23 +324,23 @@ class GradeController {
       if (gradeId == null) continue;
       final e = sentByStudent[line.studentId];
       final queued = line.action == 'queued';
-      await (db.update(db.grades)..where((t) => t.id.equals(gradeId)))
-          .write(GradesCompanion(
-        syncStatus: queued ? const d.Value('queued') : const d.Value(null),
-        proposedValue:
-            queued ? d.Value(e?.value) : const d.Value(null),
-        proposedIsAbsent:
-            queued ? d.Value(e?.isAbsent ?? false) : const d.Value(null),
-        proposedComments:
-            queued ? d.Value(e?.comment) : const d.Value(null),
-        isDirty: const d.Value(false),
-      ));
+      await (db.update(db.grades)..where((t) => t.id.equals(gradeId))).write(
+        GradesCompanion(
+          syncStatus: queued ? const d.Value('queued') : const d.Value(null),
+          proposedValue: queued ? d.Value(e?.value) : const d.Value(null),
+          proposedIsAbsent:
+              queued ? d.Value(e?.isAbsent ?? false) : const d.Value(null),
+          proposedComments: queued ? d.Value(e?.comment) : const d.Value(null),
+          isDirty: const d.Value(false),
+        ),
+      );
     }
   }
 
   /// Crée une évaluation : `POST /grades/assessments` (RBAC GRADE_EDIT).
   Future<AssessmentDto> createAssessment(
-      AssessmentCreateRequest request) async {
+    AssessmentCreateRequest request,
+  ) async {
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
     final dynamic respData;
@@ -352,14 +370,18 @@ class GradeController {
       rethrow;
     }
     final data = respData is Map
-        ? Map<String, dynamic>.from(respData as Map)
+        ? Map<String, dynamic>.from(respData)
         : <String, dynamic>{};
     final created = AssessmentDto.fromJson(data);
     // Invalide la liste des évaluations pour ce class_subject+period.
-    _ref.invalidate(assessmentsProvider(AssessmentsQuery(
-      classSubjectId: request.classSubjectId,
-      periodId: request.periodId,
-    )));
+    _ref.invalidate(
+      assessmentsProvider(
+        AssessmentsQuery(
+          classSubjectId: request.classSubjectId,
+          periodId: request.periodId,
+        ),
+      ),
+    );
     return created;
   }
 
@@ -370,9 +392,16 @@ class GradeController {
     if (url == null) throw const ApiException('Serveur non configuré');
     await _dio.delete(buildUrl(url, ApiEndpoints.assessment(id)));
     // [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : clé de famille record.
-    _ref.invalidate(assessmentGradesProvider(
-      (assessmentId: id, classSubjectId: null, periodId: null),
-    ));
+    _ref.invalidate(
+      assessmentGradesProvider(
+        (
+          assessmentId: id,
+          classSubjectId: null,
+          periodId: null,
+          classroomId: null,
+        ),
+      ),
+    );
     _invalidateAssessmentsFor(id);
   }
 
@@ -409,10 +438,21 @@ final classroomsForGradesProvider =
   // [Fix-HEARTBEAT-REBUILD] select : le heartbeat émet un nouvel état toutes
   // les 30 s (latence) — watcher l'état entier invalidait ce provider et
   // réinitialisait les sélecteurs de la cascade Notes.
-  final conn = ref.watch(connectionProvider
-      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
+  final conn = ref.watch(
+    connectionProvider.select(
+      (c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      ),
+    ),
+  );
   final auth = ref.watch(authProvider);
   if (!conn.isPaired || conn.serverUrl == null) {
+    return _classroomsForGradesFromLocal(ref, auth);
+  }
+  if (!conn.canReachServer && !conn.isChecking) {
     return _classroomsForGradesFromLocal(ref, auth);
   }
   final dio = ref.watch(dioProvider);
@@ -424,7 +464,9 @@ final classroomsForGradesProvider =
         buildUrl(conn.serverUrl!, ApiEndpoints.classrooms),
         queryParameters: {'per_page': 200},
       );
-      return _parseClassroomList(resp.data);
+      final classrooms = _parseClassroomList(resp.data);
+      await _cacheClassroomsFromDtos(ref, classrooms);
+      return classrooms;
     } on DioException catch (e) {
       final api = (e.error is ApiException)
           ? e.error as ApiException
@@ -447,6 +489,7 @@ final classroomsForGradesProvider =
   try {
     final scope = await ref.watch(teacherScopeProvider.future);
     if (scope.myClassrooms.isNotEmpty) {
+      await _cacheClassroomsFromDtos(ref, scope.myClassrooms);
       return scope.myClassrooms;
     }
   } catch (_) {
@@ -473,41 +516,102 @@ final classroomsForGradesProvider =
     for (final c in head) {
       byId.putIfAbsent(c.id, () => c);
     }
-    return byId.values.toList()..sort((a, b) => a.name.compareTo(b.name));
+    final classrooms = byId.values.toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
+    await _cacheClassroomsFromDtos(ref, classrooms);
+    return classrooms;
   } catch (_) {
     // [Fix-OFFLINE] réseau KO → cache Drift.
     return _classroomsForGradesFromLocal(ref, auth);
   }
 });
 
+Future<void> _cacheClassroomsFromDtos(
+  Ref ref,
+  List<ClassroomDto> classrooms,
+) async {
+  if (classrooms.isEmpty) return;
+  try {
+    final db = ref.read(databaseProvider);
+    final now = DateTime.now();
+    for (final classroom in classrooms) {
+      await db.into(db.classrooms).insertOnConflictUpdate(
+            ClassroomsCompanion.insert(
+              id: d.Value(classroom.id),
+              name: classroom.name,
+              teacherId: classroom.headTeacherId == null
+                  ? const d.Value.absent()
+                  : d.Value(classroom.headTeacherId),
+              capacity: classroom.capacity == 0
+                  ? const d.Value.absent()
+                  : d.Value(classroom.capacity),
+              establishmentId: classroom.establishmentId == null
+                  ? const d.Value.absent()
+                  : d.Value(classroom.establishmentId),
+              headTeacherName: classroom.headTeacherName == null
+                  ? const d.Value.absent()
+                  : d.Value(classroom.headTeacherName),
+              levelName: classroom.levelName == null
+                  ? const d.Value.absent()
+                  : d.Value(classroom.levelName),
+              cycleName: classroom.cycleName == null
+                  ? const d.Value.absent()
+                  : d.Value(classroom.cycleName),
+              cycleId: classroom.cycleId == null
+                  ? const d.Value.absent()
+                  : d.Value(classroom.cycleId),
+              seriesName: classroom.seriesName == null
+                  ? const d.Value.absent()
+                  : d.Value(classroom.seriesName),
+              currentStudentsCount: classroom.currentStudentsCount == null
+                  ? const d.Value.absent()
+                  : d.Value(classroom.currentStudentsCount),
+              isActive: d.Value(classroom.isActive),
+              syncedAt: d.Value(now),
+              isDirty: const d.Value(false),
+              isDeleted: const d.Value(false),
+            ),
+          );
+    }
+  } catch (e) {
+    _log.w('Cache local des classes indisponible : $e');
+  }
+}
+
 /// Classes pour la cascade Notes servies depuis le cache Drift local.
 Future<List<ClassroomDto>> _classroomsForGradesFromLocal(
-    Ref ref, AuthState auth) async {
+  Ref ref,
+  AuthState auth,
+) async {
   try {
     final db = ref.read(databaseProvider);
     final rows = await (db.select(db.classrooms)
-          ..where((t) => t.isDeleted.equals(false)))
+          ..where((t) => t.isDeleted.equals(false))
+          ..where((t) => t.isActive.equals(true)))
         .get();
     var dtos = rows
-        .map((c) => ClassroomDto(
-              id: c.id,
-              name: c.name,
-              headTeacherId: c.teacherId,
-              headTeacherName: c.headTeacherName,
-              levelName: c.levelName,
-              cycleName: c.cycleName,
-              cycleId: c.cycleId,
-              seriesName: c.seriesName,
-              currentStudentsCount: c.currentStudentsCount,
-              maxStudents: c.capacity == 0 ? null : c.capacity,
-            ))
+        .map(
+          (c) => ClassroomDto(
+            id: c.id,
+            name: c.name,
+            headTeacherId: c.teacherId,
+            headTeacherName: c.headTeacherName,
+            levelName: c.levelName,
+            cycleName: c.cycleName,
+            cycleId: c.cycleId,
+            seriesName: c.seriesName,
+            currentStudentsCount: c.currentStudentsCount,
+            maxStudents: c.capacity == 0 ? null : c.capacity,
+          ),
+        )
         .toList();
 
     // Enseignant : restreindre aux classes enseignées (+ EDT) + titularisées.
     final userId = auth.user?.id;
     if (!auth.isAdminOrHeadmaster && userId != null) {
       final csRows = await (db.select(db.classSubjects)
-            ..where((t) => t.teacherId.equals(userId)))
+            ..where((t) => t.teacherId.equals(userId))
+            ..where((t) => t.isDeleted.equals(false)))
           .get();
       // [Fix-EDT-SCOPE] Cours planifiés (weekly_schedules) en plus des
       // matières assignées.
@@ -520,8 +624,9 @@ Future<List<ClassroomDto>> _classroomsForGradesFromLocal(
         ...wsRows.map((r) => r.classroomId),
       };
       dtos = dtos
-          .where((c) =>
-              teachingIds.contains(c.id) || c.headTeacherId == userId)
+          .where(
+            (c) => teachingIds.contains(c.id) || c.headTeacherId == userId,
+          )
           .toList();
     }
     dtos.sort((a, b) => a.name.compareTo(b.name));
@@ -585,10 +690,22 @@ List<ClassroomDto> _parseClassroomList(dynamic data) {
 /// Liste des périodes : `GET /settings/periods`.
 final periodsProvider =
     FutureProvider.autoDispose<List<PeriodDto>>((ref) async {
+  ref.watch(syncGenerationProvider);
   // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
-  final conn = ref.watch(connectionProvider
-      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
+  final conn = ref.watch(
+    connectionProvider.select(
+      (c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      ),
+    ),
+  );
   if (!conn.isPaired || conn.serverUrl == null) {
+    return _periodsFromLocal(ref);
+  }
+  if (!conn.canReachServer && !conn.isChecking) {
     return _periodsFromLocal(ref);
   }
   final dio = ref.watch(dioProvider);
@@ -596,7 +713,9 @@ final periodsProvider =
     final resp = await dio.get(
       buildUrl(conn.serverUrl!, ApiEndpoints.settingsPeriods),
     );
-    return _parsePeriodList(resp.data);
+    final periods = _parsePeriodList(resp.data);
+    await _cachePeriodsFromDtos(ref, periods);
+    return periods;
   } on DioException catch (e) {
     final api = (e.error is ApiException)
         ? e.error as ApiException
@@ -613,9 +732,8 @@ final periodsProvider =
 
 /// Périodes servies depuis le cache Drift local (hors-ligne).
 ///
-/// La table locale `periods` n'a pas de colonne cycle : le filtre par cycle
-/// de [periodsForClassroomProvider] retombe alors sur la liste complète
-/// (comportement prévu — jamais de liste vide bloquante).
+/// Le cycle est conservé dans Drift par le pull de synchronisation et par le
+/// cache de la réponse API, afin de garder le même filtrage en ligne/hors-ligne.
 Future<List<PeriodDto>> _periodsFromLocal(Ref ref) async {
   try {
     final db = ref.read(databaseProvider);
@@ -623,15 +741,19 @@ Future<List<PeriodDto>> _periodsFromLocal(Ref ref) async {
           ..where((t) => t.isDeleted.equals(false)))
         .get();
     return rows
-        .map((p) => PeriodDto(
-              id: p.id,
-              name: p.name,
-              startDate: p.startDate?.toIso8601String().substring(0, 10),
-              endDate: p.endDate?.toIso8601String().substring(0, 10),
-              isActive: p.isActive,
-              schoolYearId: p.schoolYearId,
-              weight: p.weight,
-            ))
+        .map(
+          (p) => PeriodDto(
+            id: p.id,
+            name: p.name,
+            startDate: p.startDate?.toIso8601String().substring(0, 10),
+            endDate: p.endDate?.toIso8601String().substring(0, 10),
+            isActive: p.isActive,
+            cycleId: p.cycleId,
+            cycleName: p.cycleName,
+            schoolYearId: p.schoolYearId,
+            weight: p.weight,
+          ),
+        )
         .toList();
   } catch (_) {
     return const [];
@@ -654,26 +776,64 @@ List<PeriodDto> _parsePeriodList(dynamic data) {
   return const [];
 }
 
+Future<void> _cachePeriodsFromDtos(
+  Ref ref,
+  List<PeriodDto> periods,
+) async {
+  if (periods.isEmpty) return;
+  try {
+    final db = ref.read(databaseProvider);
+    final existing = await (db.select(db.periods)
+          ..where((t) => t.id.isIn(periods.map((p) => p.id))))
+        .get();
+    final existingById = {for (final p in existing) p.id: p};
+    final now = DateTime.now();
+    await db.batch((batch) {
+      for (final period in periods) {
+        final cached = existingById[period.id];
+        batch.insert(
+          db.periods,
+          PeriodsCompanion.insert(
+            id: d.Value(period.id),
+            name: period.name,
+            schoolYearId: d.Value(period.schoolYearId),
+            cycleId: d.Value(period.cycleId ?? cached?.cycleId),
+            cycleName: d.Value(period.cycleName ?? cached?.cycleName),
+            startDate: d.Value(DateFormatter.parse(period.startDate)),
+            endDate: d.Value(DateFormatter.parse(period.endDate)),
+            weight: d.Value(period.weight),
+            isActive: d.Value(period.isActive),
+            syncedAt: d.Value(now),
+            isDirty: const d.Value(false),
+            isDeleted: const d.Value(false),
+          ),
+          mode: d.InsertMode.insertOrReplace,
+        );
+      }
+    });
+  } catch (e) {
+    _log.w('Cache local des périodes indisponible : $e');
+  }
+}
+
 /// Périodes filtrées par le **cycle de la classe sélectionnée** — corrige le
 /// mélange collège/lycée dans le champ « Période ».
 ///
 /// Miroir du desktop (`GradeService.get_periods(session, year, cycle_id)` via
 /// `classroom.level.cycle_id`) : on matche `period.cycle_id ==
 /// classroom.cycle_id` ([Fix-PERIOD-CYCLE] : `cycle_id` est exposé par
-/// `PeriodResponse` et `ClassroomResponse`). Si le filtre ne renvoie rien
-/// (données legacy sans cycle, ou serveur non patché), on retombe sur toutes
-/// les périodes — jamais de liste vide bloquante.
+/// `PeriodResponse` et `ClassroomResponse`). Si le filtre ne renvoie rien,
+/// le sélecteur reste vide plutôt que de proposer une autre période.
 final periodsForClassroomProvider = FutureProvider.autoDispose
     .family<List<PeriodDto>, int>((ref, classroomId) async {
+  ref.watch(syncGenerationProvider);
   final periods = await ref.watch(periodsProvider.future);
   final classrooms = await ref.watch(classroomsForGradesProvider.future);
-  final classroom = classrooms
-      .where((c) => c.id == classroomId)
-      .firstOrNull;
-  if (classroom == null || classroom.cycleId == null) return periods;
-  final filtered =
-      periods.where((p) => p.cycleId == classroom.cycleId).toList();
-  return filtered.isEmpty ? periods : filtered;
+  final classroom = classrooms.where((c) => c.id == classroomId).firstOrNull;
+  if (classroom == null || classroom.cycleId == null) {
+    return const <PeriodDto>[];
+  }
+  return periods.where((p) => p.cycleId == classroom.cycleId).toList();
 });
 
 /// Période active (celle du jour) d'une liste — miroir de
@@ -694,8 +854,10 @@ PeriodDto? activePeriodOf(List<PeriodDto> periods) {
 final assessmentTypesProvider =
     FutureProvider.autoDispose<List<AssessmentTypeInfo>>((ref) async {
   // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
-  final conn = ref.watch(connectionProvider
-      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
+  final conn = ref.watch(
+    connectionProvider
+        .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)),
+  );
   if (!conn.isPaired || conn.serverUrl == null) {
     return CommonAssessmentTypes.defaults;
   }
@@ -716,8 +878,11 @@ final assessmentTypesProvider =
     }
     final types = rawList
         .whereType<Map>()
-        .map((j) => AssessmentTypeInfo.fromJson(
-            Map<String, dynamic>.from(j)))
+        .map(
+          (j) => AssessmentTypeInfo.fromJson(
+            Map<String, dynamic>.from(j),
+          ),
+        )
         .toList();
     return types.isEmpty ? CommonAssessmentTypes.defaults : types;
   } on DioException catch (e) {
@@ -737,9 +902,20 @@ final assessmentTypesProvider =
 final classSubjectsProvider = FutureProvider.autoDispose
     .family<List<ClassSubjectDto>, int>((ref, classroomId) async {
   // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
-  final conn = ref.watch(connectionProvider
-      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
+  final conn = ref.watch(
+    connectionProvider.select(
+      (c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      ),
+    ),
+  );
   if (!conn.isPaired || conn.serverUrl == null) {
+    return _classSubjectsFromLocal(ref, classroomId);
+  }
+  if (!conn.canReachServer && !conn.isChecking) {
     return _classSubjectsFromLocal(ref, classroomId);
   }
   final dio = ref.watch(dioProvider);
@@ -772,36 +948,62 @@ final classSubjectsProvider = FutureProvider.autoDispose
 /// Matières d'une classe servies depuis le cache Drift local
 /// (tables `class_subjects` + `subjects` + `users`).
 Future<List<ClassSubjectDto>> _classSubjectsFromLocal(
-    Ref ref, int classroomId) async {
+  Ref ref,
+  int classroomId,
+) async {
   try {
     final db = ref.read(databaseProvider);
+    final auth = ref.read(authProvider);
     final rows = await (db.select(db.classSubjects)
           ..where((t) => t.classroomId.equals(classroomId))
           ..where((t) => t.isDeleted.equals(false)))
         .get();
     if (rows.isEmpty) return const [];
 
+    final classroom = await (db.select(db.classrooms)
+          ..where((t) => t.id.equals(classroomId))
+          ..where((t) => t.isDeleted.equals(false))
+          ..where((t) => t.isActive.equals(true)))
+        .getSingleOrNull();
+    if (classroom == null) return const [];
+    final userId = auth.user?.id;
+    final scopedRows = auth.isAdminOrHeadmaster
+        ? rows
+        : userId == null
+            ? const <ClassSubject>[]
+            : rows
+                .where(
+                  (row) =>
+                      row.teacherId == userId || classroom.teacherId == userId,
+                )
+                .toList();
+    if (scopedRows.isEmpty) return const [];
+
     final subjects = {
-      for (final s in await db.select(db.subjects).get())
-        s.id: (name: s.name, code: s.code)
+      for (final s in await (db.select(db.subjects)
+            ..where((t) => t.isDeleted.equals(false)))
+          .get())
+        s.id: (name: s.name, code: s.code),
     };
     final users = {
       for (final u in await db.select(db.users).get())
-        u.id: [u.firstName, u.lastName].whereType<String>().join(' ').trim()
+        u.id: [u.firstName, u.lastName].whereType<String>().join(' ').trim(),
     };
 
-    return rows
-        .map((r) => ClassSubjectDto(
-              id: r.id,
-              subjectId: r.subjectId,
-              subjectName: subjects[r.subjectId]?.name ?? '',
-              subjectCode: subjects[r.subjectId]?.code ?? '',
-              coefficient: r.coefficient,
-              assignedTeacherId: r.teacherId,
-              assignedTeacherName:
-                  r.teacherId == null ? null : users[r.teacherId],
-              classroomId: r.classroomId,
-            ))
+    return scopedRows
+        .map(
+          (r) => ClassSubjectDto(
+            id: r.id,
+            subjectId: r.subjectId,
+            subjectName: subjects[r.subjectId]?.name ?? '',
+            subjectCode: subjects[r.subjectId]?.code ?? '',
+            coefficient: r.coefficient,
+            assignedTeacherId: r.teacherId,
+            assignedTeacherName:
+                r.teacherId == null ? null : users[r.teacherId],
+            classroomId: r.classroomId,
+          ),
+        )
         .toList();
   } catch (_) {
     return const [];
@@ -832,9 +1034,20 @@ final assessmentsProvider = FutureProvider.autoDispose
   // (évaluations créées par d'autres, comptes de saisie recalculés).
   ref.watch(syncGenerationProvider);
   // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
-  final conn = ref.watch(connectionProvider
-      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
+  final conn = ref.watch(
+    connectionProvider.select(
+      (c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      ),
+    ),
+  );
   if (!conn.isPaired || conn.serverUrl == null) {
+    return _assessmentsFromLocal(ref, q);
+  }
+  if (!conn.canReachServer && !conn.isChecking) {
     return _assessmentsFromLocal(ref, q);
   }
   final dio = ref.watch(dioProvider);
@@ -883,7 +1096,9 @@ final assessmentsProvider = FutureProvider.autoDispose
 /// Évaluations d'une matière+période servies depuis le cache Drift local
 /// (tables `assessments` + comptage des notes locales).
 Future<List<AssessmentDto>> _assessmentsFromLocal(
-    Ref ref, AssessmentsQuery q) async {
+  Ref ref,
+  AssessmentsQuery q,
+) async {
   try {
     final db = ref.read(databaseProvider);
     final query = db.select(db.assessments)
@@ -908,16 +1123,18 @@ Future<List<AssessmentDto>> _assessmentsFromLocal(
     }
 
     return rows
-        .map((a) => AssessmentDto(
-              id: a.id,
-              name: a.title,
-              maxScore: a.maxScore,
-              coefficient: a.coefficient,
-              dateTaken: a.date?.toIso8601String().substring(0, 10),
-              classSubjectId: a.classSubjectId,
-              periodId: a.periodId,
-              gradesEnteredCount: counts[a.id] ?? 0,
-            ))
+        .map(
+          (a) => AssessmentDto(
+            id: a.id,
+            name: a.title,
+            maxScore: a.maxScore,
+            coefficient: a.coefficient,
+            dateTaken: a.date?.toIso8601String().substring(0, 10),
+            classSubjectId: a.classSubjectId,
+            periodId: a.periodId,
+            gradesEnteredCount: counts[a.id] ?? 0,
+          ),
+        )
         .toList()
       ..sort((a, b) => (b.dateTaken ?? '').compareTo(a.dateTaken ?? ''));
   } catch (_) {
@@ -943,10 +1160,9 @@ List<AssessmentDto> _parseAssessmentList(dynamic data) {
 
 /// Notes d'une évaluation (entrées par élève) — [Offline-First].
 ///
-/// Clé de famille : `(assessmentId, classSubjectId)` — l'indice de
-/// matière, connu de la page (matière sélectionnée), répare à chaud les
-/// évaluations mises en cache avec classSubjectId=0 par les versions
-/// précédentes (serveur sans le patch V10).
+/// Clé de famille : `(assessmentId, classSubjectId, periodId, classroomId)`.
+/// Les indices de contexte connus de la page réparent à chaud les évaluations
+/// mises en cache avec des relations absentes ou obsolètes.
 ///
 /// En ligne : `GET /grades/assessments/{id}/grades` (les marques serveur
 /// `modification_status` sont alors réconciliées dans Drift pour un
@@ -954,60 +1170,93 @@ List<AssessmentDto> _parseAssessmentList(dynamic data) {
 /// Hors-ligne : reconstruction depuis Drift (notes répliquées + marques
 /// queued/rejected) + superposition des soumissions en attente de
 /// l'outbox (notes nouvelles ou propositions pas encore poussées).
-final assessmentGradesProvider = FutureProvider.autoDispose
-    .family<List<GradeEntryDto>,
-        ({int assessmentId, int? classSubjectId, int? periodId})>(
-        (ref, q) async {
-  final assessmentId = q.assessmentId;
-  // [Fix-AUTO-SYNC] V15 : rafraîchissement après chaque synchro utile —
-  // notamment après le push des soumissions hors-ligne (marques
-  // queued/approved renvoyées par le serveur) et le pull des notes
-  // saisies par d'autres.
-  ref.watch(syncGenerationProvider);
-  // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
-  // canReachServer/isChecking ne changent qu'aux transitions d'état.
-  final conn = ref.watch(connectionProvider.select((c) => (
-        isPaired: c.isPaired,
-        serverUrl: c.serverUrl,
-        canReachServer: c.canReachServer,
-        isChecking: c.isChecking,
-      )));
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
-
-  final definitelyOffline = !conn.canReachServer && !conn.isChecking;
-  if (definitelyOffline) {
-    return _gradeEntriesFromLocal(ref, assessmentId,
-        classSubjectIdHint: q.classSubjectId, periodIdHint: q.periodId);
-  }
-
-  final dio = ref.watch(dioProvider);
-  try {
-    final resp = await dio.get(
-      buildUrl(conn.serverUrl!, ApiEndpoints.assessmentGrades(assessmentId)),
+final assessmentGradesProvider = FutureProvider.autoDispose.family<
+    List<GradeEntryDto>,
+    ({int assessmentId, int? classSubjectId, int? periodId, int? classroomId})>(
+  (ref, q) async {
+    final assessmentId = q.assessmentId;
+    // [Fix-AUTO-SYNC] V15 : rafraîchissement après chaque synchro utile —
+    // notamment après le push des soumissions hors-ligne (marques
+    // queued/approved renvoyées par le serveur) et le pull des notes
+    // saisies par d'autres.
+    ref.watch(syncGenerationProvider);
+    // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
+    // canReachServer/isChecking ne changent qu'aux transitions d'état.
+    final conn = ref.watch(
+      connectionProvider.select(
+        (c) => (
+          isPaired: c.isPaired,
+          serverUrl: c.serverUrl,
+          canReachServer: c.canReachServer,
+          isChecking: c.isChecking,
+        ),
+      ),
     );
-    final entries = _parseGradeEntryList(resp.data);
-    // Réconcilie les marques serveur dans Drift (affichage hors-ligne).
-    await _reconcileServerMarks(ref, assessmentId, entries);
-    // [Fix-OFFLINE-GRADES-CACHE] Cache-aside : lignes de notes + élèves
-    // référencés persistés — garantit la chaîne complète hors-ligne
-    // (évaluation → matière → classe → assignations → élèves → notes).
-    await _cacheGradeEntriesFromDtos(ref, assessmentId, entries,
-        classSubjectIdHint: q.classSubjectId);
-    return entries;
-  } on DioException catch (e) {
-    final api = (e.error is ApiException)
-        ? e.error as ApiException
-        : dioErrorToApiException(e);
-    // [Fix-TEACHER-CLASSES-403] 403 → repli local (liste vide silencieuse
-    // auparavant).
-    // Réseau indisponible en cours de requête -> repli local.
-    return _gradeEntriesFromLocal(ref, assessmentId,
-        classSubjectIdHint: q.classSubjectId, periodIdHint: q.periodId);
-  } catch (_) {
-    return _gradeEntriesFromLocal(ref, assessmentId,
-        classSubjectIdHint: q.classSubjectId, periodIdHint: q.periodId);
-  }
-});
+    if (!conn.isPaired || conn.serverUrl == null) {
+      return _gradeEntriesFromLocal(
+        ref,
+        assessmentId,
+        classSubjectIdHint: q.classSubjectId,
+        periodIdHint: q.periodId,
+        classroomIdHint: q.classroomId,
+      );
+    }
+
+    final definitelyOffline = !conn.canReachServer && !conn.isChecking;
+    if (definitelyOffline) {
+      return _gradeEntriesFromLocal(
+        ref,
+        assessmentId,
+        classSubjectIdHint: q.classSubjectId,
+        periodIdHint: q.periodId,
+        classroomIdHint: q.classroomId,
+      );
+    }
+
+    final dio = ref.watch(dioProvider);
+    try {
+      final resp = await dio.get(
+        buildUrl(conn.serverUrl!, ApiEndpoints.assessmentGrades(assessmentId)),
+      );
+      final entries = _parseGradeEntryList(resp.data);
+      // Réconcilie les marques serveur dans Drift (affichage hors-ligne).
+      await _reconcileServerMarks(ref, assessmentId, entries);
+      // [Fix-OFFLINE-GRADES-CACHE] Cache-aside : lignes de notes + élèves
+      // référencés persistés — garantit la chaîne complète hors-ligne
+      // (évaluation → matière → classe → assignations → élèves → notes).
+      await _cacheGradeEntriesFromDtos(
+        ref,
+        assessmentId,
+        entries,
+        classSubjectIdHint: q.classSubjectId,
+        classroomIdHint: q.classroomId,
+      );
+      return entries;
+    } on DioException catch (e) {
+      final api = (e.error is ApiException)
+          ? e.error as ApiException
+          : dioErrorToApiException(e);
+      // [Fix-TEACHER-CLASSES-403] 403 → repli local (liste vide silencieuse
+      // auparavant).
+      // Réseau indisponible en cours de requête -> repli local.
+      return _gradeEntriesFromLocal(
+        ref,
+        assessmentId,
+        classSubjectIdHint: q.classSubjectId,
+        periodIdHint: q.periodId,
+        classroomIdHint: q.classroomId,
+      );
+    } catch (_) {
+      return _gradeEntriesFromLocal(
+        ref,
+        assessmentId,
+        classSubjectIdHint: q.classSubjectId,
+        periodIdHint: q.periodId,
+        classroomIdHint: q.classroomId,
+      );
+    }
+  },
+);
 
 /// Réconcilie les marques serveur (PENDING/APPROVED/REJECTED) dans Drift.
 Future<void> _reconcileServerMarks(
@@ -1077,7 +1326,10 @@ Future<void> _reconcileServerMarks(
 /// matières) issues de `GET /grades/class-subjects` dans Drift — upsert par
 /// id, best-effort, jamais bloquant pour l'affichage en ligne.
 Future<void> _cacheClassSubjectsFromDtos(
-    Ref ref, int classroomId, List<ClassSubjectDto> list) async {
+  Ref ref,
+  int classroomId,
+  List<ClassSubjectDto> list,
+) async {
   if (list.isEmpty) return;
   try {
     final db = ref.read(databaseProvider);
@@ -1087,30 +1339,32 @@ Future<void> _cacheClassSubjectsFromDtos(
         // Matière (carte minimale : le nom sert aux affichages offline).
         if (cs.subjectId != 0 && cs.subjectName.isNotEmpty) {
           b.insert(
-              db.subjects,
-              SubjectsCompanion.insert(
-                id: d.Value(cs.subjectId),
-                name: cs.subjectName,
-                code: d.Value(cs.subjectCode.isEmpty ? null : cs.subjectCode),
-                syncedAt: d.Value(now),
-                isDirty: const d.Value(false),
-                isDeleted: const d.Value(false),
-              ),
-              mode: d.InsertMode.insertOrIgnore);
-        }
-        b.insert(
-            db.classSubjects,
-            ClassSubjectsCompanion.insert(
-              id: d.Value(cs.id),
-              classroomId: cs.classroomId ?? classroomId,
-              subjectId: cs.subjectId,
-              coefficient: d.Value(cs.coefficient),
-              teacherId: d.Value(cs.assignedTeacherId),
+            db.subjects,
+            SubjectsCompanion.insert(
+              id: d.Value(cs.subjectId),
+              name: cs.subjectName,
+              code: d.Value(cs.subjectCode.isEmpty ? null : cs.subjectCode),
               syncedAt: d.Value(now),
               isDirty: const d.Value(false),
               isDeleted: const d.Value(false),
             ),
-            mode: d.InsertMode.insertOrIgnore);
+            mode: d.InsertMode.insertOrIgnore,
+          );
+        }
+        b.insert(
+          db.classSubjects,
+          ClassSubjectsCompanion.insert(
+            id: d.Value(cs.id),
+            classroomId: cs.classroomId ?? classroomId,
+            subjectId: cs.subjectId,
+            coefficient: d.Value(cs.coefficient),
+            teacherId: d.Value(cs.assignedTeacherId),
+            syncedAt: d.Value(now),
+            isDirty: const d.Value(false),
+            isDeleted: const d.Value(false),
+          ),
+          mode: d.InsertMode.insertOrIgnore,
+        );
       }
     });
   } catch (_) {
@@ -1144,23 +1398,24 @@ Future<void> _cacheAssessmentsFromDtos(
     await db.batch((b) {
       for (final a in list) {
         b.insert(
-            db.assessments,
-            AssessmentsCompanion.insert(
-              id: d.Value(a.id),
-              classSubjectId: a.classSubjectId ?? classSubjectId ?? 0,
-              periodId: d.Value(a.periodId ?? periodId),
-              title: a.name,
-              type: d.Value(a.assessmentTypeName.isEmpty
-                  ? 'DEVOIR'
-                  : a.assessmentTypeName),
-              date: d.Value(DateFormatter.parse(a.dateTaken)),
-              maxScore: d.Value(a.maxScore),
-              coefficient: d.Value(a.coefficient),
-              syncedAt: d.Value(now),
-              isDirty: const d.Value(false),
-              isDeleted: const d.Value(false),
+          db.assessments,
+          AssessmentsCompanion.insert(
+            id: d.Value(a.id),
+            classSubjectId: a.classSubjectId ?? classSubjectId ?? 0,
+            periodId: d.Value(a.periodId ?? periodId),
+            title: a.name,
+            type: d.Value(
+              a.assessmentTypeName.isEmpty ? 'DEVOIR' : a.assessmentTypeName,
             ),
-            mode: d.InsertMode.insertOrIgnore);
+            date: d.Value(DateFormatter.parse(a.dateTaken)),
+            maxScore: d.Value(a.maxScore),
+            coefficient: d.Value(a.coefficient),
+            syncedAt: d.Value(now),
+            isDirty: const d.Value(false),
+            isDeleted: const d.Value(false),
+          ),
+          mode: d.InsertMode.insertOrIgnore,
+        );
       }
     });
 
@@ -1173,10 +1428,12 @@ Future<void> _cacheAssessmentsFromDtos(
       await (db.update(db.assessments)
             ..where((t) => t.id.equals(a.id))
             ..where((t) => t.classSubjectId.equals(0)))
-          .write(AssessmentsCompanion(
-        classSubjectId: d.Value(csId),
-        periodId: d.Value(a.periodId ?? periodId),
-      ));
+          .write(
+        AssessmentsCompanion(
+          classSubjectId: d.Value(csId),
+          periodId: d.Value(a.periodId ?? periodId),
+        ),
+      );
     }
   } catch (_) {
     // Best-effort.
@@ -1195,6 +1452,7 @@ Future<void> _cacheGradeEntriesFromDtos(
   int assessmentId,
   List<GradeEntryDto> entries, {
   int? classSubjectIdHint,
+  int? classroomIdHint,
 }) async {
   if (entries.isEmpty) return;
   try {
@@ -1206,16 +1464,17 @@ Future<void> _cacheGradeEntriesFromDtos(
     await db.batch((b) {
       for (final e in entries) {
         b.insert(
-            db.students,
-            StudentsCompanion.insert(
-              id: d.Value(e.studentId),
-              nom: e.studentName.isEmpty ? '—' : e.studentName,
-              matricule: e.studentMatricule,
-              syncedAt: d.Value(now),
-              isDirty: const d.Value(false),
-              isDeleted: const d.Value(false),
-            ),
-            mode: d.InsertMode.insertOrIgnore);
+          db.students,
+          StudentsCompanion.insert(
+            id: d.Value(e.studentId),
+            nom: e.studentName.isEmpty ? '—' : e.studentName,
+            matricule: e.studentMatricule,
+            syncedAt: d.Value(now),
+            isDirty: const d.Value(false),
+            isDeleted: const d.Value(false),
+          ),
+          mode: d.InsertMode.insertOrIgnore,
+        );
       }
     });
 
@@ -1239,11 +1498,12 @@ Future<void> _cacheGradeEntriesFromDtos(
           ? assessmentRow!.classSubjectId
           : classSubjectIdHint;
       if (csId != null && csId != 0) {
-        final classroomId = await (db.selectOnly(db.classSubjects)
-              ..addColumns([db.classSubjects.classroomId])
-              ..where(db.classSubjects.id.equals(csId)))
-            .map((row) => row.read(db.classSubjects.classroomId))
-            .getSingleOrNull();
+        final classroomId = classroomIdHint ??
+            await (db.selectOnly(db.classSubjects)
+                  ..addColumns([db.classSubjects.classroomId])
+                  ..where(db.classSubjects.id.equals(csId)))
+                .map((row) => row.read(db.classSubjects.classroomId))
+                .getSingleOrNull();
         if (classroomId != null) {
           final existing = await (db.select(db.studentClassAssignments)
                 ..where((t) => t.classroomId.equals(classroomId))
@@ -1286,29 +1546,31 @@ Future<void> _cacheGradeEntriesFromDtos(
             ..where((t) => t.id.equals(e.gradeId!)))
           .getSingleOrNull();
       if (existing == null) {
-        await db
-            .into(db.grades)
-            .insert(GradesCompanion.insert(
-              id: d.Value(e.gradeId!),
-              assessmentId: assessmentId,
-              studentId: e.studentId,
-              value: d.Value(e.value),
-              isAbsent: d.Value(e.isAbsent),
-              comments: d.Value(e.comment),
-              syncedAt: d.Value(now),
-              isDirty: const d.Value(false),
-              isDeleted: const d.Value(false),
-            ),
-                mode: d.InsertMode.insertOrIgnore);
+        await db.into(db.grades).insert(
+              GradesCompanion.insert(
+                id: d.Value(e.gradeId!),
+                assessmentId: assessmentId,
+                studentId: e.studentId,
+                value: d.Value(e.value),
+                isAbsent: d.Value(e.isAbsent),
+                comments: d.Value(e.comment),
+                syncedAt: d.Value(now),
+                isDirty: const d.Value(false),
+                isDeleted: const d.Value(false),
+              ),
+              mode: d.InsertMode.insertOrIgnore,
+            );
       } else if (!existing.isDirty && existing.syncStatus == null) {
         // Mise à jour des valeurs serveur sans toucher aux marques.
         await (db.update(db.grades)..where((t) => t.id.equals(e.gradeId!)))
-            .write(GradesCompanion(
-          value: d.Value(e.value),
-          isAbsent: d.Value(e.isAbsent),
-          comments: d.Value(e.comment),
-          syncedAt: d.Value(now),
-        ));
+            .write(
+          GradesCompanion(
+            value: d.Value(e.value),
+            isAbsent: d.Value(e.isAbsent),
+            comments: d.Value(e.comment),
+            syncedAt: d.Value(now),
+          ),
+        );
       }
     }
   } catch (_) {
@@ -1319,27 +1581,27 @@ Future<void> _cacheGradeEntriesFromDtos(
 /// Reconstruction hors-ligne des lignes de notes d'une évaluation :
 /// Drift (notes répliquées + marques) + outbox (soumissions en attente).
 ///
-/// [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : `classSubjectIdHint` (matière
-/// sélectionnée dans la page) répare à chaud les évaluations mises en
-/// cache avec classSubjectId=0 — l'ancienne chaîne cassait dès le
-/// premier maillon (matière introuvable → « Aucun élève à noter »).
+/// Les indices de classe et de matière sélectionnés dans la page prennent
+/// priorité sur des relations Drift absentes ou obsolètes.
 Future<List<GradeEntryDto>> _gradeEntriesFromLocal(
   Ref ref,
   int assessmentId, {
   int? classSubjectIdHint,
   int? periodIdHint,
+  int? classroomIdHint,
 }) async {
   final db = ref.read(databaseProvider);
 
-  // Élèves de la classe de l'évaluation (chaîne Drift : assessment ->
-  // class_subject -> classroom -> assignations actives -> students).
+  // Le contexte explicite de la page prime sur les relations Drift : une
+  // évaluation peut être absente ou liée à une matière obsolète en cache.
   final assessmentRow = await (db.select(db.assessments)
         ..where((t) => t.id.equals(assessmentId)))
       .getSingleOrNull();
-  if (assessmentRow == null) return const [];
-
-  var csId = assessmentRow.classSubjectId;
-  if (csId == 0 && classSubjectIdHint != null && classSubjectIdHint != 0) {
+  var csId = assessmentRow?.classSubjectId ?? 0;
+  if (assessmentRow != null &&
+      csId == 0 &&
+      classSubjectIdHint != null &&
+      classSubjectIdHint != 0) {
     // Ligne empoisonnée par une version précédente (serveur sans le patch
     // V10) : l'indice de la page rétablit le lien matière → classe, et la
     // ligne est guérie en base pour les prochaines consultations (la
@@ -1347,26 +1609,31 @@ Future<List<GradeEntryDto>> _gradeEntriesFromLocal(
     // en dépend).
     csId = classSubjectIdHint;
     try {
-      await (db.update(db.assessments)
-            ..where((t) => t.id.equals(assessmentId)))
-          .write(AssessmentsCompanion(
-        classSubjectId: d.Value(csId),
-        periodId: periodIdHint == null
-            ? const d.Value.absent()
-            : d.Value(assessmentRow.periodId ?? periodIdHint),
-      ));
+      await (db.update(db.assessments)..where((t) => t.id.equals(assessmentId)))
+          .write(
+        AssessmentsCompanion(
+          classSubjectId: d.Value(csId),
+          periodId: periodIdHint == null
+              ? const d.Value.absent()
+              : d.Value(assessmentRow.periodId ?? periodIdHint),
+        ),
+      );
     } catch (_) {
       // Guérison best-effort : la reconstruction continue avec l'indice.
     }
   }
 
-  final classSubject = await (db.select(db.classSubjects)
-        ..where((t) => t.id.equals(csId)))
-      .getSingleOrNull();
-  if (classSubject == null) return const [];
+  int? classroomId = classroomIdHint;
+  if (classroomId == null && csId != 0) {
+    final classSubject = await (db.select(db.classSubjects)
+          ..where((t) => t.id.equals(csId)))
+        .getSingleOrNull();
+    classroomId = classSubject?.classroomId;
+  }
+  if (classroomId == null) return const [];
 
   final assignmentRows = await (db.select(db.studentClassAssignments)
-        ..where((t) => t.classroomId.equals(classSubject.classroomId))
+        ..where((t) => t.classroomId.equals(classroomId!))
         ..where((t) => t.isDeleted.equals(false)))
       .get();
   var studentIds = assignmentRows.map((a) => a.studentId).toSet();
@@ -1386,14 +1653,16 @@ Future<List<GradeEntryDto>> _gradeEntriesFromLocal(
         ..where((t) => t.id.isIn(studentIds))
         ..where((t) => t.isDeleted.equals(false)))
       .get();
-  studentRows.sort((a, b) =>
-      '${a.nom} ${a.prenoms ?? ''}'.compareTo('${b.nom} ${b.prenoms ?? ''}'));
+  studentRows.sort(
+    (a, b) =>
+        '${a.nom} ${a.prenoms ?? ''}'.compareTo('${b.nom} ${b.prenoms ?? ''}'),
+  );
 
   // Notes répliquées + marques.
   final gradeRows = await (db.select(db.grades)
         ..where((t) => t.assessmentId.equals(assessmentId))
         ..where((t) => t.isDeleted.equals(false)))
-        .get();
+      .get();
   final gradeByStudent = {for (final g in gradeRows) g.studentId: g};
 
   // Soumission(s) en attente dans l'outbox pour CETTE évaluation.
@@ -1406,8 +1675,8 @@ Future<List<GradeEntryDto>> _gradeEntriesFromLocal(
       .firstOrNull;
   final pendingByStudent = <int, Map<String, dynamic>>{};
   if (submission != null) {
-    for (final r in ((submission['grades'] as List?) ?? const [])
-        .whereType<Map>()) {
+    for (final r
+        in ((submission['grades'] as List?) ?? const []).whereType<Map>()) {
       final m = Map<String, dynamic>.from(r);
       final sid = (m['student_id'] as num?)?.toInt();
       if (sid != null) pendingByStudent[sid] = m;
@@ -1443,28 +1712,30 @@ Future<List<GradeEntryDto>> _gradeEntriesFromLocal(
       mark = 'REJECTED';
     }
 
-    result.add(GradeEntryDto(
-      studentId: sid,
-      studentName: name,
-      studentMatricule: matricule,
-      gradeId: local?.id,
-      value: value,
-      isAbsent: isAbsent,
-      comment: comment,
-      isLocked: local != null,
-      modificationStatus: mark,
-      modification: (mark != null && local != null)
-          ? GradeModificationBriefDto(
-              id: 0,
-              status: mark,
-              newValue: local.proposedValue,
-              newIsAbsent: local.proposedIsAbsent ?? false,
-              newComments: local.proposedComments,
-              oldValue: local.value,
-            )
-          : null,
-      localSyncMark: pending != null ? 'pending_sync' : null,
-    ));
+    result.add(
+      GradeEntryDto(
+        studentId: sid,
+        studentName: name,
+        studentMatricule: matricule,
+        gradeId: local?.id,
+        value: value,
+        isAbsent: isAbsent,
+        comment: comment,
+        isLocked: local != null,
+        modificationStatus: mark,
+        modification: (mark != null && local != null)
+            ? GradeModificationBriefDto(
+                id: 0,
+                status: mark,
+                newValue: local.proposedValue,
+                newIsAbsent: local.proposedIsAbsent ?? false,
+                newComments: local.proposedComments,
+                oldValue: local.value,
+              )
+            : null,
+        localSyncMark: pending != null ? 'pending_sync' : null,
+      ),
+    );
   }
   return result;
 }
@@ -1504,12 +1775,16 @@ List<GradeEntryDto> _parseGradeEntryList(dynamic data) {
 final rankingProvider = FutureProvider.autoDispose
     .family<List<RankingRowDto>, RankingQuery>((ref, q) async {
   // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
-  final conn = ref.watch(connectionProvider.select((c) => (
+  final conn = ref.watch(
+    connectionProvider.select(
+      (c) => (
         isPaired: c.isPaired,
         serverUrl: c.serverUrl,
         canReachServer: c.canReachServer,
         isChecking: c.isChecking,
-      )));
+      ),
+    ),
+  );
   if (!conn.isPaired || conn.serverUrl == null) {
     return await readRankingCache(q) ?? const <RankingRowDto>[];
   }
@@ -1578,7 +1853,9 @@ String rankingCacheKey(RankingQuery q) =>
 
 /// [Fix-RANKING-OFFLINE] Écrit le classement en cache (best-effort).
 Future<void> writeRankingCache(
-    RankingQuery q, List<RankingRowDto> rows) async {
+  RankingQuery q,
+  List<RankingRowDto> rows,
+) async {
   if (rows.isEmpty) return;
   try {
     final prefs = await SharedPreferences.getInstance();
@@ -1636,8 +1913,10 @@ List<RankingRowDto> _parseRankingList(dynamic data) {
 final bulletinProvider = FutureProvider.autoDispose
     .family<BulletinDto, BulletinQuery>((ref, q) async {
   // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
-  final conn = ref.watch(connectionProvider
-      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
+  final conn = ref.watch(
+    connectionProvider
+        .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)),
+  );
   if (!conn.isPaired || conn.serverUrl == null) {
     throw const ApiException('Serveur non configuré');
   }

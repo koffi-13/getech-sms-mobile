@@ -88,8 +88,10 @@ class TeacherScope {
       mySchedule.map((s) => s.subjectId).whereType<int>().toSet().length;
 
   /// Cours du jour [today] (lundi=1..samedi=6 ; dimanche → aucune ligne).
-  List<WeeklyScheduleDto> coursesForDate(DateTime today,
-      {WeekType? currentWeek}) {
+  List<WeeklyScheduleDto> coursesForDate(
+    DateTime today, {
+    WeekType? currentWeek,
+  }) {
     // ISO weekday : lundi=1 .. dimanche=7 → notre convention 1..6.
     final dow = today.weekday;
     if (dow > 6) return const [];
@@ -103,10 +105,12 @@ class TeacherScope {
 
   /// Prochains créneaux à partir de [from] (heure « HH:mm »), aujourd'hui puis
   /// jours suivants, limité à [limit] éléments.
-  List<WeeklyScheduleDto> upcomingCourses(DateTime from,
-      {WeekType? currentWeek, int limit = 5}) {
-    final all = <WeeklyScheduleDto>[...mySchedule]
-      ..sort((a, b) {
+  List<WeeklyScheduleDto> upcomingCourses(
+    DateTime from, {
+    WeekType? currentWeek,
+    int limit = 5,
+  }) {
+    final all = <WeeklyScheduleDto>[...mySchedule]..sort((a, b) {
         final d = a.dayOfWeek.compareTo(b.dayOfWeek);
         if (d != 0) return d;
         return a.startTime.compareTo(b.startTime);
@@ -115,9 +119,7 @@ class TeacherScope {
     final today = from.weekday;
     final result = <WeeklyScheduleDto>[];
     for (final s in all) {
-      if (currentWeek != null &&
-          !s.isAllWeeks &&
-          s.weekType != currentWeek) {
+      if (currentWeek != null && !s.isAllWeeks && s.weekType != currentWeek) {
         continue;
       }
       if (s.dayOfWeek < today) continue;
@@ -149,8 +151,16 @@ final teacherScopeProvider =
   final auth = ref.watch(authProvider);
   // [Fix-HEARTBEAT-REBUILD] select : le heartbeat émet un nouvel état toutes
   // les 30 s (latence) — ne pas invalider le scope enseignant pour autant.
-  final conn = ref.watch(connectionProvider
-      .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)));
+  final conn = ref.watch(
+    connectionProvider.select(
+      (c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      ),
+    ),
+  );
 
   if (!auth.isAuthenticated || !conn.isPaired || conn.serverUrl == null) {
     return TeacherScope.empty;
@@ -159,6 +169,26 @@ final teacherScopeProvider =
   final isAdmin = auth.isAdminOrHeadmaster;
   if (isAdmin) {
     return const TeacherScope(isAdminOrHeadmaster: true);
+  }
+
+  if (!conn.canReachServer && !conn.isChecking) {
+    final userId = auth.user?.id;
+    final local = await _localTeacherScope(ref, userId);
+    final head = userId == null
+        ? const <ClassroomDto>[]
+        : local.allClassrooms
+            .where((classroom) => classroom.headTeacherId == userId)
+            .toList();
+    return TeacherScope(
+      isTeacher: auth.hasDeclaredTeacherRole ||
+          local.teachingClassrooms.isNotEmpty ||
+          local.mySchedule.isNotEmpty ||
+          head.isNotEmpty,
+      isAdminOrHeadmaster: false,
+      teachingClassrooms: local.teachingClassrooms,
+      headClassrooms: head,
+      mySchedule: local.mySchedule,
+    );
   }
 
   final dio = ref.watch(dioProvider);
@@ -298,7 +328,8 @@ Future<_LocalTeacherScope> _localTeacherScope(Ref ref, int? userId) async {
   final db = ref.read(databaseProvider);
 
   final classrooms = await (db.select(db.classrooms)
-        ..where((t) => t.isDeleted.equals(false)))
+        ..where((t) => t.isDeleted.equals(false))
+        ..where((t) => t.isActive.equals(true)))
       .get();
 
   // [Fix-COUNTS-NULL] Repli de comptage : après une sync pull, la colonne
@@ -309,33 +340,32 @@ Future<_LocalTeacherScope> _localTeacherScope(Ref ref, int? userId) async {
   // Idem quand le serveur a renvoyé 0 (élève sorti compté puis exclus).
   final localCounts = await localActiveStudentCounts(db);
 
-  List<ClassroomDto> all = classrooms
-      .map((c) {
-        final serverCount = c.currentStudentsCount ?? 0;
-        final localCount = localCounts[c.id] ?? 0;
-        final effectiveCount = serverCount > 0 ? serverCount : localCount;
-        return ClassroomDto(
-          id: c.id,
-          name: c.name,
-          // La colonne locale teacherId EST le titulaire (head teacher).
-          headTeacherId: c.teacherId,
-          headTeacherName: c.headTeacherName,
-          levelName: c.levelName,
-          cycleName: c.cycleName,
-          cycleId: c.cycleId,
-          seriesName: c.seriesName,
-          currentStudentsCount: effectiveCount,
-          maxStudents: c.capacity == 0 ? null : c.capacity,
-        );
-      })
-      .toList();
+  final List<ClassroomDto> all = classrooms.map((c) {
+    final serverCount = c.currentStudentsCount ?? 0;
+    final localCount = localCounts[c.id] ?? 0;
+    final effectiveCount = serverCount > 0 ? serverCount : localCount;
+    return ClassroomDto(
+      id: c.id,
+      name: c.name,
+      // La colonne locale teacherId EST le titulaire (head teacher).
+      headTeacherId: c.teacherId,
+      headTeacherName: c.headTeacherName,
+      levelName: c.levelName,
+      cycleName: c.cycleName,
+      cycleId: c.cycleId,
+      seriesName: c.seriesName,
+      currentStudentsCount: effectiveCount,
+      maxStudents: c.capacity == 0 ? null : c.capacity,
+    );
+  }).toList();
 
   List<ClassroomDto> teaching = const [];
   if (userId != null) {
     // [Fix-EDT-SCOPE] Union : matières assignées (class_subjects) + cours
     // planifiés (weekly_schedules, rempli par la synchro de l'EDT).
     final csRows = await (db.select(db.classSubjects)
-          ..where((t) => t.teacherId.equals(userId)))
+          ..where((t) => t.teacherId.equals(userId))
+          ..where((t) => t.isDeleted.equals(false)))
         .get();
     final wsRows = await (db.select(db.weeklySchedules)
           ..where((t) => t.teacherId.equals(userId))
@@ -345,8 +375,7 @@ Future<_LocalTeacherScope> _localTeacherScope(Ref ref, int? userId) async {
       ...csRows.map((r) => r.classroomId),
       ...wsRows.map((r) => r.classroomId),
     };
-    teaching =
-        all.where((c) => teachingIds.contains(c.id)).toList();
+    teaching = all.where((c) => teachingIds.contains(c.id)).toList();
   }
 
   List<WeeklyScheduleDto> schedule = const [];
@@ -359,20 +388,22 @@ Future<_LocalTeacherScope> _localTeacherScope(Ref ref, int? userId) async {
       for (final s in await db.select(db.subjects).get()) s.id: s.name,
     };
     schedule = rows
-        .map((r) => WeeklyScheduleDto(
-              id: r.id,
-              classroomId: r.classroomId,
-              subjectId: r.subjectId,
-              subjectName: subjects[r.subjectId],
-              teacherId: r.teacherId,
-              timeSlotId: r.timeSlotId,
-              dayOfWeek: r.dayOfWeek,
-              startTime: r.startTime ?? '',
-              endTime: r.endTime ?? '',
-              room: r.room,
-              // [Fix-WEEK-ALL] sentinel 'ALL' → null (cours toutes semaines).
-              weekTypeRaw: r.weekType == 'ALL' ? null : r.weekType,
-            ))
+        .map(
+          (r) => WeeklyScheduleDto(
+            id: r.id,
+            classroomId: r.classroomId,
+            subjectId: r.subjectId,
+            subjectName: subjects[r.subjectId],
+            teacherId: r.teacherId,
+            timeSlotId: r.timeSlotId,
+            dayOfWeek: r.dayOfWeek,
+            startTime: r.startTime ?? '',
+            endTime: r.endTime ?? '',
+            room: r.room,
+            // [Fix-WEEK-ALL] sentinel 'ALL' → null (cours toutes semaines).
+            weekTypeRaw: r.weekType == 'ALL' ? null : r.weekType,
+          ),
+        )
         .toList();
   }
 
@@ -447,10 +478,11 @@ List<ClassroomDto> _parseClassroomList(dynamic data) {
 }
 
 Future<List<WeeklyScheduleDto>> _fetchMySchedule(
-    Dio dio, String serverUrl) async {
+  Dio dio,
+  String serverUrl,
+) async {
   try {
-    final resp =
-        await dio.get(buildUrl(serverUrl, ApiEndpoints.scheduleMy));
+    final resp = await dio.get(buildUrl(serverUrl, ApiEndpoints.scheduleMy));
     return _parseScheduleList(resp.data);
   } on DioException catch (e) {
     final api = (e.error is ApiException)
@@ -481,8 +513,9 @@ List<WeeklyScheduleDto> _parseScheduleList(dynamic data) {
     if (items is List) {
       return items
           .whereType<Map>()
-          .map((e) =>
-              WeeklyScheduleDto.fromJson(Map<String, dynamic>.from(e)))
+          .map(
+            (e) => WeeklyScheduleDto.fromJson(Map<String, dynamic>.from(e)),
+          )
           .toList();
     }
   }
@@ -497,7 +530,9 @@ List<WeeklyScheduleDto> _parseScheduleList(dynamic data) {
 /// - le repli hors-ligne du périmètre enseignant (Accueil à 0 sinon) ;
 /// - l'onglet EDT hors-ligne (le contrôleur EDT sert ce même cache).
 Future<void> _persistScheduleToLocal(
-    Ref ref, List<WeeklyScheduleDto> entries) async {
+  Ref ref,
+  List<WeeklyScheduleDto> entries,
+) async {
   try {
     final db = ref.read(databaseProvider);
     await db.batch((batch) {
@@ -534,7 +569,9 @@ Future<void> _persistScheduleToLocal(
 /// déjà renseignés (le cache complet de ClassroomController reste
 /// prioritaire : on ne fait qu'ASSURER la présence de la ligne).
 Future<void> _persistClassroomsToLocal(
-    Ref ref, List<ClassroomDto> classrooms) async {
+  Ref ref,
+  List<ClassroomDto> classrooms,
+) async {
   try {
     final db = ref.read(databaseProvider);
     await db.batch((batch) {
@@ -586,11 +623,15 @@ class WeekTypeHelper {
   /// des semaines alternées (premier lundi de la semaine A).
   static WeekType? weekTypeForDate(DateTime date, DateTime? alternatingStart) {
     if (alternatingStart == null) return null;
-    final deltaDays = date.difference(DateTime(
-      alternatingStart.year,
-      alternatingStart.month,
-      alternatingStart.day,
-    )).inDays;
+    final deltaDays = date
+        .difference(
+          DateTime(
+            alternatingStart.year,
+            alternatingStart.month,
+            alternatingStart.day,
+          ),
+        )
+        .inDays;
     if (deltaDays < 0) return null;
     final weekNumber = deltaDays ~/ 7;
     return weekNumber % 2 == 0 ? WeekType.a : WeekType.b;
@@ -601,9 +642,7 @@ class WeekTypeHelper {
   /// et en déduit la semaine courante.
   static Future<WeekType?> currentWeekType(Ref? ref) async {
     try {
-      final db = ref != null
-          ? ref.read(databaseProvider)
-          : _fallbackDatabase;
+      final db = ref != null ? ref.read(databaseProvider) : _fallbackDatabase;
       if (db == null) return null;
       final years = await db.select(db.schoolYears).get();
       if (years.isEmpty) return null;

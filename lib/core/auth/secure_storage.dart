@@ -9,10 +9,12 @@ import '../config/app_config.dart';
 /// Service de stockage sécurisé (Android Keystore / iOS Keychain).
 class SecureStorage {
   SecureStorage({FlutterSecureStorage? storage})
-      : _storage = storage ?? const FlutterSecureStorage(
-          aOptions: AndroidOptions(encryptedSharedPreferences: true),
-          iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
-        );
+      : _storage = storage ??
+            const FlutterSecureStorage(
+              aOptions: AndroidOptions(encryptedSharedPreferences: true),
+              iOptions:
+                  IOSOptions(accessibility: KeychainAccessibility.first_unlock),
+            );
 
   final FlutterSecureStorage _storage;
 
@@ -29,8 +31,10 @@ class SecureStorage {
 
   Future<String?> getJwtFor(String profileId) =>
       _storage.read(key: profileKey(AppConfig.keyJwt, profileId));
-  Future<void> saveJwtFor(String profileId, String token) =>
-      _storage.write(key: profileKey(AppConfig.keyJwt, profileId), value: token);
+  Future<void> saveJwtFor(String profileId, String token) => _storage.write(
+        key: profileKey(AppConfig.keyJwt, profileId),
+        value: token,
+      );
   Future<void> deleteJwtFor(String profileId) =>
       _storage.delete(key: profileKey(AppConfig.keyJwt, profileId));
 
@@ -38,19 +42,26 @@ class SecureStorage {
       _storage.read(key: profileKey(AppConfig.keyDeviceToken, profileId));
   Future<void> saveDeviceTokenFor(String profileId, String token) =>
       _storage.write(
-          key: profileKey(AppConfig.keyDeviceToken, profileId), value: token);
+        key: profileKey(AppConfig.keyDeviceToken, profileId),
+        value: token,
+      );
 
   Future<({String username, String password})?> getCredentialsFor(
-      String profileId) async {
-    final raw =
-        await _storage.read(key: profileKey(AppConfig.keyCredentials, profileId));
+    String profileId,
+  ) async {
+    final raw = await _storage.read(
+      key: profileKey(AppConfig.keyCredentials, profileId),
+    );
     if (raw == null || !raw.contains(':::')) return null;
     final parts = raw.split(':::');
     return (username: parts[0], password: parts[1]);
   }
 
   Future<void> saveCredentialsFor(
-      String profileId, String username, String password) =>
+    String profileId,
+    String username,
+    String password,
+  ) =>
       _storage.write(
         key: profileKey(AppConfig.keyCredentials, profileId),
         value: '$username:::$password',
@@ -79,7 +90,8 @@ class SecureStorage {
 
   Future<String?> getPairingToken() => getDeviceToken();
   Future<void> savePairingToken(String token) => saveDeviceToken(token);
-  Future<void> deletePairingToken() => _storage.delete(key: AppConfig.keyDeviceToken);
+  Future<void> deletePairingToken() =>
+      _storage.delete(key: AppConfig.keyDeviceToken);
 
   Future<String?> getDeviceId() => _storage.read(key: AppConfig.keyDeviceId);
   Future<void> saveDeviceId(String id) =>
@@ -91,8 +103,10 @@ class SecureStorage {
     return DateTime.tryParse(s);
   }
 
-  Future<void> saveLastSync(DateTime dt) =>
-      _storage.write(key: AppConfig.keyLastSync, value: dt.toUtc().toIso8601String());
+  Future<void> saveLastSync(DateTime dt) => _storage.write(
+        key: AppConfig.keyLastSync,
+        value: dt.toUtc().toIso8601String(),
+      );
 
   /// Efface toutes les données d'authentification (déconnexion / désappairage).
   Future<void> clearAuth() async {

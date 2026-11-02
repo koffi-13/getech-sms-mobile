@@ -98,7 +98,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forFile(String fileName) : super(_openConnection(fileName));
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -159,6 +159,13 @@ class AppDatabase extends _$AppDatabase {
             await addIfMissing(studentAbsences, studentAbsences.idempotencyKey);
             await addIfMissing(studentAbsences, studentAbsences.deviceUuid);
             await addIfMissing(studentAbsences, studentAbsences.syncVersion);
+          }
+          // v4 → v5 : conserve le cycle des périodes et des niveaux pour
+          // reconstruire le filtrage des périodes par classe hors-ligne.
+          if (from < 5) {
+            await m.addColumn(periods, periods.cycleId);
+            await m.addColumn(periods, periods.cycleName);
+            await m.addColumn(levels, levels.cycleId);
           }
         },
         beforeOpen: (details) async {

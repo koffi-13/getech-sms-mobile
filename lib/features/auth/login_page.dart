@@ -46,8 +46,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
   void _ensurePrefilledCode() {
     if (_establishmentCodeCtrl.text.isNotEmpty) return;
     final conn = ref.read(connectionProvider);
-    if (conn.establishmentCode != null &&
-        conn.establishmentCode!.isNotEmpty) {
+    if (conn.establishmentCode != null && conn.establishmentCode!.isNotEmpty) {
       _establishmentCodeCtrl.text = conn.establishmentCode!;
     }
   }
@@ -78,10 +77,9 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     final conn = ref.watch(connectionProvider);
     final theme = Theme.of(context);
 
-    final serverUnreachable =
-        conn.status == ServerStatus.offline ||
-            conn.status == ServerStatus.unpaired ||
-            conn.forceOffline;
+    final serverUnreachable = conn.status == ServerStatus.offline ||
+        conn.status == ServerStatus.unpaired ||
+        conn.forceOffline;
 
     return Scaffold(
       body: SafeArea(
@@ -173,8 +171,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                               textInputAction: TextInputAction.next,
                               decoration: InputDecoration(
                                 labelText: 'Mot de passe',
-                                prefixIcon:
-                                    const Icon(Icons.lock_outline),
+                                prefixIcon: const Icon(Icons.lock_outline),
                                 border: const OutlineInputBorder(),
                                 suffixIcon: IconButton(
                                   tooltip: _obscurePassword
@@ -185,8 +182,9 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                                         ? Icons.visibility_outlined
                                         : Icons.visibility_off_outlined,
                                   ),
-                                  onPressed: () => setState(() =>
-                                      _obscurePassword = !_obscurePassword),
+                                  onPressed: () => setState(
+                                    () => _obscurePassword = !_obscurePassword,
+                                  ),
                                 ),
                               ),
                               validator: (v) => (v == null || v.isEmpty)
@@ -196,8 +194,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                             const SizedBox(height: 14),
                             TextFormField(
                               controller: _establishmentCodeCtrl,
-                              textCapitalization:
-                                  TextCapitalization.characters,
+                              textCapitalization: TextCapitalization.characters,
                               textInputAction: TextInputAction.done,
                               decoration: const InputDecoration(
                                 labelText: 'Code établissement',
@@ -263,9 +260,9 @@ class _UnreachableBanner extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: Colors.orange.withOpacity(0.14),
+        color: Colors.orange.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.orange.withOpacity(0.4)),
+        border: Border.all(color: Colors.orange.withValues(alpha: 0.4)),
       ),
       child: Row(
         children: [
@@ -280,7 +277,10 @@ class _UnreachableBanner extends StatelessWidget {
               ),
             ),
           ),
-          TextButton(onPressed: onManageConnections, child: const Text('Ouvrir')),
+          TextButton(
+            onPressed: onManageConnections,
+            child: const Text('Ouvrir'),
+          ),
         ],
       ),
     );
@@ -298,7 +298,7 @@ class _ErrorBanner extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: theme.colorScheme.errorContainer.withOpacity(0.5),
+        color: theme.colorScheme.errorContainer.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Row(

@@ -74,28 +74,67 @@ class StudentColumns {
   StudentColumns._();
 
   static const List<StudentColumn> all = [
-    StudentColumn(key: 'matricule', label: 'Matricule', group: StudentColumnGroup.identite),
+    StudentColumn(
+      key: 'matricule',
+      label: 'Matricule',
+      group: StudentColumnGroup.identite,
+    ),
     StudentColumn(key: 'nom', label: 'Nom', group: StudentColumnGroup.identite),
-    StudentColumn(key: 'prenoms', label: 'Prénoms', group: StudentColumnGroup.identite),
-    StudentColumn(key: 'sexe', label: 'Sexe', group: StudentColumnGroup.identite),
-    StudentColumn(key: 'dob', label: 'Date de naissance', group: StudentColumnGroup.identite),
+    StudentColumn(
+      key: 'prenoms',
+      label: 'Prénoms',
+      group: StudentColumnGroup.identite,
+    ),
+    StudentColumn(
+      key: 'sexe',
+      label: 'Sexe',
+      group: StudentColumnGroup.identite,
+    ),
+    StudentColumn(
+      key: 'dob',
+      label: 'Date de naissance',
+      group: StudentColumnGroup.identite,
+    ),
     StudentColumn(key: 'age', label: 'Âge', group: StudentColumnGroup.identite),
-    StudentColumn(key: 'classroom', label: 'Classe', group: StudentColumnGroup.scolarite),
-    StudentColumn(key: 'inscription_type', label: 'Type d\'inscription', group: StudentColumnGroup.scolarite),
-    StudentColumn(key: 'student_status', label: 'Statut', group: StudentColumnGroup.scolarite),
+    StudentColumn(
+      key: 'classroom',
+      label: 'Classe',
+      group: StudentColumnGroup.scolarite,
+    ),
+    StudentColumn(
+      key: 'inscription_type',
+      label: 'Type d\'inscription',
+      group: StudentColumnGroup.scolarite,
+    ),
+    StudentColumn(
+      key: 'student_status',
+      label: 'Statut',
+      group: StudentColumnGroup.scolarite,
+    ),
   ];
 
   /// Colonne photo — acceptée uniquement avec `include_photos=true`.
   static const StudentColumn photo = StudentColumn(
-      key: 'photo_path', label: 'Photo', group: StudentColumnGroup.identite);
+    key: 'photo_path',
+    label: 'Photo',
+    group: StudentColumnGroup.identite,
+  );
 
   /// Clés par défaut (toutes) — utilisées si l'utilisateur ne filtre pas.
   static List<String> get defaultKeys => all.map((c) => c.key).toList();
 
   /// Clés réellement acceptées par le serveur (DEFAULT_COLUMNS de students.py).
   static const Set<String> supportedKeys = {
-    'matricule', 'nom', 'prenoms', 'sexe', 'dob', 'classroom',
-    'inscription_type', 'student_status', 'age', 'photo_path',
+    'matricule',
+    'nom',
+    'prenoms',
+    'sexe',
+    'dob',
+    'classroom',
+    'inscription_type',
+    'student_status',
+    'age',
+    'photo_path',
   };
 
   /// Regroupement pour l'affichage.
@@ -152,8 +191,7 @@ class StudentExportConfig {
       StudentExportConfig(
         columns: columns ?? this.columns,
         format: format ?? this.format,
-        classroomId:
-            clearClassroom ? null : (classroomId ?? this.classroomId),
+        classroomId: clearClassroom ? null : (classroomId ?? this.classroomId),
         includePhotos: includePhotos ?? this.includePhotos,
       );
 
@@ -185,7 +223,7 @@ class ImportRowError {
   @override
   String toString() {
     final parts = <String>[];
-    if (row != null) parts.add('Ligne ${row}');
+    if (row != null) parts.add('Ligne $row');
     if (matricule != null) parts.add('matricule=$matricule');
     parts.add(message);
     return parts.join(' · ');
@@ -289,7 +327,8 @@ class StudentImportExportController {
       );
       return await _persistBytes(
         bytes: resp.data ?? const [],
-        filename: _timestampedFilename(prefix: 'getech_modele_eleves', ext: 'xlsx'),
+        filename:
+            _timestampedFilename(prefix: 'getech_modele_eleves', ext: 'xlsx'),
       );
     } on DioException catch (e) {
       throw _wrapDioError(e);
@@ -320,9 +359,8 @@ class StudentImportExportController {
     // Si les photos sont demandées, la colonne photo_path doit faire partie
     // de la sélection (le serveur l'ajoute à DEFAULT_COLUMNS seulement quand
     // include_photos=true).
-    final selectedKeys = config.columns
-        .where(StudentColumns.supportedKeys.contains)
-        .toList();
+    final selectedKeys =
+        config.columns.where(StudentColumns.supportedKeys.contains).toList();
     if (config.includePhotos && !selectedKeys.contains('photo_path')) {
       selectedKeys.add('photo_path');
     }

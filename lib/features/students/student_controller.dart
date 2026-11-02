@@ -76,8 +76,9 @@ class StudentFilter {
         search: search ?? this.search,
         sexe: clearSexe ? null : (sexe ?? this.sexe),
         status: clearStatus ? null : (status ?? this.status),
-        inscriptionType:
-            clearInscriptionType ? null : (inscriptionType ?? this.inscriptionType),
+        inscriptionType: clearInscriptionType
+            ? null
+            : (inscriptionType ?? this.inscriptionType),
       );
 
   @override
@@ -92,19 +93,25 @@ class StudentFilter {
 
   @override
   int get hashCode => Object.hash(
-      classroomId, search, sexe, status, inscriptionType);
+        classroomId,
+        search,
+        sexe,
+        status,
+        inscriptionType,
+      );
 }
 
 // ---------------------------------------------------------------------------
 // Providers
 // ---------------------------------------------------------------------------
 
-final studentControllerProvider =
-    StateNotifierProvider.autoDispose<StudentController, AsyncValue<List<StudentDto>>>((ref) {
+final studentControllerProvider = StateNotifierProvider.autoDispose<
+    StudentController, AsyncValue<List<StudentDto>>>((ref) {
   return StudentController(ref);
 });
 
-final studentFilterProvider = StateProvider<StudentFilter>((ref) => StudentFilter.empty);
+final studentFilterProvider =
+    StateProvider<StudentFilter>((ref) => StudentFilter.empty);
 
 /// Liste filtrée : source unique de la page Élèves et de l'onglet Élèves du
 /// détail de classe (le filtre par classe est le cas d'usage principal).
@@ -144,10 +151,10 @@ List<StudentDto> _applyFilter(List<StudentDto> list, StudentFilter filter) {
     });
 }
 
-final studentDetailProvider = FutureProvider.autoDispose.family<StudentDto, int>((ref, id) async {
+final studentDetailProvider =
+    FutureProvider.autoDispose.family<StudentDto, int>((ref, id) async {
   final repo = ref.read(studentRepositoryProvider);
   return repo.getById(id);
-
 });
 
 // ---------------------------------------------------------------------------
@@ -172,7 +179,7 @@ class StudentController extends StateNotifier<AsyncValue<List<StudentDto>>> {
       final canReach = _ref.read(connectionProvider).canReachServer;
       if (!canReach) {
         if (localStudents.isEmpty) {
-          state = AsyncValue.data(const []);
+          state = const AsyncValue.data([]);
         }
         return;
       }
@@ -254,9 +261,9 @@ class StudentController extends StateNotifier<AsyncValue<List<StudentDto>>> {
         .get();
     final activeYearId = activeYears.isEmpty ? null : activeYears.first.id;
 
-    var assignOn = db.studentClassAssignments.studentId
-            .equalsExp(db.students.id) &
-        db.studentClassAssignments.isDeleted.equals(false);
+    var assignOn =
+        db.studentClassAssignments.studentId.equalsExp(db.students.id) &
+            db.studentClassAssignments.isDeleted.equals(false);
     if (activeYearId != null) {
       assignOn = assignOn &
           (db.studentClassAssignments.schoolYearId.equals(activeYearId) |
@@ -278,37 +285,40 @@ class StudentController extends StateNotifier<AsyncValue<List<StudentDto>>> {
 
     if (rows.isEmpty) return const [];
 
-    final studentIds = rows
-        .map((r) => r.readTable(db.students).id)
-        .toSet();
+    final studentIds = rows.map((r) => r.readTable(db.students).id).toSet();
 
     // Satellites en bulk (pas de N+1) — requêtes typées.
     final contactRows = await (db.select(db.studentContacts)
-          ..where((t) =>
-              t.studentId.isIn(studentIds) & t.isDeleted.equals(false)))
+          ..where(
+            (t) => t.studentId.isIn(studentIds) & t.isDeleted.equals(false),
+          ))
         .get();
     final contacts = <int, StudentContact>{
-      for (final c in contactRows) c.studentId: c
+      for (final c in contactRows) c.studentId: c,
     };
 
     final medicalRows = await (db.select(db.studentMedicals)
-          ..where((t) =>
-              t.studentId.isIn(studentIds) & t.isDeleted.equals(false)))
+          ..where(
+            (t) => t.studentId.isIn(studentIds) & t.isDeleted.equals(false),
+          ))
         .get();
     final medicals = <int, StudentMedical>{
-      for (final m in medicalRows) m.studentId: m
+      for (final m in medicalRows) m.studentId: m,
     };
 
     final scholasticRows = await (db.select(db.studentScholastics)
-          ..where((t) =>
-              t.studentId.isIn(studentIds) & t.isDeleted.equals(false)))
+          ..where(
+            (t) => t.studentId.isIn(studentIds) & t.isDeleted.equals(false),
+          ))
         .get();
     final scholastics = <int, StudentScholastic>{
-      for (final sc in scholasticRows) sc.studentId: sc
+      for (final sc in scholasticRows) sc.studentId: sc,
     };
 
     final parentsRows = await (db.select(db.studentParents)
-          ..where((t) => t.studentId.isIn(studentIds) & t.isDeleted.equals(false)))
+          ..where(
+            (t) => t.studentId.isIn(studentIds) & t.isDeleted.equals(false),
+          ))
         .get();
     final parentsByStudent = <int, List<StudentParentDto>>{};
     for (final p in parentsRows) {
@@ -325,13 +335,17 @@ class StudentController extends StateNotifier<AsyncValue<List<StudentDto>>> {
     }
 
     final guardianLinks = await (db.select(db.studentGuardians)
-          ..where((t) => t.studentId.isIn(studentIds) & t.isDeleted.equals(false)))
+          ..where(
+            (t) => t.studentId.isIn(studentIds) & t.isDeleted.equals(false),
+          ))
         .get();
     final guardianIds = guardianLinks.map((g) => g.guardianId).toSet();
     final guardiansRows = guardianIds.isEmpty
         ? const <Guardian>[]
         : await (db.select(db.guardians)
-              ..where((t) => t.id.isIn(guardianIds) & t.isDeleted.equals(false)))
+              ..where(
+                (t) => t.id.isIn(guardianIds) & t.isDeleted.equals(false),
+              ))
             .get();
     final guardiansById = {for (final g in guardiansRows) g.id: g};
     final guardiansByStudent = <int, List<GuardianDto>>{};
@@ -416,7 +430,6 @@ class StudentController extends StateNotifier<AsyncValue<List<StudentDto>>> {
   Future<void> _saveToLocal(List<StudentDto> students) =>
       saveStudentsToLocal(_ref, students);
 
-
   /// [Fix-STUDENT-DUP] Déduplication best-effort : les lignes locales
   /// temporaires (id négatif) dont le matricule correspond à un élève du
   /// serveur sont supprimées, SAUF si une entrée outbox les référençant
@@ -475,168 +488,178 @@ class StudentController extends StateNotifier<AsyncValue<List<StudentDto>>> {
       _log.w('Déduplication élèves locale ignorée : $e');
     }
   }
-
 }
 
 Future<void> saveStudentsToLocal(Ref ref, List<StudentDto> students) async {
   final db = ref.read(databaseProvider);
   await db.batch((batch) {
-      for (final s in students) {
+    for (final s in students) {
+      batch.insert(
+        db.students,
+        StudentsCompanion.insert(
+          id: d.Value(s.id),
+          nom: s.nom ?? '',
+          prenoms: d.Value(s.prenoms),
+          matricule: s.matricule,
+          dob: d.Value(s.dob),
+          sexe: d.Value(s.sexe?.code),
+          birthPlace: d.Value(s.birthPlace),
+          birthPrefecture: d.Value(s.birthPrefecture),
+          birthRegion: d.Value(s.birthRegion),
+          birthCountry: d.Value(s.birthCountry),
+          photoPath: d.Value(s.photoPath),
+          groupe: d.Value(s.groupe),
+          establishmentId: d.Value(s.establishmentId),
+          isDirty: const d.Value(false),
+        ),
+        mode: d.InsertMode.insertOrReplace,
+      );
+
+      // Assignation classe/année avec CODES (fix : les labels ne
+      // survivaient pas au round-trip `fromCode`).
+      batch.deleteWhere(
+        db.studentClassAssignments,
+        (t) => t.studentId.equals(s.id) & t.isDirty.equals(false),
+      );
+      if (s.classroomId != null) {
         batch.insert(
-          db.students,
-          StudentsCompanion.insert(
-            id: d.Value(s.id),
-            nom: s.nom ?? '',
-            prenoms: d.Value(s.prenoms),
-            matricule: s.matricule,
-            dob: d.Value(s.dob),
-            sexe: d.Value(s.sexe?.code),
-            birthPlace: d.Value(s.birthPlace),
-            birthPrefecture: d.Value(s.birthPrefecture),
-            birthRegion: d.Value(s.birthRegion),
-            birthCountry: d.Value(s.birthCountry),
-            photoPath: d.Value(s.photoPath),
-            groupe: d.Value(s.groupe),
-            establishmentId: d.Value(s.establishmentId),
-            isDirty: const d.Value(false),
+          db.studentClassAssignments,
+          StudentClassAssignmentsCompanion.insert(
+            studentId: s.id,
+            classroomId: s.classroomId!,
+            status: d.Value(s.status?.code),
+            inscriptionType: d.Value(s.inscriptionType?.code),
           ),
-          mode: d.InsertMode.insertOrReplace,
         );
+      }
 
-        // Assignation classe/année avec CODES (fix : les labels ne
-        // survivaient pas au round-trip `fromCode`).
+      // Contact (1-1).
+      _upsertContact(db, batch, s);
+
+      // Médical (1-1).
+      if (s.medical != null) {
         batch.deleteWhere(
-            db.studentClassAssignments,
-            (t) => t.studentId.equals(s.id) & t.isDirty.equals(false));
-        if (s.classroomId != null) {
+          db.studentMedicals,
+          (t) => t.studentId.equals(s.id) & t.isDirty.equals(false),
+        );
+        batch.insert(
+          db.studentMedicals,
+          StudentMedicalsCompanion.insert(
+            studentId: s.id,
+            bloodType: d.Value(_bloodTypeToCode(s.medical!.bloodType)),
+            allergies: d.Value(s.medical!.allergies),
+            doctor: d.Value(s.medical!.doctor),
+          ),
+        );
+      }
+
+      // Scolarité (1-1).
+      if (s.scholastic != null) {
+        batch.deleteWhere(
+          db.studentScholastics,
+          (t) => t.studentId.equals(s.id) & t.isDirty.equals(false),
+        );
+        batch.insert(
+          db.studentScholastics,
+          StudentScholasticsCompanion.insert(
+            studentId: s.id,
+            previousSchool: d.Value(s.scholastic!.previousSchool),
+            transport: d.Value(s.scholastic!.transport),
+          ),
+        );
+      }
+
+      // Parents.
+      batch.deleteWhere(
+        db.studentParents,
+        (t) => t.studentId.equals(s.id) & t.isDirty.equals(false),
+      );
+      for (final p in s.parents) {
+        batch.insert(
+          db.studentParents,
+          StudentParentsCompanion.insert(
+            studentId: s.id,
+            role: p.role,
+            nom: d.Value(p.nom),
+            prenoms: d.Value(p.prenoms),
+            phone: d.Value(p.phone),
+            profession: d.Value(p.profession),
+          ),
+        );
+      }
+
+      // Tuteurs (N-N via guardians + student_guardians).
+      batch.deleteWhere(
+        db.studentGuardians,
+        (t) => t.studentId.equals(s.id) & t.isDirty.equals(false),
+      );
+      for (final g in s.guardians) {
+        if (g.id != null && g.id! > 0) {
           batch.insert(
-            db.studentClassAssignments,
-            StudentClassAssignmentsCompanion.insert(
+            db.guardians,
+            GuardiansCompanion.insert(
+              id: d.Value(g.id!),
+              nom: d.Value(g.nom),
+              prenoms: d.Value(g.prenoms),
+              phone: d.Value(g.phone),
+              email: d.Value(g.email),
+              relation: d.Value(g.relation),
+            ),
+            mode: d.InsertMode.insertOrReplace,
+          );
+          batch.insert(
+            db.studentGuardians,
+            StudentGuardiansCompanion.insert(
               studentId: s.id,
-              classroomId: s.classroomId!,
-              status: d.Value(s.status?.code),
-              inscriptionType: d.Value(s.inscriptionType?.code),
+              guardianId: g.id!,
             ),
           );
-        }
-
-        // Contact (1-1).
-        _upsertContact(db, batch, s);
-
-        // Médical (1-1).
-        if (s.medical != null) {
-          batch.deleteWhere(db.studentMedicals,
-              (t) => t.studentId.equals(s.id) & t.isDirty.equals(false));
+        } else {
+          // Tuteur créé localement (pas encore d'id serveur).
+          final localId = -DateTime.now().millisecondsSinceEpoch;
           batch.insert(
-            db.studentMedicals,
-            StudentMedicalsCompanion.insert(
+            db.guardians,
+            GuardiansCompanion.insert(
+              id: d.Value(localId),
+              nom: d.Value(g.nom),
+              prenoms: d.Value(g.prenoms),
+              phone: d.Value(g.phone),
+              email: d.Value(g.email),
+              relation: d.Value(g.relation),
+            ),
+            mode: d.InsertMode.insertOrReplace,
+          );
+          batch.insert(
+            db.studentGuardians,
+            StudentGuardiansCompanion.insert(
               studentId: s.id,
-              bloodType: d.Value(_bloodTypeToCode(s.medical!.bloodType)),
-              allergies: d.Value(s.medical!.allergies),
-              doctor: d.Value(s.medical!.doctor),
+              guardianId: localId,
             ),
           );
-        }
-
-        // Scolarité (1-1).
-        if (s.scholastic != null) {
-          batch.deleteWhere(db.studentScholastics,
-              (t) => t.studentId.equals(s.id) & t.isDirty.equals(false));
-          batch.insert(
-            db.studentScholastics,
-            StudentScholasticsCompanion.insert(
-              studentId: s.id,
-              previousSchool: d.Value(s.scholastic!.previousSchool),
-              transport: d.Value(s.scholastic!.transport),
-            ),
-          );
-        }
-
-        // Parents.
-        batch.deleteWhere(db.studentParents,
-            (t) => t.studentId.equals(s.id) & t.isDirty.equals(false));
-        for (final p in s.parents) {
-          batch.insert(
-            db.studentParents,
-            StudentParentsCompanion.insert(
-              studentId: s.id,
-              role: p.role,
-              nom: d.Value(p.nom),
-              prenoms: d.Value(p.prenoms),
-              phone: d.Value(p.phone),
-              profession: d.Value(p.profession),
-            ),
-          );
-        }
-
-        // Tuteurs (N-N via guardians + student_guardians).
-        batch.deleteWhere(db.studentGuardians,
-            (t) => t.studentId.equals(s.id) & t.isDirty.equals(false));
-        for (final g in s.guardians) {
-          if (g.id != null && g.id! > 0) {
-            batch.insert(
-              db.guardians,
-              GuardiansCompanion.insert(
-                id: d.Value(g.id!),
-                nom: d.Value(g.nom),
-                prenoms: d.Value(g.prenoms),
-                phone: d.Value(g.phone),
-                email: d.Value(g.email),
-                relation: d.Value(g.relation),
-              ),
-              mode: d.InsertMode.insertOrReplace,
-            );
-            batch.insert(
-              db.studentGuardians,
-              StudentGuardiansCompanion.insert(
-                studentId: s.id,
-                guardianId: g.id!,
-              ),
-            );
-          } else {
-            // Tuteur créé localement (pas encore d'id serveur).
-            final localId = -DateTime.now().millisecondsSinceEpoch;
-            batch.insert(
-              db.guardians,
-              GuardiansCompanion.insert(
-                id: d.Value(localId),
-                nom: d.Value(g.nom),
-                prenoms: d.Value(g.prenoms),
-                phone: d.Value(g.phone),
-                email: d.Value(g.email),
-                relation: d.Value(g.relation),
-              ),
-              mode: d.InsertMode.insertOrReplace,
-            );
-            batch.insert(
-              db.studentGuardians,
-              StudentGuardiansCompanion.insert(
-                studentId: s.id,
-                guardianId: localId,
-              ),
-            );
-          }
         }
       }
-    });
-  }
+    }
+  });
+}
 
-  void _upsertContact(AppDatabase db, d.Batch batch, StudentDto s) {
-    final c = s.contact;
-    if (c == null) return;
-    batch.deleteWhere(db.studentContacts,
-        (t) => t.studentId.equals(s.id) & t.isDirty.equals(false));
-    batch.insert(
-      db.studentContacts,
-      StudentContactsCompanion.insert(
-        studentId: s.id,
-        phone: d.Value(c.phone),
-        email: d.Value(c.email),
-        address: d.Value(c.address),
-        city: d.Value(c.city),
-      ),
-    );
-  }
+void _upsertContact(AppDatabase db, d.Batch batch, StudentDto s) {
+  final c = s.contact;
+  if (c == null) return;
+  batch.deleteWhere(
+    db.studentContacts,
+    (t) => t.studentId.equals(s.id) & t.isDirty.equals(false),
+  );
+  batch.insert(
+    db.studentContacts,
+    StudentContactsCompanion.insert(
+      studentId: s.id,
+      phone: d.Value(c.phone),
+      email: d.Value(c.email),
+      address: d.Value(c.address),
+      city: d.Value(c.city),
+    ),
+  );
+}
 
 /// Mapping groupe sanguin : la table Drift stocke un code texte
 /// (« A+ », « O- », …) alors que le DTO expose l'enum [BloodType].
@@ -677,7 +700,8 @@ class StudentRepository {
         );
         if (response.data is Map) {
           remote = StudentDto.fromJson(
-              Map<String, dynamic>.from(response.data as Map));
+            Map<String, dynamic>.from(response.data as Map),
+          );
         }
       } catch (e) {
         _log.w('getById($id) API échec, repli local : $e');
@@ -705,8 +729,7 @@ class StudentRepository {
       classroomName: remote.classroomName ?? local.classroomName,
       inscriptionTypeLabel:
           remote.inscriptionTypeLabel ?? local.inscriptionTypeLabel,
-      studentStatusLabel:
-          remote.studentStatusLabel ?? local.studentStatusLabel,
+      studentStatusLabel: remote.studentStatusLabel ?? local.studentStatusLabel,
       age: remote.age ?? local.age,
       photoPath: remote.photoPath ?? local.photoPath,
       birthPlace: remote.birthPlace ?? local.birthPlace,
@@ -736,8 +759,9 @@ class StudentRepository {
 
     // Assignation active la plus récente.
     final assigns = await (db.select(db.studentClassAssignments)
-          ..where((t) =>
-              t.studentId.equals(id) & t.isDeleted.equals(false))
+          ..where(
+            (t) => t.studentId.equals(id) & t.isDeleted.equals(false),
+          )
           ..orderBy([(t) => d.OrderingTerm.desc(t.id)])
           ..limit(1))
         .get();
@@ -773,14 +797,16 @@ class StudentRepository {
           .get();
       if (g.isNotEmpty) {
         final gg = g.first;
-        guardians.add(GuardianDto(
-          id: gg.id,
-          nom: gg.nom,
-          prenoms: gg.prenoms,
-          phone: gg.phone,
-          email: gg.email,
-          relation: gg.relation,
-        ));
+        guardians.add(
+          GuardianDto(
+            id: gg.id,
+            nom: gg.nom,
+            prenoms: gg.prenoms,
+            phone: gg.phone,
+            email: gg.email,
+            relation: gg.relation,
+          ),
+        );
       }
     }
 
@@ -830,14 +856,16 @@ class StudentRepository {
               transport: scholastics.first.transport,
             ),
       parents: parents
-          .map((p) => StudentParentDto(
-                id: p.id,
-                role: p.role,
-                nom: p.nom,
-                prenoms: p.prenoms,
-                phone: p.phone,
-                profession: p.profession,
-              ))
+          .map(
+            (p) => StudentParentDto(
+              id: p.id,
+              role: p.role,
+              nom: p.nom,
+              prenoms: p.prenoms,
+              phone: p.phone,
+              profession: p.profession,
+            ),
+          )
           .toList(),
       guardians: guardians,
     );
@@ -866,22 +894,24 @@ class StudentRepository {
     final localId = -DateTime.now().millisecondsSinceEpoch;
 
     await db.transaction(() async {
-      await db.into(db.students).insert(StudentsCompanion.insert(
-            id: d.Value(localId),
-            nom: req.nom,
-            prenoms: d.Value(req.prenoms),
-            matricule: req.matricule,
-            dob: d.Value(req.dob),
-            sexe: d.Value(req.sexe?.code),
-            birthPlace: d.Value(req.birthPlace),
-            birthPrefecture: d.Value(req.birthPrefecture),
-            birthRegion: d.Value(req.birthRegion),
-            birthCountry: d.Value(req.birthCountry),
-            groupe: d.Value(req.groupe),
-            establishmentId: d.Value(req.establishmentId),
-            photoPath: d.Value(req.photoPath),
-            isDirty: d.Value(!canReach),
-          ));
+      await db.into(db.students).insert(
+            StudentsCompanion.insert(
+              id: d.Value(localId),
+              nom: req.nom,
+              prenoms: d.Value(req.prenoms),
+              matricule: req.matricule,
+              dob: d.Value(req.dob),
+              sexe: d.Value(req.sexe?.code),
+              birthPlace: d.Value(req.birthPlace),
+              birthPrefecture: d.Value(req.birthPrefecture),
+              birthRegion: d.Value(req.birthRegion),
+              birthCountry: d.Value(req.birthCountry),
+              groupe: d.Value(req.groupe),
+              establishmentId: d.Value(req.establishmentId),
+              photoPath: d.Value(req.photoPath),
+              isDirty: d.Value(!canReach),
+            ),
+          );
 
       if (req.classroomId != null) {
         await db.into(db.studentClassAssignments).insert(
@@ -943,15 +973,17 @@ class StudentRepository {
       }
       for (final g in req.guardians) {
         final guardianLocalId = -DateTime.now().millisecondsSinceEpoch;
-        await db.into(db.guardians).insert(GuardiansCompanion.insert(
-              id: d.Value(guardianLocalId),
-              nom: d.Value(g.nom),
-              prenoms: d.Value(g.prenoms),
-              phone: d.Value(g.phone),
-              email: d.Value(g.email),
-              relation: d.Value(g.relation),
-              isDirty: const d.Value(true),
-            ));
+        await db.into(db.guardians).insert(
+              GuardiansCompanion.insert(
+                id: d.Value(guardianLocalId),
+                nom: d.Value(g.nom),
+                prenoms: d.Value(g.prenoms),
+                phone: d.Value(g.phone),
+                email: d.Value(g.email),
+                relation: d.Value(g.relation),
+                isDirty: const d.Value(true),
+              ),
+            );
         await db.into(db.studentGuardians).insert(
               StudentGuardiansCompanion.insert(
                 studentId: localId,
@@ -972,7 +1004,8 @@ class StudentRepository {
         );
         if (response.data is Map) {
           final serverDto = StudentDto.fromJson(
-              Map<String, dynamic>.from(response.data as Map));
+            Map<String, dynamic>.from(response.data as Map),
+          );
           // [Fix-STUDENT-DUP] Réconcilie la ligne temporaire (id négatif)
           // avec l'élève serveur : sans cela les DEUX lignes coexistaient
           // après le prochain pull → doublon de même matricule.
@@ -1180,13 +1213,17 @@ class StudentRepository {
     }
   }
 
-  Future<void> _queueForSync(String method, int entityId, Map<String, dynamic>? data) async {
+  Future<void> _queueForSync(
+    String method,
+    int entityId,
+    Map<String, dynamic>? data,
+  ) async {
     await _ref.read(outboxProvider).enqueue(
-      table: 'students',
-      operation: method,
-      recordId: entityId,
-      payload: data ?? {},
-    );
+          table: 'students',
+          operation: method,
+          recordId: entityId,
+          payload: data ?? {},
+        );
   }
 
   /// [Fix-STUDENT-DUP] Réconcilie une création locale (id négatif) avec la
@@ -1220,7 +1257,6 @@ class StudentRepository {
     });
     await saveStudentsToLocal(_ref, [server]);
   }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1320,11 +1356,13 @@ class StudentCreateRequest {
         'status': status?.code,
         'inscription_type': inscriptionType?.code,
         'contact': contact?.toJson(),
-        'medical': medical == null ? null : {
-            'blood_type': _bloodTypeToCode(medical!.bloodType),
-            'allergies': medical!.allergies,
-            'doctor': medical!.doctor,
-          },
+        'medical': medical == null
+            ? null
+            : {
+                'blood_type': _bloodTypeToCode(medical!.bloodType),
+                'allergies': medical!.allergies,
+                'doctor': medical!.doctor,
+              },
         'scholastic': scholastic?.toJson(),
         'parents': parents.map((e) => e.toJson()).toList(),
         'guardians': guardians.map((e) => e.toJson()).toList(),
@@ -1418,11 +1456,13 @@ class StudentUpdateRequest {
         'status': status?.code,
         'inscription_type': inscriptionType?.code,
         'contact': contact?.toJson(),
-        'medical': medical == null ? null : {
-            'blood_type': _bloodTypeToCode(medical!.bloodType),
-            'allergies': medical!.allergies,
-            'doctor': medical!.doctor,
-          },
+        'medical': medical == null
+            ? null
+            : {
+                'blood_type': _bloodTypeToCode(medical!.bloodType),
+                'allergies': medical!.allergies,
+                'doctor': medical!.doctor,
+              },
         'scholastic': scholastic?.toJson(),
         'parents': parents?.map((e) => e.toJson()).toList(),
         'guardians': guardians?.map((e) => e.toJson()).toList(),

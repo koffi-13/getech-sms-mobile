@@ -23,6 +23,9 @@ final log_pkg.Logger _log = log_pkg.Logger(
   level: log_pkg.Level.debug,
 );
 
+const _mobileCacheVersionKey = '__mobile_cache_version__';
+const _mobileCacheVersion = 3;
+
 // ---------------------------------------------------------------------------
 // Helpers de lecture JSON (le serveur utilise du snake_case).
 // ---------------------------------------------------------------------------
@@ -42,8 +45,7 @@ int? _rIntN(Map<String, dynamic> r, String k) => (r[k] as num?)?.toInt();
 double _rDbl(Map<String, dynamic> r, String k, {double d = 0.0}) =>
     (r[k] as num?)?.toDouble() ?? d;
 
-double? _rDblN(Map<String, dynamic> r, String k) =>
-    (r[k] as num?)?.toDouble();
+double? _rDblN(Map<String, dynamic> r, String k) => (r[k] as num?)?.toDouble();
 
 bool _rBool(Map<String, dynamic> r, String k, {bool d = false}) =>
     (r[k] as bool?) ?? d;
@@ -108,14 +110,17 @@ class SyncProgressNotifier extends StateNotifier<SyncProgress> {
   SyncProgressNotifier() : super(const SyncProgress());
 
   void update(SyncStatus status, double progress, String message) {
-    state = state.copyWith(status: status, progress: progress, message: message);
+    state =
+        state.copyWith(status: status, progress: progress, message: message);
   }
 
   void complete(SyncResult result) {
     state = state.copyWith(
       status: result.isSuccess ? SyncStatus.success : SyncStatus.error,
       progress: 1.0,
-      message: result.isSuccess ? 'Synchronisation réussie' : 'Erreur de synchronisation',
+      message: result.isSuccess
+          ? 'Synchronisation réussie'
+          : 'Erreur de synchronisation',
       lastResult: result,
     );
   }
@@ -125,7 +130,8 @@ class SyncProgressNotifier extends StateNotifier<SyncProgress> {
   }
 }
 
-final syncProgressProvider = StateNotifierProvider<SyncProgressNotifier, SyncProgress>((ref) {
+final syncProgressProvider =
+    StateNotifierProvider<SyncProgressNotifier, SyncProgress>((ref) {
   return SyncProgressNotifier();
 });
 
@@ -200,7 +206,11 @@ class SyncEngine {
       return res;
     }
 
-    notifier.update(SyncStatus.pushing, 0.4, 'Envoi des modifications locales...');
+    notifier.update(
+      SyncStatus.pushing,
+      0.4,
+      'Envoi des modifications locales...',
+    );
     final pushResult = await push();
     pushed += pushResult.pushed;
     errors.addAll(pushResult.errors);
@@ -240,7 +250,14 @@ class SyncEngine {
     }
 
     final dio = _ref.read(dioProvider);
-    final since = conn.lastSyncAt ?? DateTime(2000, 1, 1);
+    final cacheVersion = await (_db.select(_db.syncMetadata)
+          ..where(
+            (t) => t.tableNameColumn.equals(_mobileCacheVersionKey),
+          ))
+        .getSingleOrNull();
+    final since = cacheVersion?.lastCount == _mobileCacheVersion
+        ? cacheVersion!.lastSyncedAt ?? DateTime(2000, 1, 1)
+        : DateTime(2000, 1, 1);
     final url = buildUrl(conn.serverUrl!, ApiEndpoints.syncPull);
 
     try {
@@ -284,10 +301,27 @@ class SyncEngine {
         final notifier = _ref.read(syncProgressProvider.notifier);
         final total = pullResp.changes.length + 1;
         var processed = 0;
-        for (final entry in pullResp.changes.entries) {
+        final entries = pullResp.changes.entries.toList()
+          ..sort((left, right) {
+            final leftPriority = left.key == 'levels'
+                ? 0
+                : left.key == 'classrooms'
+                    ? 2
+                    : 1;
+            final rightPriority = right.key == 'levels'
+                ? 0
+                : right.key == 'classrooms'
+                    ? 2
+                    : 1;
+            return leftPriority.compareTo(rightPriority);
+          });
+        for (final entry in entries) {
           processed++;
-          notifier.update(SyncStatus.processing,
-              0.1 + (0.3 * (processed / total)), 'Traitement de ${entry.key}...');
+          notifier.update(
+            SyncStatus.processing,
+            0.1 + (0.3 * (processed / total)),
+            'Traitement de ${entry.key}...',
+          );
           // [Fix-SYNC-FAIL-SOFT] V11 — une table en échec n'ABORTE PLUS le
           // pull entier : l'ancien rethrow laissait le cache Drift vide
           // dès qu'UNE table était en erreur (ex. school_years avant le
@@ -296,11 +330,15 @@ class SyncEngine {
           // la même synchronisation.
           try {
             await _applyTableChanges(
-                entry.key, entry.value, pullResp.serverTime);
+              entry.key,
+              entry.value,
+              pullResp.serverTime,
+            );
           } catch (e) {
             _log.e('Pull : table « ${entry.key} » ignorée ($e)');
             pageErrors.add(
-                'Table ${entry.key} non répliquée (${e.runtimeType})');
+              'Table ${entry.key} non répliquée (${e.runtimeType})',
+            );
           }
         }
         pulled += pullResp.totalChanges;
@@ -324,17 +362,20 @@ class SyncEngine {
         }
       }
 
-      final pullResp = lastPage ??
-          SyncPullResponse(serverTime: DateTime.now().toUtc());
+      final pullResp =
+          lastPage ?? SyncPullResponse(serverTime: DateTime.now().toUtc());
       if (pageErrors.isNotEmpty) {
         _log.w('Pull : ${pageErrors.join('; ')}');
       }
 
-      await _ref.read(connectionProvider.notifier).recordSync(count: pulled);
+      if (pageErrors.isEmpty) {
+        await _ref.read(connectionProvider.notifier).recordSync(count: pulled);
 
-      // Le curseur n'avance qu'après la DERNIÈRE page (sinon les pages
-      // suivantes auraient filtré les lignes déjà reçues).
-      await _updateSyncMetadata(pullResp.serverTime, pulled);
+        // Le curseur n'avance qu'après la DERNIÈRE page (sinon les pages
+        // suivantes auraient filtré les lignes déjà reçues). Un pull partiel
+        // conserve aussi l'ancien curseur pour retenter les tables en erreur.
+        await _updateSyncMetadata(pullResp.serverTime, pulled);
+      }
 
       return SyncResult(
         pulled: pulled,
@@ -368,8 +409,12 @@ class SyncEngine {
       if (missing.isEmpty) continue;
       _log.i('Réconciliation ${entry.key} : ${missing.length} suppression(s)');
       for (final id in missing) {
-        await _updateRowSyncState(entry.key, id, resp.serverTime,
-            deleted: true);
+        await _updateRowSyncState(
+          entry.key,
+          id,
+          resp.serverTime,
+          deleted: true,
+        );
       }
     }
   }
@@ -453,19 +498,25 @@ class SyncEngine {
     // modifications hors-ligne partir en erreur « read-only » sans jamais
     // atteindre le serveur.
     final studentMutations = pending
-        .where((e) =>
-            e.tableNameColumn == 'students' &&
-            e.operation.toUpperCase() != 'DELETE')
+        .where(
+          (e) =>
+              e.tableNameColumn == 'students' &&
+              e.operation.toUpperCase() != 'DELETE',
+        )
         .toList(growable: false);
     final studentDeletes = pending
-        .where((e) =>
-            e.tableNameColumn == 'students' &&
-            e.operation.toUpperCase() == 'DELETE')
+        .where(
+          (e) =>
+              e.tableNameColumn == 'students' &&
+              e.operation.toUpperCase() == 'DELETE',
+        )
         .toList(growable: false);
     final rest = pending
-        .where((e) =>
-            e.tableNameColumn != 'grade_submission' &&
-            e.tableNameColumn != 'students')
+        .where(
+          (e) =>
+              e.tableNameColumn != 'grade_submission' &&
+              e.tableNameColumn != 'students',
+        )
         .toList(growable: false);
 
     for (final entry in submissions) {
@@ -515,7 +566,11 @@ class SyncEngine {
     if (rest.isEmpty) {
       return pushed == 0 && errors.isEmpty
           ? SyncResult(timestamp: DateTime.now())
-          : SyncResult(pushed: pushed, timestamp: DateTime.now(), errors: errors);
+          : SyncResult(
+              pushed: pushed,
+              timestamp: DateTime.now(),
+              errors: errors,
+            );
     }
 
     // ---------------------------------------------------------------------
@@ -532,11 +587,13 @@ class SyncEngine {
           'table': e.tableNameColumn,
           'op': e.operation.toLowerCase() == 'delete' ? 'delete' : 'upsert',
           'data': e.payloadMap,
-        }
+        },
     ];
 
     try {
-      _log.i('Push vers $url : ${lines.length} lignes (+${submissions.length} soumissions notes)');
+      _log.i(
+        'Push vers $url : ${lines.length} lignes (+${submissions.length} soumissions notes)',
+      );
 
       // [Fix-SYNC-IDEMPOTENCE] Enrichir chaque ligne du payload avec
       // idempotency_key et device_uuid pour permettre au serveur de détecter
@@ -672,7 +729,8 @@ class SyncEngine {
       return 0;
     }
 
-    final url = buildUrl(conn.serverUrl!, ApiEndpoints.assessmentGrades(assessmentId));
+    final url =
+        buildUrl(conn.serverUrl!, ApiEndpoints.assessmentGrades(assessmentId));
     final resp = await dio.post(url, data: {'grades': rows});
     final data = resp.data is Map
         ? Map<String, dynamic>.from(resp.data as Map)
@@ -711,7 +769,8 @@ class SyncEngine {
       final resp = await dio.post(url, data: payload);
       if (resp.data is Map) {
         final serverDto = StudentDto.fromJson(
-            Map<String, dynamic>.from(resp.data as Map));
+          Map<String, dynamic>.from(resp.data as Map),
+        );
         // Réconcilie l'id local (négatif) avec l'id serveur — sinon la
         // ligne locale ET la ligne serveure coexistaient (doublon).
         if (recordId != null && recordId < 0) {
@@ -734,7 +793,9 @@ class SyncEngine {
     // PATCH d'un élève existant (id serveur positif).
     if (recordId == null || recordId <= 0) {
       await outbox.markProcessed(
-          entry.id, error: 'Modification sans identifiant serveur — ignorée');
+        entry.id,
+        error: 'Modification sans identifiant serveur — ignorée',
+      );
       return 0;
     }
     final url = buildUrl(conn.serverUrl!, ApiEndpoints.student(recordId));
@@ -814,7 +875,7 @@ class SyncEngine {
         // Protection : proposition pas encore poussée -> le pull attend.
         if (local != null && local.syncStatus == 'pending') continue;
 
-        final serverValue = _rDblN(row, 'value');
+        final serverValue = _rDblN(row, 'value') ?? _rDblN(row, 'score');
         String? nextStatus = local?.syncStatus;
         double? nextProposed = local?.proposedValue;
         bool? nextProposedAbsent = local?.proposedIsAbsent;
@@ -840,7 +901,9 @@ class SyncEngine {
             studentId: _rInt(row, 'student_id'),
             value: Value(serverValue),
             isAbsent: Value(_rBool(row, 'is_absent')),
-            comments: Value(_rStrN(row, 'comments')),
+            comments: Value(
+              _rStrN(row, 'comments') ?? _rStrN(row, 'comment'),
+            ),
             syncedAt: Value(syncedAt),
             isDirty: const Value(false),
             isDeleted: const Value(false),
@@ -875,6 +938,17 @@ class SyncEngine {
     List<Map<String, dynamic>> rows,
     DateTime syncedAt,
   ) async {
+    final levels = await _db.select(_db.levels).get();
+    final cycleByLevelId = {
+      for (final level in levels) level.id: level.cycleId
+    };
+    final existingClassrooms = await (_db.select(_db.classrooms)
+          ..where((t) => t.id.isIn(rows.map(_rId))))
+        .get();
+    final classroomById = {
+      for (final classroom in existingClassrooms) classroom.id: classroom,
+    };
+
     // Transaction : atomicité par table (équivalent du batch d'origine).
     // [Fix-DRIFT-2.21-API] V17 — Drift 2.21+ a changé la signature de
     // `transaction` : la callback ne prend PLUS d'argument (l'ancienne
@@ -885,34 +959,48 @@ class SyncEngine {
     // connexion transactionnelle automatiquement.
     await _db.transaction(() async {
       for (final row in rows) {
+        final id = _rId(row);
+        final levelId = _rIntN(row, 'level_id');
+        final cached = classroomById[id];
         await _db.into(_db.classrooms).insertOnConflictUpdate(
-          ClassroomsCompanion.insert(
-            id: Value(_rId(row)),
-            name: _rStr(row, 'name'),
-            code: Value(_rStrN(row, 'code')),
-            levelId: Value(_rIntN(row, 'level_id')),
-            streamId: Value(_rIntN(row, 'stream_id')),
-            seriesId: Value(_rIntN(row, 'series_id')),
-            // [Fix-SYNC-FIELD-MAP] Le serveur envoie `head_teacher_id`
-            // (colonne Classroom réelle).
-            teacherId: Value(
-                _rIntN(row, 'head_teacher_id') ?? _rIntN(row, 'teacher_id')),
-            // [Fix-SYNC-FIELD-MAP] Le serveur envoie `max_students`
-            // (colonne Classroom réelle).
-            capacity: Value(
-                _rInt(row, 'max_students', d: _rInt(row, 'capacity', d: 0))),
-            schoolYearId: Value(_rIntN(row, 'school_year_id')),
-            syncedAt: Value(syncedAt),
-            isDirty: const Value(false),
-            isDeleted: const Value(false),
-            // ⚠ Colonnes dénormalisées (currentStudentsCount, headTeacherName,
-            // levelName, cycleName, cycleId, seriesName, establishmentId,
-            // isActive) ABSENTES du companion — préservées sur les lignes
-            // existantes par insertOnConflictUpdate (UPSERT). Pour les
-            // nouvelles lignes, elles sont NULL jusqu'au prochain
-            // _fetchFromApi() du ClassroomController.
-          ),
-        );
+              ClassroomsCompanion.insert(
+                id: Value(id),
+                name: _rStr(row, 'name'),
+                code: Value(_rStrN(row, 'code')),
+                levelId: Value(levelId),
+                streamId: Value(_rIntN(row, 'stream_id')),
+                seriesId: Value(_rIntN(row, 'series_id')),
+                // [Fix-SYNC-FIELD-MAP] Le serveur envoie `head_teacher_id`
+                // (colonne Classroom réelle).
+                teacherId: Value(
+                  _rIntN(row, 'head_teacher_id') ?? _rIntN(row, 'teacher_id'),
+                ),
+                // [Fix-SYNC-FIELD-MAP] Le serveur envoie `max_students`
+                // (colonne Classroom réelle).
+                capacity: Value(
+                  _rInt(row, 'max_students', d: _rInt(row, 'capacity', d: 0)),
+                ),
+                schoolYearId: Value(_rIntN(row, 'school_year_id')),
+                establishmentId: Value(
+                  _rIntN(row, 'establishment_id') ?? cached?.establishmentId,
+                ),
+                cycleId: Value(
+                  _rIntN(row, 'cycle_id') ??
+                      (levelId == null ? null : cycleByLevelId[levelId]) ??
+                      cached?.cycleId,
+                ),
+                isActive: Value(
+                  row.containsKey('is_active')
+                      ? _rBool(row, 'is_active')
+                      : cached?.isActive ?? true,
+                ),
+                syncedAt: Value(syncedAt),
+                isDirty: const Value(false),
+                isDeleted: const Value(false),
+                // Les informations non présentes dans le pull restent
+                // préservées sur les lignes existantes.
+              ),
+            );
       }
     });
   }
@@ -954,8 +1042,11 @@ class SyncEngine {
         // être marquée supprimée localement — sinon le roster hors-ligne
         // garde des élèves partis. Repli `is_deleted` pour les registres
         // anciens, `is_active` jamais observé mais couvert par défense.
-        final assignDeleted = _rBool(row, 'is_deleted',
-            d: !_rBool(row, 'active', d: true));
+        final assignDeleted = _rBool(
+          row,
+          'is_deleted',
+          d: !_rBool(row, 'active', d: true),
+        );
 
         // [Fix-SYNC-RESOLVE-IDS] Résolution ID → code textuel via lookup
         // tables locales (sync_registry.py:132-139 documente explicitement
@@ -1077,8 +1168,13 @@ class SyncEngine {
                       : _rStr(row, 'name'),
                   startDate: Value(_rDt(row, 'start_date')),
                   endDate: Value(_rDt(row, 'end_date')),
-                  isActive: Value(_rBool(row, 'is_active',
-                      d: _rBool(row, 'is_current', d: false))),
+                  isActive: Value(
+                    _rBool(
+                      row,
+                      'is_active',
+                      d: _rBool(row, 'is_current', d: false),
+                    ),
+                  ),
                   alternatingWeekStartDate:
                       Value(_rDt(row, 'alternating_week_start_date')),
                   establishmentId: Value(_rIntN(row, 'establishment_id')),
@@ -1097,6 +1193,8 @@ class SyncEngine {
                   id: Value(_rId(row)),
                   name: _rStr(row, 'name'),
                   schoolYearId: Value(_rIntN(row, 'school_year_id')),
+                  cycleId: Value(_rIntN(row, 'cycle_id')),
+                  cycleName: Value(_rStrN(row, 'cycle_name')),
                   startDate: Value(_rDt(row, 'start_date')),
                   endDate: Value(_rDt(row, 'end_date')),
                   weight: Value(_rDbl(row, 'weight', d: 1.0)),
@@ -1116,6 +1214,7 @@ class SyncEngine {
                   id: Value(_rId(row)),
                   name: _rStr(row, 'name'),
                   code: Value(_rStrN(row, 'code')),
+                  cycleId: Value(_rIntN(row, 'cycle_id')),
                   order: Value(_rInt(row, 'order', d: 0)),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
@@ -1184,8 +1283,10 @@ class SyncEngine {
                   // locale n'était rattachée à l'enseignant, et le repli Drift
                   // du périmètre enseignant (classes « enseignées ») était
                   // définitivement vide — cause directe de l'Accueil à 0.
-                  teacherId: Value(_rIntN(row, 'assigned_teacher_id') ??
-                      _rIntN(row, 'teacher_id')),
+                  teacherId: Value(
+                    _rIntN(row, 'assigned_teacher_id') ??
+                        _rIntN(row, 'teacher_id'),
+                  ),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
                   isDeleted: const Value(false),
@@ -1204,17 +1305,22 @@ class SyncEngine {
                   // [Fix-SYNC-FIELD-MAP] Le serveur envoie `name` /
                   // `date_taken` (colonnes réelles du modèle Assessment) —
                   // l'ancienne lecture `title` / `date` était TOUJOURS vide.
-                  title:
-                      _rStrN(row, 'title') ?? _rStrN(row, 'name') ?? '',
+                  title: _rStrN(row, 'title') ?? _rStrN(row, 'name') ?? '',
                   type: Value(_rStr(row, 'type', d: 'DEVOIR')),
                   date: Value(
-                      _rDt(row, 'date') ?? _rDt(row, 'date_taken')),
+                    _rDt(row, 'date') ?? _rDt(row, 'date_taken'),
+                  ),
                   maxScore: Value(_rDbl(row, 'max_score', d: 20.0)),
                   // [Fix-SYNC-FIELD-MAP-V11] Le serveur envoie `weight`
                   // (colonne réelle Assessment.weight) — l'ancienne lecture
                   // `coefficient` seule tombait toujours sur le défaut 1.0.
-                  coefficient: Value(_rDbl(row, 'coefficient',
-                      d: _rDbl(row, 'weight', d: 1.0))),
+                  coefficient: Value(
+                    _rDbl(
+                      row,
+                      'coefficient',
+                      d: _rDbl(row, 'weight', d: 1.0),
+                    ),
+                  ),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
                   isDeleted: const Value(false),
@@ -1238,7 +1344,8 @@ class SyncEngine {
                   // registre corrigé envoie `dob` (colonne réelle) — lire
                   // les deux pour couvrir les deux déploiements.
                   dob: Value(
-                      _rDt(row, 'dob') ?? _rDt(row, 'date_naissance')),
+                    _rDt(row, 'dob') ?? _rDt(row, 'date_naissance'),
+                  ),
                   sexe: Value(_rStrN(row, 'sexe')),
                   birthPlace: Value(_rStrN(row, 'birth_place')),
                   birthPrefecture: Value(_rStrN(row, 'birth_prefecture')),
@@ -1443,22 +1550,21 @@ class SyncEngine {
                   classroomId: Value(_rIntN(row, 'classroom_id')),
                   subjectId: Value(csSubjectId ?? _rIntN(row, 'subject_id')),
                   teacherId: Value(_rIntN(row, 'teacher_id')),
-                  date: startAt ??
-                      (_rDt(row, 'date') ?? DateTime.now()),
+                  date: startAt ?? (_rDt(row, 'date') ?? DateTime.now()),
                   // [Fix-SYNC-FIELD-MAP] Colonne réelle :
                   // scheduled_start_time (miroir de CourseSession).
-                  startTime: Value(_rStrN(row, 'start_time') ??
-                      _rStrN(row, 'scheduled_start_time') ??
-                      (startAt != null
-                          ? startAt.toIso8601String().substring(11, 16)
-                          : null)),
-                  endTime: Value(_rStrN(row, 'end_time') ??
-                      (() {
-                        final endAt = _rDt(row, 'end_at');
-                        return endAt != null
-                            ? endAt.toIso8601String().substring(11, 16)
-                            : null;
-                      }())),
+                  startTime: Value(
+                    _rStrN(row, 'start_time') ??
+                        _rStrN(row, 'scheduled_start_time') ??
+                        (startAt?.toIso8601String().substring(11, 16)),
+                  ),
+                  endTime: Value(
+                    _rStrN(row, 'end_time') ??
+                        (() {
+                          final endAt = _rDt(row, 'end_at');
+                          return endAt?.toIso8601String().substring(11, 16);
+                        }()),
+                  ),
                   state: Value(_rStr(row, 'state', d: 'PENDING')),
                   lessonRecordId: Value(_rIntN(row, 'lesson_record_id')),
                   syncedAt: Value(syncedAt),
@@ -1518,9 +1624,11 @@ class SyncEngine {
                   // perdait TOUS les noms (ex. « prof principal » vide,
                   // noms des enseignants absents hors-ligne).
                   firstName: Value(
-                      _rStrN(row, 'first_name') ?? _rStrN(row, 'nom')),
+                    _rStrN(row, 'first_name') ?? _rStrN(row, 'nom'),
+                  ),
                   lastName: Value(
-                      _rStrN(row, 'last_name') ?? _rStrN(row, 'prenoms')),
+                    _rStrN(row, 'last_name') ?? _rStrN(row, 'prenoms'),
+                  ),
                   email: Value(_rStrN(row, 'email')),
                   phone: Value(_rStrN(row, 'phone')),
                   photoPath: Value(_rStrN(row, 'photo_path')),
@@ -1577,244 +1685,301 @@ class SyncEngine {
       case 'establishments':
         await (_db.update(_db.establishments)
               ..where((t) => t.id.equals(recordId)))
-            .write(EstablishmentsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          EstablishmentsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'school_years':
         await (_db.update(_db.schoolYears)..where((t) => t.id.equals(recordId)))
-            .write(SchoolYearsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          SchoolYearsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'periods':
         await (_db.update(_db.periods)..where((t) => t.id.equals(recordId)))
-            .write(PeriodsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          PeriodsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'levels':
         await (_db.update(_db.levels)..where((t) => t.id.equals(recordId)))
-            .write(LevelsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          LevelsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'series':
         await (_db.update(_db.series)..where((t) => t.id.equals(recordId)))
-            .write(SeriesCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          SeriesCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'streams':
         await (_db.update(_db.streams)..where((t) => t.id.equals(recordId)))
-            .write(StreamsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StreamsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'classrooms':
         await (_db.update(_db.classrooms)..where((t) => t.id.equals(recordId)))
-            .write(ClassroomsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          ClassroomsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'subjects':
         await (_db.update(_db.subjects)..where((t) => t.id.equals(recordId)))
-            .write(SubjectsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          SubjectsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'class_subjects':
         await (_db.update(_db.classSubjects)
               ..where((t) => t.id.equals(recordId)))
-            .write(ClassSubjectsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          ClassSubjectsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'assessments':
         await (_db.update(_db.assessments)..where((t) => t.id.equals(recordId)))
-            .write(AssessmentsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          AssessmentsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'grades':
         await (_db.update(_db.grades)..where((t) => t.id.equals(recordId)))
-            .write(GradesCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-          // [Grade-Validation] écriture directe appliquée -> marque résolue.
-          syncStatus: const Value(null),
-          proposedValue: const Value(null),
-          proposedIsAbsent: const Value(null),
-          proposedComments: const Value(null),
-        ));
+            .write(
+          GradesCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+            // [Grade-Validation] écriture directe appliquée -> marque résolue.
+            syncStatus: const Value(null),
+            proposedValue: const Value(null),
+            proposedIsAbsent: const Value(null),
+            proposedComments: const Value(null),
+          ),
+        );
         break;
       case 'students':
         await (_db.update(_db.students)..where((t) => t.id.equals(recordId)))
-            .write(StudentsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_contacts':
         await (_db.update(_db.studentContacts)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentContactsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentContactsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_medicals':
         await (_db.update(_db.studentMedicals)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentMedicalsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentMedicalsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_scholastics':
         await (_db.update(_db.studentScholastics)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentScholasticsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentScholasticsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_parents':
         await (_db.update(_db.studentParents)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentParentsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentParentsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'guardians':
         await (_db.update(_db.guardians)..where((t) => t.id.equals(recordId)))
-            .write(GuardiansCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          GuardiansCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_guardians':
         await (_db.update(_db.studentGuardians)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentGuardiansCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentGuardiansCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_class_assignments':
         await (_db.update(_db.studentClassAssignments)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentClassAssignmentsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentClassAssignmentsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_statuses':
         await (_db.update(_db.studentStatuses)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentStatusesCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentStatusesCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'inscription_types':
         await (_db.update(_db.inscriptionTypes)
               ..where((t) => t.id.equals(recordId)))
-            .write(InscriptionTypesCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          InscriptionTypesCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'time_slots':
         await (_db.update(_db.timeSlots)..where((t) => t.id.equals(recordId)))
-            .write(TimeSlotsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          TimeSlotsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'weekly_schedules':
         await (_db.update(_db.weeklySchedules)
               ..where((t) => t.id.equals(recordId)))
-            .write(WeeklySchedulesCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          WeeklySchedulesCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'course_sessions':
         await (_db.update(_db.courseSessions)
               ..where((t) => t.id.equals(recordId)))
-            .write(CourseSessionsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          CourseSessionsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_absences':
         await (_db.update(_db.studentAbsences)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentAbsencesCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentAbsencesCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'lesson_records':
         await (_db.update(_db.lessonRecords)
               ..where((t) => t.id.equals(recordId)))
-            .write(LessonRecordsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          LessonRecordsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'users':
         await (_db.update(_db.users)..where((t) => t.id.equals(recordId)))
-            .write(UsersCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          UsersCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       default:
         _log.w('_updateRowSyncState : table non gérée "$table" (id=$recordId)');
     }
   }
 
-  Future<void> _updateSyncMetadata(DateTime serverTime, int totalChanges) async {
+  Future<void> _updateSyncMetadata(
+    DateTime serverTime,
+    int totalChanges,
+  ) async {
     try {
       await _db.batch((b) {
         for (final table in replicatedTables) {
@@ -1829,6 +1994,16 @@ class SyncEngine {
             mode: InsertMode.insertOrReplace,
           );
         }
+        b.insert(
+          _db.syncMetadata,
+          SyncMetadataCompanion.insert(
+            tableNameColumn: _mobileCacheVersionKey,
+            lastSyncedAt: Value(serverTime),
+            lastCount: const Value(_mobileCacheVersion),
+            updatedAt: Value(serverTime),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
       });
     } catch (e) {
       _log.w('Échec mise à jour sync_metadata : $e');

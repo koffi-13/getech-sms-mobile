@@ -69,7 +69,8 @@ class _JsonResponderInterceptor extends Interceptor {
 
 /// Dio dont toutes les requêtes échouent immédiatement (réseau KO).
 Dio _failingDio() {
-  final dio = Dio(BaseOptions(connectTimeout: const Duration(milliseconds: 50)));
+  final dio =
+      Dio(BaseOptions(connectTimeout: const Duration(milliseconds: 50)));
   dio.interceptors.add(_RejectAllInterceptor());
   return dio;
 }
@@ -81,15 +82,15 @@ Dio _jsonDio(Object body) {
   return dio;
 }
 
-AuthState _teacherAuth() => AuthState(
-      user: const UserDto(
+AuthState _teacherAuth() => const AuthState(
+      user: UserDto(
         id: _teacherUserId,
         username: 'prof',
         role: 'teacher',
       ),
       token: 'test-token',
-      permissions: const ['GRADE_READ'], // GRADE_EDIT ABSENT (RBAC incomplet)
-      roles: const ['TEACHER'],
+      permissions: ['GRADE_READ'], // GRADE_EDIT ABSENT (RBAC incomplet)
+      roles: ['TEACHER'],
       establishmentId: 1,
     );
 
@@ -101,7 +102,8 @@ void main() {
   });
 
   group('teacherScopeProvider — [Fix-DASHBOARD-ZERO]', () {
-    test('réseau KO → repli Drift : classes (matières + EDT) + titulariat + cours',
+    test(
+        'réseau KO → repli Drift : classes (matières + EDT) + titulariat + cours',
         () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       await seedLocalScope(db);
@@ -120,7 +122,7 @@ void main() {
 
       // Connexion appairée (l'état réseau lui-même n'entre pas en compte :
       // le scope tente les appels et échoue — c'est le repli qui parle).
-      container.read(connectionProvider.notifier).state = ConnectionState(
+      container.read(connectionProvider.notifier).state = const ConnectionState(
         status: ServerStatus.offline,
         profileId: 'p-test',
         serverUrlOverride: 'http://192.168.1.10:8000/api/v1',
@@ -149,7 +151,8 @@ void main() {
       expect(courses.map((c) => c.subjectName), contains('Physique'));
     });
 
-    test('serveur 200-vide (aucune classe réseau) → le cache local parle quand même',
+    test(
+        'serveur 200-vide (aucune classe réseau) → le cache local parle quand même',
         () async {
       // Variante : le serveur répond mais avec des listes VIDES. Le repli
       // Drift doit combler les champs vides (l'ancienne condition exigeait
@@ -172,7 +175,7 @@ void main() {
       );
       addTearDown(container.dispose);
 
-      container.read(connectionProvider.notifier).state = ConnectionState(
+      container.read(connectionProvider.notifier).state = const ConnectionState(
         status: ServerStatus.online,
         profileId: 'p-test',
         serverUrlOverride: 'http://192.168.1.10:8000/api/v1',
@@ -182,14 +185,17 @@ void main() {
 
       final scope = await container.read(teacherScopeProvider.future);
 
-      expect(scope.myClassrooms.map((c) => c.name),
-          containsAll(['2nde A', '1ère C']));
+      expect(
+        scope.myClassrooms.map((c) => c.name),
+        containsAll(['2nde A', '1ère C']),
+      );
       expect(scope.mySchedule, isNotEmpty);
     });
   });
 
   group('SyncEngine pull — [Fix-SYNC-FIELD-MAP]', () {
-    test('class_subjects lit assigned_teacher_id et classrooms lit head_teacher_id',
+    test(
+        'class_subjects lit assigned_teacher_id et classrooms lit head_teacher_id',
         () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
 
@@ -239,7 +245,7 @@ void main() {
       );
       addTearDown(container.dispose);
 
-      container.read(connectionProvider.notifier).state = ConnectionState(
+      container.read(connectionProvider.notifier).state = const ConnectionState(
         status: ServerStatus.online,
         profileId: 'p-test',
         serverUrlOverride: 'http://192.168.1.10:8000/api/v1',
@@ -253,13 +259,19 @@ void main() {
 
       final cs = await db.select(db.classSubjects).get();
       expect(cs, hasLength(1));
-      expect(cs.single.teacherId, _teacherUserId,
-          reason: 'assigned_teacher_id doit atterrir dans teacherId local');
+      expect(
+        cs.single.teacherId,
+        _teacherUserId,
+        reason: 'assigned_teacher_id doit atterrir dans teacherId local',
+      );
 
       final classrooms = await db.select(db.classrooms).get();
       expect(classrooms, hasLength(1));
-      expect(classrooms.single.teacherId, _teacherUserId,
-          reason: 'head_teacher_id doit atterrir dans teacherId local');
+      expect(
+        classrooms.single.teacherId,
+        _teacherUserId,
+        reason: 'head_teacher_id doit atterrir dans teacherId local',
+      );
     });
   });
 }
@@ -267,40 +279,58 @@ void main() {
 /// Jeu de données local Drift : matière assignée + EDT + titulariat.
 Future<void> seedLocalScope(AppDatabase db) async {
   await db.batch((b) {
-    b.insert(db.classrooms, ClassroomsCompanion.insert(
-      id: const Value(1),
-      name: '2nde A',
-      teacherId: const Value(_teacherUserId), // titulaire
-    ));
-    b.insert(db.classrooms, ClassroomsCompanion.insert(
-      id: const Value(2),
-      name: '1ère C',
-    ));
-    b.insert(db.subjects, SubjectsCompanion.insert(
-      id: const Value(10),
-      name: 'Mathématiques',
-    ));
-    b.insert(db.subjects, SubjectsCompanion.insert(
-      id: const Value(11),
-      name: 'Physique',
-    ));
-    b.insert(db.classSubjects, ClassSubjectsCompanion.insert(
-      id: const Value(21),
-      classroomId: 1,
-      subjectId: 10,
-      teacherId: const Value(_teacherUserId),
-    ));
+    b.insert(
+      db.classrooms,
+      ClassroomsCompanion.insert(
+        id: const Value(1),
+        name: '2nde A',
+        teacherId: const Value(_teacherUserId), // titulaire
+      ),
+    );
+    b.insert(
+      db.classrooms,
+      ClassroomsCompanion.insert(
+        id: const Value(2),
+        name: '1ère C',
+      ),
+    );
+    b.insert(
+      db.subjects,
+      SubjectsCompanion.insert(
+        id: const Value(10),
+        name: 'Mathématiques',
+      ),
+    );
+    b.insert(
+      db.subjects,
+      SubjectsCompanion.insert(
+        id: const Value(11),
+        name: 'Physique',
+      ),
+    );
+    b.insert(
+      db.classSubjects,
+      ClassSubjectsCompanion.insert(
+        id: const Value(21),
+        classroomId: 1,
+        subjectId: 10,
+        teacherId: const Value(_teacherUserId),
+      ),
+    );
     // EDT : cours de Physique en 1ère C le lundi, semaine A.
-    b.insert(db.weeklySchedules, WeeklySchedulesCompanion.insert(
-      id: const Value(31),
-      classroomId: const Value(2),
-      subjectId: const Value(11),
-      teacherId: const Value(_teacherUserId),
-      timeSlotId: 1,
-      dayOfWeek: 1,
-      startTime: const Value('08:00'),
-      endTime: const Value('10:00'),
-      weekType: const Value('A'),
-    ));
+    b.insert(
+      db.weeklySchedules,
+      WeeklySchedulesCompanion.insert(
+        id: const Value(31),
+        classroomId: const Value(2),
+        subjectId: const Value(11),
+        teacherId: const Value(_teacherUserId),
+        timeSlotId: 1,
+        dayOfWeek: 1,
+        startTime: const Value('08:00'),
+        endTime: const Value('10:00'),
+        weekType: const Value('A'),
+      ),
+    );
   });
 }

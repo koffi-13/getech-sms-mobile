@@ -82,7 +82,7 @@ class _BulletinScopeState extends ConsumerState<_BulletinScope> {
     // Périodes filtrées par le cycle de la classe sélectionnée (corrige le
     // mélange collège/lycée — miroir du desktop).
     final periods = _classroomId == null
-        ? const AsyncValue<List<PeriodDto>>.data(const [])
+        ? const AsyncValue<List<PeriodDto>>.data([])
         : ref.watch(periodsForClassroomProvider(_classroomId!));
 
     // Auto-sélection de la première classe/période si non fournie.
@@ -95,8 +95,7 @@ class _BulletinScopeState extends ConsumerState<_BulletinScope> {
     });
     periods.whenData((list) {
       if (_periodId == null && list.isNotEmpty) {
-        final active =
-            list.firstWhereOrNull((p) => p.isActive) ?? list.first;
+        final active = list.firstWhereOrNull((p) => p.isActive) ?? list.first;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) setState(() => _periodId = active.id);
         });
@@ -124,7 +123,8 @@ class _BulletinScopeState extends ConsumerState<_BulletinScope> {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
                   content: Text(
-                      'Export PDF — fonctionnalité à venir (endpoint serveur requis).'),
+                    'Export PDF — fonctionnalité à venir (endpoint serveur requis).',
+                  ),
                 ),
               );
             },
@@ -154,7 +154,8 @@ class _BulletinScopeState extends ConsumerState<_BulletinScope> {
           if (query == null)
             const EmptyState(
               title: 'Sélectionnez une classe et une période',
-              message: 'Ces informations sont requises pour afficher le bulletin.',
+              message:
+                  'Ces informations sont requises pour afficher le bulletin.',
               icon: Icons.filter_list,
             )
           else
@@ -222,7 +223,7 @@ class _BulletinSelectors extends StatelessWidget {
         final selected =
             list.firstWhereOrNull((c) => c.id == classroomId) ?? list.first;
         return DropdownButtonFormField<ClassroomDto>(
-          value: selected,
+          initialValue: selected,
           isExpanded: true,
           decoration: const InputDecoration(
             labelText: 'Classe',
@@ -230,10 +231,12 @@ class _BulletinSelectors extends StatelessWidget {
             isDense: true,
           ),
           items: list
-              .map((c) => DropdownMenuItem(
-                    value: c,
-                    child: Text(c.name, overflow: TextOverflow.ellipsis),
-                  ))
+              .map(
+                (c) => DropdownMenuItem(
+                  value: c,
+                  child: Text(c.name, overflow: TextOverflow.ellipsis),
+                ),
+              )
               .toList(),
           onChanged: (c) => onClassroomChanged(c?.id),
         );
@@ -252,7 +255,7 @@ class _BulletinSelectors extends StatelessWidget {
         final selected =
             list.firstWhereOrNull((p) => p.id == periodId) ?? list.first;
         return DropdownButtonFormField<PeriodDto>(
-          value: selected,
+          initialValue: selected,
           isExpanded: true,
           decoration: const InputDecoration(
             labelText: 'Période',
@@ -260,10 +263,12 @@ class _BulletinSelectors extends StatelessWidget {
             isDense: true,
           ),
           items: list
-              .map((p) => DropdownMenuItem(
-                    value: p,
-                    child: Text(p.name, overflow: TextOverflow.ellipsis),
-                  ))
+              .map(
+                (p) => DropdownMenuItem(
+                  value: p,
+                  child: Text(p.name, overflow: TextOverflow.ellipsis),
+                ),
+              )
               .toList(),
           onChanged: (p) => onPeriodChanged(p?.id),
         );
@@ -322,8 +327,7 @@ class _BulletinView extends StatelessWidget {
             Expanded(
               child: _KpiTile(
                 label: 'Rang',
-                value: (bulletin.rank != null &&
-                        bulletin.totalStudents != null)
+                value: (bulletin.rank != null && bulletin.totalStudents != null)
                     ? '${bulletin.rank} / ${bulletin.totalStudents}'
                     : (bulletin.rank != null ? '${bulletin.rank}' : '—'),
                 icon: Icons.leaderboard,
@@ -405,24 +409,30 @@ class _BulletinView extends StatelessWidget {
                 children: [
                   Row(
                     children: [
-                      Icon(Icons.chat_bubble_outline,
-                          size: 18,
-                          color:
-                              Theme.of(context).colorScheme.onSecondaryContainer),
+                      Icon(
+                        Icons.chat_bubble_outline,
+                        size: 18,
+                        color:
+                            Theme.of(context).colorScheme.onSecondaryContainer,
+                      ),
                       const SizedBox(width: 8),
-                      Text('Appréciation générale',
-                          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      Text(
+                        'Appréciation générale',
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
                               color: Theme.of(context)
                                   .colorScheme
-                                  .onSecondaryContainer)),
+                                  .onSecondaryContainer,
+                            ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 8),
                   Text(
                     bulletin.appreciation!,
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color:
-                              Theme.of(context).colorScheme.onSecondaryContainer,
+                          color: Theme.of(context)
+                              .colorScheme
+                              .onSecondaryContainer,
                         ),
                   ),
                 ],
@@ -438,7 +448,8 @@ class _BulletinView extends StatelessWidget {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
                 content: Text(
-                    'Export PDF — fonctionnalité à venir (endpoint serveur requis).'),
+                  'Export PDF — fonctionnalité à venir (endpoint serveur requis).',
+                ),
               ),
             );
           },
@@ -472,8 +483,8 @@ class _BulletinHeader extends StatelessWidget {
     final avatarColor = bulletin.sexe == null
         ? theme.colorScheme.primaryContainer
         : (isMale
-            ? const Color(0xFF3B82F6).withOpacity(0.18)
-            : const Color(0xFFEC4899).withOpacity(0.18));
+            ? const Color(0xFF3B82F6).withValues(alpha: 0.18)
+            : const Color(0xFFEC4899).withValues(alpha: 0.18));
     final avatarFg = bulletin.sexe == null
         ? theme.colorScheme.onPrimaryContainer
         : (isMale ? const Color(0xFF3B82F6) : const Color(0xFFEC4899));
@@ -550,7 +561,9 @@ class _BulletinHeader extends StatelessWidget {
             _HeaderRow(label: 'Période', value: bulletin.periodName),
             if (bulletin.schoolYearName != null)
               _HeaderRow(
-                  label: 'Année scolaire', value: bulletin.schoolYearName!),
+                label: 'Année scolaire',
+                value: bulletin.schoolYearName!,
+              ),
           ],
         ),
       ),
@@ -575,7 +588,7 @@ class _HeaderChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: fg.withOpacity(0.12),
+        color: fg.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Row(
@@ -603,12 +616,11 @@ class _SexeChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isMale = sexe.toUpperCase() == 'M';
-    final color =
-        isMale ? const Color(0xFF3B82F6) : const Color(0xFFEC4899);
+    final color = isMale ? const Color(0xFF3B82F6) : const Color(0xFFEC4899);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.14),
+        color: color.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Text(
@@ -634,15 +646,20 @@ class _HeaderRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
         children: [
-          Text(label,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant)),
+          Text(
+            label,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+          ),
           const Spacer(),
-          Text(value,
-              style: Theme.of(context)
-                  .textTheme
-                  .bodyMedium
-                  ?.copyWith(fontWeight: FontWeight.w600)),
+          Text(
+            value,
+            style: Theme.of(context)
+                .textTheme
+                .bodyMedium
+                ?.copyWith(fontWeight: FontWeight.w600),
+          ),
         ],
       ),
     );
@@ -676,7 +693,7 @@ class _KpiTile extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: color.withOpacity(0.12),
+                color: color.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Icon(icon, size: 18, color: color),
@@ -688,9 +705,9 @@ class _KpiTile extends StatelessWidget {
                       ? theme.textTheme.titleMedium
                       : theme.textTheme.headlineSmall)
                   ?.copyWith(
-                    fontWeight: FontWeight.w800,
-                    color: color,
-                  ),
+                fontWeight: FontWeight.w800,
+                color: color,
+              ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -735,7 +752,7 @@ class _HonorsCard extends StatelessWidget {
     final label = honors.primaryLabel ?? 'Distinction';
     final color = _color;
     return Card(
-      color: color.withOpacity(0.08),
+      color: color.withValues(alpha: 0.08),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Row(
@@ -743,7 +760,7 @@ class _HonorsCard extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: color.withOpacity(0.18),
+                color: color.withValues(alpha: 0.18),
                 shape: BoxShape.circle,
               ),
               child: Icon(_icon, size: 22, color: color),
@@ -760,8 +777,7 @@ class _HonorsCard extends StatelessWidget {
                       fontWeight: FontWeight.w800,
                     ),
                   ),
-                  if (honors.absencesCount > 0 ||
-                      honors.delaysCount > 0) ...[
+                  if (honors.absencesCount > 0 || honors.delaysCount > 0) ...[
                     const SizedBox(height: 2),
                     Text(
                       [
@@ -809,11 +825,16 @@ class _ConductCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                Icon(Icons.rule_outlined,
-                    size: 18, color: theme.colorScheme.primary),
+                Icon(
+                  Icons.rule_outlined,
+                  size: 18,
+                  color: theme.colorScheme.primary,
+                ),
                 const SizedBox(width: 8),
-                Text('Conduite & assiduité',
-                    style: theme.textTheme.titleSmall),
+                Text(
+                  'Conduite & assiduité',
+                  style: theme.textTheme.titleSmall,
+                ),
               ],
             ),
             if (hasStats) ...[
@@ -853,7 +874,7 @@ class _ConductCard extends StatelessWidget {
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: theme.colorScheme.surfaceContainerHighest
-                      .withOpacity(0.5),
+                      .withValues(alpha: 0.5),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
@@ -890,7 +911,7 @@ class _AttendanceStat extends StatelessWidget {
         Container(
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
-            color: color.withOpacity(0.14),
+            color: color.withValues(alpha: 0.14),
             borderRadius: BorderRadius.circular(8),
           ),
           child: Icon(icon, size: 16, color: color),
@@ -901,11 +922,13 @@ class _AttendanceStat extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(value,
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    color: color,
-                  )),
+              Text(
+                value,
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: color,
+                ),
+              ),
               Text(label, style: theme.textTheme.labelSmall),
             ],
           ),
@@ -929,9 +952,26 @@ class _SubjectHeaderRow extends StatelessWidget {
       child: Row(
         children: [
           Expanded(flex: 4, child: Text('Matière', style: style)),
-          Expanded(flex: 2, child: Text('Coef.', style: style, textAlign: TextAlign.center)),
-          Expanded(flex: 3, child: Text('Moy. / Mention', style: style, textAlign: TextAlign.center)),
-          Expanded(flex: 3, child: Text('Moy. classe', style: style, textAlign: TextAlign.center)),
+          Expanded(
+            flex: 2,
+            child: Text('Coef.', style: style, textAlign: TextAlign.center),
+          ),
+          Expanded(
+            flex: 3,
+            child: Text(
+              'Moy. / Mention',
+              style: style,
+              textAlign: TextAlign.center,
+            ),
+          ),
+          Expanded(
+            flex: 3,
+            child: Text(
+              'Moy. classe',
+              style: style,
+              textAlign: TextAlign.center,
+            ),
+          ),
         ],
       ),
     );
@@ -976,9 +1016,12 @@ class _SubjectRowState extends State<_SubjectRow> {
                       Row(
                         children: [
                           Expanded(
-                            child: Text(s.subjectName,
-                                style: theme.textTheme.bodyMedium?.copyWith(
-                                    fontWeight: FontWeight.w600)),
+                            child: Text(
+                              s.subjectName,
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                           ),
                           if (s.isFacultative)
                             _MiniBadge(
@@ -986,8 +1029,8 @@ class _SubjectRowState extends State<_SubjectRow> {
                               color: theme.colorScheme.tertiary,
                             ),
                           if (s.isFromPreviousGrade)
-                            Padding(
-                              padding: const EdgeInsets.only(left: 4),
+                            const Padding(
+                              padding: EdgeInsets.only(left: 4),
                               child: _MiniBadge(
                                 label: 'Note importée',
                                 color: Colors.purple,
@@ -1001,8 +1044,10 @@ class _SubjectRowState extends State<_SubjectRow> {
                         children: [
                           if (s.subjectCode != null &&
                               s.subjectCode!.isNotEmpty)
-                            Text(s.subjectCode!,
-                                style: theme.textTheme.bodySmall),
+                            Text(
+                              s.subjectCode!,
+                              style: theme.textTheme.bodySmall,
+                            ),
                           if (s.domain != null && s.domain!.isNotEmpty)
                             _InfoChip(s.domain!),
                           if (s.teacher != null && s.teacher!.isNotEmpty)
@@ -1026,10 +1071,12 @@ class _SubjectRowState extends State<_SubjectRow> {
                   child: Center(
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 2),
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
                       decoration: BoxDecoration(
                         color:
-                            theme.colorScheme.primary.withOpacity(0.12),
+                            theme.colorScheme.primary.withValues(alpha: 0.12),
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Text(
@@ -1050,12 +1097,16 @@ class _SubjectRowState extends State<_SubjectRow> {
                         GradeFormatter.format(s.average),
                         textAlign: TextAlign.center,
                         style: theme.textTheme.bodyMedium?.copyWith(
-                            fontWeight: FontWeight.w700, color: mentionColor),
+                          fontWeight: FontWeight.w700,
+                          color: mentionColor,
+                        ),
                       ),
                       const SizedBox(height: 2),
                       Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 1),
+                          horizontal: 6,
+                          vertical: 1,
+                        ),
                         decoration: BoxDecoration(
                           color: MentionHelper.backgroundColor(s.average),
                           borderRadius: BorderRadius.circular(8),
@@ -1100,7 +1151,7 @@ class _SubjectRowState extends State<_SubjectRow> {
             child: Container(
               decoration: BoxDecoration(
                 color: theme.colorScheme.surfaceContainerHighest
-                    .withOpacity(0.4),
+                    .withValues(alpha: 0.4),
                 borderRadius: BorderRadius.circular(8),
               ),
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -1131,9 +1182,9 @@ class _MiniBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.16),
+        color: color.withValues(alpha: 0.16),
         borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: color.withOpacity(0.4), width: 1),
+        border: Border.all(color: color.withValues(alpha: 0.4), width: 1),
       ),
       child: Text(
         label,
@@ -1179,13 +1230,18 @@ class _AssessmentLine extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(a.name.isEmpty ? '(sans nom)' : a.name,
-                    style: theme.textTheme.bodySmall
-                        ?.copyWith(fontWeight: FontWeight.w500)),
+                Text(
+                  a.name.isEmpty ? '(sans nom)' : a.name,
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(fontWeight: FontWeight.w500),
+                ),
                 if (a.type.isNotEmpty)
-                  Text(a.type,
-                      style: theme.textTheme.labelSmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant)),
+                  Text(
+                    a.type,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
               ],
             ),
           ),
@@ -1210,7 +1266,8 @@ class _AssessmentLine extends StatelessWidget {
               date == null ? '—' : DateFormatter.date(date),
               textAlign: TextAlign.end,
               style: theme.textTheme.labelSmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant),
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ),
           ),
         ],

@@ -74,7 +74,8 @@ class GradeEntryPage extends ConsumerWidget {
       body: !canUse
           ? const EmptyState(
               title: 'Permission insuffisante',
-              message: 'Vous n\'avez pas accès à la saisie des notes (GRADE_READ).',
+              message:
+                  'Vous n\'avez pas accès à la saisie des notes (GRADE_READ).',
               icon: Icons.lock_outline,
             )
           // [Fix-OFFLINE] Plus de garde hors-ligne bloquante : la saisie
@@ -112,7 +113,9 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
     final teacherish = !auth.isAdminOrHeadmaster &&
         (auth.hasDeclaredTeacherRole ||
             scopeAsync.maybeWhen(
-                data: (s) => s.isTeacher, orElse: () => false));
+              data: (s) => s.isTeacher,
+              orElse: () => false,
+            ));
     final canEdit =
         hasPermission(auth.permissions, RbacPermissions.gradeEdit) ||
             teacherish;
@@ -136,15 +139,13 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
     // Périodes filtrées par le CYCLE de la classe sélectionnée — corrige le
     // mélange lycée/collège dans le champ « Période ».
     final periods = _classroomId == null
-        ? const AsyncValue<List<PeriodDto>>.data(const [])
+        ? const AsyncValue<List<PeriodDto>>.data([])
         : ref.watch(periodsForClassroomProvider(_classroomId!));
 
     // Auto-sélection de la période ACTIVE du jour (miroir
     // GradeService.get_active_period), sinon la première.
     final periodList = periods.valueOrNull ?? const <PeriodDto>[];
-    if (_classroomId != null &&
-        _periodId == null &&
-        periodList.isNotEmpty) {
+    if (_classroomId != null && _periodId == null && periodList.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _periodId == null) {
           final active = activePeriodOf(periodList);
@@ -173,44 +174,46 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
         children: [
           // [Fix-OFFLINE] Bandeau d'information (jamais bloquant) : la
           // saisie reste possible, l'enregistrement part dans l'outbox.
-          Consumer(builder: (context, ref, _) {
-            final conn = ref.watch(connectionProvider);
-            final offline = !conn.canReachServer && !conn.isChecking;
-            if (!offline) return const SizedBox.shrink();
-            return Container(
-              margin: const EdgeInsets.only(bottom: 12),
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.tertiaryContainer,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                children: [
-                  Icon(Icons.cloud_off_outlined,
+          Consumer(
+            builder: (context, ref, _) {
+              final conn = ref.watch(connectionProvider);
+              final offline = !conn.canReachServer && !conn.isChecking;
+              if (!offline) return const SizedBox.shrink();
+              return Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.tertiaryContainer,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.cloud_off_outlined,
                       size: 18,
-                      color: Theme.of(context).colorScheme.onTertiaryContainer),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Mode hors-ligne : consultation et saisie sur le cache '
-                      'local. L\'enregistrement sera synchronisé à la prochaine '
-                      'connexion.',
-                      style: Theme.of(context)
-                          .textTheme
-                          .bodySmall
-                          ?.copyWith(
+                      color: Theme.of(context).colorScheme.onTertiaryContainer,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Mode hors-ligne : consultation et saisie sur le cache '
+                        'local. L\'enregistrement sera synchronisé à la prochaine '
+                        'connexion.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
                               color: Theme.of(context)
                                   .colorScheme
-                                  .onTertiaryContainer),
+                                  .onTertiaryContainer,
+                            ),
+                      ),
                     ),
-                  ),
-                ],
-              ),
-            );
-          }),
+                  ],
+                ),
+              );
+            },
+          ),
           // --- Sélecteurs en cascade ---
-          SectionHeader(
+          const SectionHeader(
             title: 'Filtres',
             icon: Icons.filter_list,
             subtitle: 'Sélectionnez une classe, une période et une matière.',
@@ -262,9 +265,8 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
             ),
             enabled: periods is AsyncData && _classroomId != null,
             onChanged: (p) => setState(() => _periodId = p?.id),
-            labelOf: (p) => p.cycleName == null
-                ? p.name
-                : '${p.name} (${p.cycleName})',
+            labelOf: (p) =>
+                p.cycleName == null ? p.name : '${p.name} (${p.cycleName})',
             hint: _classroomId == null
                 ? 'Sélectionnez une classe d\'abord'
                 : null,
@@ -305,20 +307,20 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
                     }
                     return Column(
                       children: list
-                          .map((a) => _AssessmentCard(
-                                assessment: a,
-                                canEdit: canEdit,
-                                onTap: () =>
-                                    _openGradeEntry(a, canEdit, isAdmin),
-                                // [Fix-TEACHER-ASSESSMENT] La suppression
-                                // d'une évaluation est réservée aux ADMIN
-                                // côté serveur (« Only admins can delete
-                                // assessments ») — ne plus proposer le
-                                // bouton à un enseignant (403 inévitable).
-                                onDelete: isAdmin
-                                    ? () => _confirmDelete(a)
-                                    : null,
-                              ))
+                          .map(
+                            (a) => _AssessmentCard(
+                              assessment: a,
+                              canEdit: canEdit,
+                              onTap: () => _openGradeEntry(a, canEdit, isAdmin),
+                              // [Fix-TEACHER-ASSESSMENT] La suppression
+                              // d'une évaluation est réservée aux ADMIN
+                              // côté serveur (« Only admins can delete
+                              // assessments ») — ne plus proposer le
+                              // bouton à un enseignant (403 inévitable).
+                              onDelete:
+                                  isAdmin ? () => _confirmDelete(a) : null,
+                            ),
+                          )
                           .toList(),
                     );
                   },
@@ -338,9 +340,8 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
     if (_classSubjectId == null || _periodId == null) return;
 
     // [Fix-ASSESSMENT-FORM] Libellés réels transmis au formulaire.
-    final classroomList =
-        ref.read(classroomsForGradesProvider).valueOrNull ??
-            const <ClassroomDto>[];
+    final classroomList = ref.read(classroomsForGradesProvider).valueOrNull ??
+        const <ClassroomDto>[];
     // [Fix-PERIOD-NOTES-EMPTY] Le provider filtre déjà par cycle (avec
     // repli) — pas de second filtrage local (voyait le dropdown Période
     // vide dans Notes alors que Classement fonctionnait).
@@ -348,10 +349,8 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
         ? const <PeriodDto>[]
         : (ref.read(periodsForClassroomProvider(_classroomId!)).valueOrNull ??
             const <PeriodDto>[]);
-    final classroomName = classroomList
-        .where((c) => c.id == _classroomId)
-        .firstOrNull
-        ?.name;
+    final classroomName =
+        classroomList.where((c) => c.id == _classroomId).firstOrNull?.name;
     final periodDto = periodList.where((p) => p.id == _periodId).firstOrNull;
     final subjectName = (_classroomId == null)
         ? null
@@ -395,6 +394,7 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
         // classSubjectId=0 / periodId null).
         classSubjectId: _classSubjectId,
         periodId: _periodId,
+        classroomId: _classroomId,
       ),
     );
   }
@@ -405,7 +405,8 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
       builder: (ctx) => AlertDialog(
         title: const Text('Supprimer l\'évaluation'),
         content: Text(
-            'Supprimer « ${assessment.name} » ? Les notes saisies seront perdues.'),
+          'Supprimer « ${assessment.name} » ? Les notes saisies seront perdues.',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
@@ -471,7 +472,7 @@ class _DropdownField<T> extends StatelessWidget {
     final effectiveValue =
         (value != null && items.any((e) => e == value)) ? value : null;
     return DropdownButtonFormField<T>(
-      value: effectiveValue,
+      initialValue: effectiveValue,
       // [Fix-OVERFLOW] isExpanded : sans lui la valeur sélectionnée
       // déborde à droite (~45 px) quand le libellé est long.
       isExpanded: true,
@@ -482,11 +483,16 @@ class _DropdownField<T> extends StatelessWidget {
         isDense: true,
       ),
       items: items
-          .map((e) => DropdownMenuItem<T>(
-                value: e,
-                child: Text(labelOf(e),
-                    overflow: TextOverflow.ellipsis, maxLines: 1),
-              ))
+          .map(
+            (e) => DropdownMenuItem<T>(
+              value: e,
+              child: Text(
+                labelOf(e),
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
+              ),
+            ),
+          )
           .toList(),
       onChanged: enabled ? onChanged : null,
     );
@@ -509,7 +515,9 @@ class _ClassSubjectField extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     if (classroomId == null) {
       return const _DisabledField(
-          label: 'Matière', hint: 'Sélectionnez une classe d\'abord.');
+        label: 'Matière',
+        hint: 'Sélectionnez une classe d\'abord.',
+      );
     }
     final async = ref.watch(classSubjectsProvider(classroomId!));
     return async.when(
@@ -523,7 +531,7 @@ class _ClassSubjectField extends ConsumerWidget {
           });
         }
         return DropdownButtonFormField<ClassSubjectDto>(
-          value: selected,
+          initialValue: selected,
           // [Fix-OVERFLOW] le libellé « Matière (coef. X) » déborde sans
           // isExpanded.
           isExpanded: true,
@@ -533,14 +541,16 @@ class _ClassSubjectField extends ConsumerWidget {
             isDense: true,
           ),
           items: list
-              .map((c) => DropdownMenuItem(
-                    value: c,
-                    child: Text(
-                      '${c.subjectName} (coef. ${c.coefficient})',
-                      overflow: TextOverflow.ellipsis,
-                      maxLines: 1,
-                    ),
-                  ))
+              .map(
+                (c) => DropdownMenuItem(
+                  value: c,
+                  child: Text(
+                    '${c.subjectName} (coef. ${c.coefficient})',
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                  ),
+                ),
+              )
               .toList(),
           onChanged: (c) => onChanged(c?.id),
         );
@@ -618,9 +628,7 @@ class _AssessmentCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      assessment.name.isEmpty
-                          ? '(sans nom)'
-                          : assessment.name,
+                      assessment.name.isEmpty ? '(sans nom)' : assessment.name,
                       style: theme.textTheme.titleSmall,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -635,8 +643,11 @@ class _AssessmentCard extends StatelessWidget {
                         _Chip('Max ${assessment.maxScore.toStringAsFixed(0)}'),
                         if (assessment.dateTaken != null &&
                             assessment.dateTaken!.isNotEmpty)
-                          _Chip(DateFormatter.date(
-                              DateFormatter.parse(assessment.dateTaken))),
+                          _Chip(
+                            DateFormatter.date(
+                              DateFormatter.parse(assessment.dateTaken),
+                            ),
+                          ),
                         _Chip(
                           '${assessment.gradesEnteredCount}/${assessment.totalStudents} saisies',
                         ),
@@ -662,12 +673,17 @@ class _AssessmentCard extends StatelessWidget {
                 IconButton(
                   tooltip: 'Supprimer',
                   visualDensity: VisualDensity.compact,
-                  icon: Icon(Icons.delete_outline,
-                      size: 20, color: Colors.red.shade400),
+                  icon: Icon(
+                    Icons.delete_outline,
+                    size: 20,
+                    color: Colors.red.shade400,
+                  ),
                   onPressed: onDelete,
                 ),
-              Icon(Icons.chevron_right,
-                  color: theme.colorScheme.onSurfaceVariant),
+              Icon(
+                Icons.chevron_right,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ],
           ),
         ),
@@ -746,7 +762,8 @@ class _CreateAssessmentSheet extends ConsumerStatefulWidget {
       _CreateAssessmentSheetState();
 }
 
-class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> {
+class _CreateAssessmentSheetState
+    extends ConsumerState<_CreateAssessmentSheet> {
   static const int _maxNameLength = 255;
 
   final _formKey = GlobalKey<FormState>();
@@ -799,10 +816,14 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
     // existantes de la matière (assessment_type_id/name dénormalisés) ;
     // 3) valeurs par défaut.
     final typesAsync = ref.watch(assessmentTypesProvider);
-    final existingAsync = ref.watch(assessmentsProvider(AssessmentsQuery(
-      classSubjectId: widget.classSubjectId,
-      periodId: widget.periodId,
-    )));
+    final existingAsync = ref.watch(
+      assessmentsProvider(
+        AssessmentsQuery(
+          classSubjectId: widget.classSubjectId,
+          periodId: widget.periodId,
+        ),
+      ),
+    );
 
     final serverTypes = typesAsync.value ?? CommonAssessmentTypes.defaults;
     var types = serverTypes;
@@ -811,15 +832,16 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
       for (final a in existingAsync.valueOrNull ?? const <AssessmentDto>[]) {
         if (a.assessmentTypeId > 0 && a.assessmentTypeName.isNotEmpty) {
           derived.putIfAbsent(
-              a.assessmentTypeId,
-              () => AssessmentTypeInfo(
-                    id: a.assessmentTypeId,
-                    name: a.assessmentTypeName,
-                    code: a.assessmentTypeName.toUpperCase(),
-                    category: a.assessmentTypeCategory.toUpperCase() == 'EXAM'
-                        ? AssessmentCategory.examen
-                        : AssessmentCategory.classe,
-                  ));
+            a.assessmentTypeId,
+            () => AssessmentTypeInfo(
+              id: a.assessmentTypeId,
+              name: a.assessmentTypeName,
+              code: a.assessmentTypeName.toUpperCase(),
+              category: a.assessmentTypeCategory.toUpperCase() == 'EXAM'
+                  ? AssessmentCategory.examen
+                  : AssessmentCategory.classe,
+            ),
+          );
         }
       }
       if (derived.isNotEmpty) types = derived.values.toList();
@@ -828,12 +850,11 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
     // [Fix-TEACHER-ASSESSMENT] Enseignant simple : masquer les types de
     // catégorie EXAM (compositions et examens) — création réservée aux
     // administrateurs, appliquée aussi côté serveur (403).
-    final examTypesHidden =
-        !widget.isAdmin && types.any((t) => t.category == AssessmentCategory.examen);
+    final examTypesHidden = !widget.isAdmin &&
+        types.any((t) => t.category == AssessmentCategory.examen);
     if (examTypesHidden) {
-      types = types
-          .where((t) => t.category != AssessmentCategory.examen)
-          .toList();
+      types =
+          types.where((t) => t.category != AssessmentCategory.examen).toList();
     }
 
     // [Fix-DROPDOWN-ASSERT] La valeur d'un DropdownButton DOIT être un
@@ -887,8 +908,10 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text('Nouvelle évaluation',
-                  style: Theme.of(context).textTheme.titleLarge),
+              Text(
+                'Nouvelle évaluation',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
               const SizedBox(height: 4),
               // [Fix-ASSESSMENT-FORM] Libellés réels (classe • matière •
               // période) au lieu des identifiants techniques.
@@ -932,7 +955,7 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
                 )
               else
                 DropdownButtonFormField<AssessmentTypeInfo>(
-                  value: _type,
+                  initialValue: _type,
                   // [Fix-OVERFLOW] voir _DropdownField.
                   isExpanded: true,
                   decoration: const InputDecoration(
@@ -941,14 +964,16 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
                     isDense: true,
                   ),
                   items: types
-                      .map((t) => DropdownMenuItem(
-                            value: t,
-                            child: Text(
-                              '${t.name} (${t.category.label})',
-                              overflow: TextOverflow.ellipsis,
-                              maxLines: 1,
-                            ),
-                          ))
+                      .map(
+                        (t) => DropdownMenuItem(
+                          value: t,
+                          child: Text(
+                            '${t.name} (${t.category.label})',
+                            overflow: TextOverflow.ellipsis,
+                            maxLines: 1,
+                          ),
+                        ),
+                      )
                       .toList(),
                   onChanged: _onTypeChanged,
                   // [Fix-ASSESSMENT-FORM] Type obligatoire (miroir serveur).
@@ -962,20 +987,20 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(Icons.info_outline,
-                        size: 16,
-                        color: Theme.of(context).colorScheme.onSurfaceVariant),
+                    Icon(
+                      Icons.info_outline,
+                      size: 16,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                     const SizedBox(width: 6),
                     Expanded(
                       child: Text(
                         'Compositions et examens : créés par '
                         'l\'administration uniquement.',
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodySmall
-                            ?.copyWith(
-                              color:
-                                  Theme.of(context).colorScheme.onSurfaceVariant,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
                             ),
                       ),
                     ),
@@ -1052,7 +1077,9 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
   /// Bornne [d] à l'intérieur de la période (le DatePicker exige une
   /// date initiale comprise entre firstDate et lastDate).
   DateTime _clampedToPeriod(
-      DateTime d, ({DateTime start, DateTime end}) b) {
+    DateTime d,
+    ({DateTime start, DateTime end}) b,
+  ) {
     if (d.isBefore(b.start)) return b.start;
     if (d.isAfter(b.end)) return b.end;
     return d;
@@ -1150,7 +1177,8 @@ class _NumberStepper extends StatelessWidget {
             icon: const Icon(Icons.remove_circle_outline),
             onPressed: value > min
                 ? () => onChanged(
-                    GradeFormatter.snap((value - step).clamp(min, max)))
+                      GradeFormatter.snap((value - step).clamp(min, max)),
+                    )
                 : null,
           ),
           Expanded(
@@ -1165,7 +1193,8 @@ class _NumberStepper extends StatelessWidget {
             icon: const Icon(Icons.add_circle_outline),
             onPressed: value < max
                 ? () => onChanged(
-                    GradeFormatter.snap((value + step).clamp(min, max)))
+                      GradeFormatter.snap((value + step).clamp(min, max)),
+                    )
                 : null,
           ),
         ],
@@ -1195,6 +1224,7 @@ class _GradeEntrySheet extends ConsumerStatefulWidget {
     this.isAdmin = false,
     this.classSubjectId,
     this.periodId,
+    this.classroomId,
   });
 
   final AssessmentDto assessment;
@@ -1214,6 +1244,7 @@ class _GradeEntrySheet extends ConsumerStatefulWidget {
   /// Période sélectionnée dans la page — même rôle que
   /// [classSubjectId] (le filtre de la liste hors-ligne en dépend).
   final int? periodId;
+  final int? classroomId;
 
   @override
   ConsumerState<_GradeEntrySheet> createState() => _GradeEntrySheetState();
@@ -1228,13 +1259,16 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
 
   @override
   Widget build(BuildContext context) {
-    final async = ref.watch(assessmentGradesProvider(
-      (
-        assessmentId: widget.assessment.id,
-        classSubjectId: widget.classSubjectId,
-        periodId: widget.periodId,
+    final async = ref.watch(
+      assessmentGradesProvider(
+        (
+          assessmentId: widget.assessment.id,
+          classSubjectId: widget.classSubjectId,
+          periodId: widget.periodId,
+          classroomId: widget.classroomId,
+        ),
       ),
-    ));
+    );
     final maxHeight = MediaQuery.of(context).size.height * 0.85;
 
     return ConstrainedBox(
@@ -1284,8 +1318,11 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.visibility_outlined,
-                        size: 14, color: Colors.blueGrey.shade700),
+                    Icon(
+                      Icons.visibility_outlined,
+                      size: 14,
+                      color: Colors.blueGrey.shade700,
+                    ),
                     const SizedBox(width: 6),
                     Text(
                       'Lecture seule (GRADE_READ)',
@@ -1337,18 +1374,19 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
                     },
                   );
                 },
-                loading: () =>
-                    const AppLoading(label: 'Chargement des notes…'),
+                loading: () => const AppLoading(label: 'Chargement des notes…'),
                 error: (e, _) => AppErrorWidget(
                   message: e.toString(),
                   onRetry: () => ref.invalidate(
-                      assessmentGradesProvider(
-                    (
-                      assessmentId: widget.assessment.id,
-                      classSubjectId: widget.classSubjectId,
-                      periodId: widget.periodId,
+                    assessmentGradesProvider(
+                      (
+                        assessmentId: widget.assessment.id,
+                        classSubjectId: widget.classSubjectId,
+                        periodId: widget.periodId,
+                        classroomId: widget.classroomId,
+                      ),
                     ),
-                  )),
+                  ),
                 ),
               ),
             ),
@@ -1554,15 +1592,18 @@ class _GradeRowState extends State<_GradeRow> {
                             ),
                           ),
                           if (readOnly)
-                            Icon(Icons.visibility_outlined,
-                                size: 14,
-                                color:
-                                    theme.colorScheme.onSurfaceVariant),
+                            Icon(
+                              Icons.visibility_outlined,
+                              size: 14,
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
                         ],
                       ),
                       if (widget.grade.studentMatricule.isNotEmpty)
-                        Text(widget.grade.studentMatricule,
-                            style: theme.textTheme.bodySmall),
+                        Text(
+                          widget.grade.studentMatricule,
+                          style: theme.textTheme.bodySmall,
+                        ),
                       // [Fix-GRADE-CHIP-OVERFLOW] La marque de statut passe
                       // sur sa PROPRE ligne (largeur bornée par la colonne,
                       // texte sur 2 lignes max) : l'ancienne position — dans
@@ -1583,7 +1624,8 @@ class _GradeRowState extends State<_GradeRow> {
                   child: TextField(
                     controller: _valueCtrl,
                     keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true),
+                      decimal: true,
+                    ),
                     enabled: !widget.grade.isAbsent && !disabled,
                     decoration: InputDecoration(
                       suffixText: '/ ${widget.maxScore.toStringAsFixed(0)}',
@@ -1593,7 +1635,9 @@ class _GradeRowState extends State<_GradeRow> {
                       isDense: true,
                       border: const OutlineInputBorder(),
                       contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 10),
+                        horizontal: 10,
+                        vertical: 10,
+                      ),
                     ),
                     textAlign: TextAlign.center,
                   ),
@@ -1612,9 +1656,12 @@ class _GradeRowState extends State<_GradeRow> {
                               // arrière (décocher « Absent » restaure la note
                               // saisie). Si on coche Absent, value=null côté
                               // serveur.
-                              widget.onChanged(_copyWith(
+                              widget.onChanged(
+                                _copyWith(
                                   value: absent ? null : widget.grade.value,
-                                  isAbsent: absent));
+                                  isAbsent: absent,
+                                ),
+                              );
                             },
                     ),
                     const Text('Abs', style: TextStyle(fontSize: 11)),
@@ -1626,13 +1673,15 @@ class _GradeRowState extends State<_GradeRow> {
             TextField(
               controller: _commentCtrl,
               enabled: !disabled,
-              decoration: InputDecoration(
+              decoration: const InputDecoration(
                 isDense: true,
                 hintText: 'Commentaire (optionnel)',
-                border: const OutlineInputBorder(),
-                prefixIcon: const Icon(Icons.comment_outlined, size: 18),
-                contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 10, vertical: 10),
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.comment_outlined, size: 18),
+                contentPadding: EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 10,
+                ),
               ),
               style: theme.textTheme.bodySmall,
               maxLines: 1,
@@ -1678,7 +1727,7 @@ class _GradeMarkChip extends StatelessWidget {
         final newV = grade.modification?.newValue ??
             grade.value; // hors-ligne : valeur proposée affichée
         label = oldV != null
-            ? 'En attente de validation (${oldV.toStringAsFixed(oldV.truncateToDouble() == oldV ? 0 : 1)} → ${newV?.toStringAsFixed(newV!.truncateToDouble() == newV ? 0 : 1) ?? '?'})'
+            ? 'En attente de validation (${oldV.toStringAsFixed(oldV.truncateToDouble() == oldV ? 0 : 1)} → ${newV?.toStringAsFixed(newV.truncateToDouble() == newV ? 0 : 1) ?? '?'})'
             : 'En attente de validation';
         fg = Colors.orange.shade800;
         bg = Colors.orange.shade50;

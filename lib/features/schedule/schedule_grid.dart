@@ -92,23 +92,23 @@ class ScheduleGridView extends StatelessWidget {
                       margin: EdgeInsets.zero,
                       child: Padding(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 10),
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
                         child: Text(
                           d.label,
                           textAlign: TextAlign.center,
-                          style: Theme.of(context)
-                              .textTheme
-                              .titleSmall
-                              ?.copyWith(
-                                color: isToday
-                                    ? Theme.of(context)
-                                        .colorScheme
-                                        .onTertiaryContainer
-                                    : Theme.of(context)
-                                        .colorScheme
-                                        .onPrimaryContainer,
-                                fontWeight: FontWeight.w700,
-                              ),
+                          style:
+                              Theme.of(context).textTheme.titleSmall?.copyWith(
+                                    color: isToday
+                                        ? Theme.of(context)
+                                            .colorScheme
+                                            .onTertiaryContainer
+                                        : Theme.of(context)
+                                            .colorScheme
+                                            .onPrimaryContainer,
+                                    fontWeight: FontWeight.w700,
+                                  ),
                         ),
                       ),
                     ),
@@ -126,14 +126,16 @@ class ScheduleGridView extends StatelessWidget {
                         ),
                       )
                     else
-                      ...list.map((s) => ScheduleEntryCard(
-                            entry: s,
-                            mode: mode,
-                            showWeekBadge: showWeekBadge,
-                            compact: compact,
-                            onTap:
-                                onEntryTap == null ? null : () => onEntryTap!(s),
-                          )),
+                      ...list.map(
+                        (s) => ScheduleEntryCard(
+                          entry: s,
+                          mode: mode,
+                          showWeekBadge: showWeekBadge,
+                          compact: compact,
+                          onTap:
+                              onEntryTap == null ? null : () => onEntryTap!(s),
+                        ),
+                      ),
                   ],
                 ),
               );
@@ -184,8 +186,11 @@ class ScheduleEntryCard extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  Icon(Icons.schedule,
-                      size: 14, color: theme.colorScheme.primary),
+                  Icon(
+                    Icons.schedule,
+                    size: 14,
+                    color: theme.colorScheme.primary,
+                  ),
                   const SizedBox(width: 4),
                   Expanded(
                     child: Text(
@@ -199,7 +204,9 @@ class ScheduleEntryCard extends StatelessWidget {
                   if (showWeekBadge && !entry.isAllWeeks)
                     Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 1),
+                        horizontal: 6,
+                        vertical: 1,
+                      ),
                       decoration: BoxDecoration(
                         color: entry.weekType == WeekType.b
                             ? Colors.indigo.withValues(alpha: 0.14)
@@ -220,7 +227,9 @@ class ScheduleEntryCard extends StatelessWidget {
                     const SizedBox(width: 4),
                     Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 1),
+                        horizontal: 6,
+                        vertical: 1,
+                      ),
                       decoration: BoxDecoration(
                         color: theme.colorScheme.secondaryContainer
                             .withValues(alpha: 0.6),
@@ -246,11 +255,12 @@ class ScheduleEntryCard extends StatelessWidget {
                 Row(
                   children: [
                     Icon(
-                        mode == ScheduleDisplayMode.teacher
-                            ? Icons.book_outlined
-                            : Icons.person_outline,
-                        size: 12,
-                        color: theme.colorScheme.onSurfaceVariant),
+                      mode == ScheduleDisplayMode.teacher
+                          ? Icons.book_outlined
+                          : Icons.person_outline,
+                      size: 12,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
                     const SizedBox(width: 4),
                     Expanded(
                       child: Text(
@@ -296,32 +306,40 @@ Future<void> showScheduleEntryDetails(
             ),
             const SizedBox(height: 12),
             _DetailRow(
-                icon: Icons.schedule,
-                label: 'Horaire',
-                value: '${entry.startTime} – ${entry.endTime}'),
+              icon: Icons.schedule,
+              label: 'Horaire',
+              value: '${entry.startTime} – ${entry.endTime}',
+            ),
             _DetailRow(
-                icon: Icons.calendar_today,
-                label: 'Jour',
-                value: entry.day?.label ?? '—'),
+              icon: Icons.calendar_today,
+              label: 'Jour',
+              value: entry.day?.label ?? '—',
+            ),
             if (mode == ScheduleDisplayMode.teacher)
               _DetailRow(
-                  icon: Icons.book_outlined,
-                  label: 'Matière',
-                  value: entry.subjectName ?? '—')
+                icon: Icons.book_outlined,
+                label: 'Matière',
+                value: entry.subjectName ?? '—',
+              )
             else
               _DetailRow(
-                  icon: Icons.person_outline,
-                  label: 'Enseignant',
-                  value: entry.teacherName ?? '—'),
+                icon: Icons.person_outline,
+                label: 'Enseignant',
+                value: entry.teacherName ?? '—',
+              ),
             if (entry.classroomName != null &&
                 mode == ScheduleDisplayMode.teacher)
               _DetailRow(
-                  icon: Icons.school_outlined,
-                  label: 'Classe',
-                  value: entry.classroomName!),
+                icon: Icons.school_outlined,
+                label: 'Classe',
+                value: entry.classroomName!,
+              ),
             if (entry.room != null && entry.room!.isNotEmpty)
               _DetailRow(
-                  icon: Icons.place_outlined, label: 'Salle', value: entry.room!),
+                icon: Icons.place_outlined,
+                label: 'Salle',
+                value: entry.room!,
+              ),
             _DetailRow(
               icon: Icons.repeat,
               label: 'Semaine',
@@ -354,9 +372,12 @@ class _DetailRow extends StatelessWidget {
         children: [
           Icon(icon, size: 18, color: Theme.of(context).colorScheme.primary),
           const SizedBox(width: 12),
-          Text(label,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant)),
+          Text(
+            label,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+          ),
           const Spacer(),
           Flexible(
             child: Text(
@@ -386,14 +407,18 @@ class ScheduleOfflineBanner extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         child: Row(
           children: [
-            Icon(Icons.cloud_off,
-                size: 18, color: Theme.of(context).colorScheme.onErrorContainer),
+            Icon(
+              Icons.cloud_off,
+              size: 18,
+              color: Theme.of(context).colorScheme.onErrorContainer,
+            ),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
                 'Mode hors-ligne : affichage du dernier emploi du temps synchronisé.',
                 style: TextStyle(
-                    color: Theme.of(context).colorScheme.onErrorContainer),
+                  color: Theme.of(context).colorScheme.onErrorContainer,
+                ),
               ),
             ),
           ],

@@ -43,6 +43,8 @@ class Periods extends Table {
   IntColumn get id => integer().autoIncrement()();
   TextColumn get name => text().withLength(min: 1, max: 64)();
   IntColumn get schoolYearId => integer().nullable()();
+  IntColumn get cycleId => integer().nullable()();
+  TextColumn get cycleName => text().nullable()();
   DateTimeColumn get startDate => dateTime().nullable()();
   DateTimeColumn get endDate => dateTime().nullable()();
   RealColumn get weight => real().withDefault(const Constant(1.0))();
@@ -57,6 +59,7 @@ class Levels extends Table {
   IntColumn get id => integer().autoIncrement()();
   TextColumn get name => text().withLength(min: 1, max: 64)();
   TextColumn get code => text().nullable()();
+  IntColumn get cycleId => integer().nullable()();
   IntColumn get order => integer().withDefault(const Constant(0))();
   DateTimeColumn get syncedAt => dateTime().nullable()();
   BoolColumn get isDirty => boolean().withDefault(const Constant(false))();

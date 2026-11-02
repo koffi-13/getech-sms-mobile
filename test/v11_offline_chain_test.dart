@@ -36,10 +36,12 @@ const _teacherUserId = 1;
 class _RejectAllInterceptor extends Interceptor {
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
-    handler.reject(DioException.connectionError(
-      requestOptions: options,
-      reason: 'hors-ligne',
-    ));
+    handler.reject(
+      DioException.connectionError(
+        requestOptions: options,
+        reason: 'hors-ligne',
+      ),
+    );
   }
 }
 
@@ -53,18 +55,22 @@ class _RoutingInterceptor extends Interceptor {
     final path = options.uri.path;
     for (final entry in routes.entries) {
       if (path.contains(entry.key)) {
-        handler.resolve(Response(
-          requestOptions: options,
-          statusCode: 200,
-          data: entry.value,
-        ));
+        handler.resolve(
+          Response(
+            requestOptions: options,
+            statusCode: 200,
+            data: entry.value,
+          ),
+        );
         return;
       }
     }
-    handler.reject(DioException.connectionError(
-      requestOptions: options,
-      reason: 'route inconnue en test : $path',
-    ));
+    handler.reject(
+      DioException.connectionError(
+        requestOptions: options,
+        reason: 'route inconnue en test : $path',
+      ),
+    );
   }
 }
 
@@ -110,15 +116,15 @@ class _FakeAuthNotifier extends AuthNotifier {
   AuthState build() => initial;
 }
 
-AuthState _teacherAuth() => AuthState(
-      user: const UserDto(
+AuthState _teacherAuth() => const AuthState(
+      user: UserDto(
         id: _teacherUserId,
         username: 'r11_teacher',
         role: 'teacher',
       ),
       token: 'test-token',
-      permissions: const ['GRADE_READ', 'GRADE_EDIT'],
-      roles: const ['TEACHER'],
+      permissions: ['GRADE_READ', 'GRADE_EDIT'],
+      roles: ['TEACHER'],
       establishmentId: 1,
     );
 
@@ -522,9 +528,8 @@ Map<String, Object> _routesFor({required bool serverPatched}) => {
       '/students': _realStudents,
       '/grades/class-subjects': _realClassSubjects,
       '/grades/assessments/1/grades': _realRoster,
-      '/grades/assessments': serverPatched
-          ? _realAssessmentsPatched
-          : _realAssessmentsPreV10,
+      '/grades/assessments':
+          serverPatched ? _realAssessmentsPatched : _realAssessmentsPreV10,
       '/settings/periods': _realPeriods,
       '/classrooms': _realClassrooms,
     };
@@ -539,8 +544,8 @@ void main() {
   /// Exécute la phase EN LIGNE complète (sync pull + consultation Notes)
   /// sur [container], comme le ferait l'enseignant au matin.
   Future<void> runOnlinePhase(ProviderContainer container) async {
-    final conn = container.read(connectionProvider.notifier)
-        as _FakeConnectionNotifier;
+    final conn =
+        container.read(connectionProvider.notifier) as _FakeConnectionNotifier;
     conn.forceOnline();
 
     // 1. Sync pull (dashboard au démarrage).
@@ -548,28 +553,32 @@ void main() {
     expect(result.errors, isEmpty, reason: 'le pull ne doit pas échouer');
 
     // 2. Page Notes : cascade complète en ligne.
-    final classrooms =
-        await container.read(classroomsForGradesProvider.future);
+    final classrooms = await container.read(classroomsForGradesProvider.future);
     expect(classrooms, isNotEmpty, reason: 'la classe doit être listée');
 
     final periods = await container.read(periodsProvider.future);
     expect(periods, isNotEmpty, reason: 'la période doit être listée');
 
-    final subjects =
-        await container.read(classSubjectsProvider(1).future);
+    final subjects = await container.read(classSubjectsProvider(1).future);
     expect(subjects, isNotEmpty, reason: 'la matière doit être listée');
 
-    final assessments = await container
-        .read(assessmentsProvider(
-            const AssessmentsQuery(classSubjectId: 1, periodId: 1))
-            .future);
-    expect(assessments, isNotEmpty,
-        reason: "l'évaluation doit être listée en ligne");
+    final assessments = await container.read(
+      assessmentsProvider(
+        const AssessmentsQuery(classSubjectId: 1, periodId: 1),
+      ).future,
+    );
+    expect(
+      assessments,
+      isNotEmpty,
+      reason: "l'évaluation doit être listée en ligne",
+    );
 
     // 3. Ouverture de l'évaluation → roster complet (3 élèves, 0 note).
-    final roster = await container.read(assessmentGradesProvider(
-      (assessmentId: 1, classSubjectId: 1, periodId: 1),
-    ).future);
+    final roster = await container.read(
+      assessmentGradesProvider(
+        (assessmentId: 1, classSubjectId: 1, periodId: 1, classroomId: null),
+      ).future,
+    );
     expect(roster, hasLength(3), reason: 'le roster complet doit être servi');
   }
 
@@ -581,14 +590,21 @@ void main() {
           'sync pull réel → consultation en ligne → bascule hors-ligne → '
           'la saisie doit lister les 3 élèves', () async {
         final db = AppDatabase.forTesting(NativeDatabase.memory());
-        final container = ProviderContainer(overrides: [
-          databaseProvider.overrideWith((ref) => db),
-          dioProvider.overrideWith((ref) => _routingDio(_routesFor(
-                serverPatched: variant,
-              ))),
-          connectionProvider.overrideWith((ref) => _FakeConnectionNotifier(ref)),
-          authProvider.overrideWith(() => _FakeAuthNotifier(_teacherAuth())),
-        ]);
+        final container = ProviderContainer(
+          overrides: [
+            databaseProvider.overrideWith((ref) => db),
+            dioProvider.overrideWith(
+              (ref) => _routingDio(
+                _routesFor(
+                  serverPatched: variant,
+                ),
+              ),
+            ),
+            connectionProvider
+                .overrideWith((ref) => _FakeConnectionNotifier(ref)),
+            authProvider.overrideWith(() => _FakeAuthNotifier(_teacherAuth())),
+          ],
+        );
         addTearDown(container.dispose);
         addTearDown(db.close);
 
@@ -596,41 +612,66 @@ void main() {
         await runOnlinePhase(container);
 
         // ---- BASCULE HORS-LIGNE (le serveur devient injoignable) ----
-        final conn =
-            container.read(connectionProvider.notifier) as _FakeConnectionNotifier;
+        final conn = container.read(connectionProvider.notifier)
+            as _FakeConnectionNotifier;
         conn.forceOffline();
 
         // La cascade complète doit fonctionner depuis Drift.
         final classroomsOffline =
             await container.read(classroomsForGradesProvider.future);
-        expect(classroomsOffline, isNotEmpty,
-            reason: '[offline] la classe doit venir du cache');
+        expect(
+          classroomsOffline,
+          isNotEmpty,
+          reason: '[offline] la classe doit venir du cache',
+        );
 
         final periodsOffline = await container.read(periodsProvider.future);
-        expect(periodsOffline, isNotEmpty,
-            reason: '[offline] la période doit venir du cache');
+        expect(
+          periodsOffline,
+          isNotEmpty,
+          reason: '[offline] la période doit venir du cache',
+        );
 
         final subjectsOffline =
             await container.read(classSubjectsProvider(1).future);
-        expect(subjectsOffline, isNotEmpty,
-            reason: '[offline] la matière doit venir du cache');
+        expect(
+          subjectsOffline,
+          isNotEmpty,
+          reason: '[offline] la matière doit venir du cache',
+        );
 
-        final assessmentsOffline = await container.read(assessmentsProvider(
-          const AssessmentsQuery(classSubjectId: 1, periodId: 1),
-        ).future);
-        expect(assessmentsOffline, isNotEmpty,
-            reason: "[offline] l'évaluation doit venir du cache");
+        final assessmentsOffline = await container.read(
+          assessmentsProvider(
+            const AssessmentsQuery(classSubjectId: 1, periodId: 1),
+          ).future,
+        );
+        expect(
+          assessmentsOffline,
+          isNotEmpty,
+          reason: "[offline] l'évaluation doit venir du cache",
+        );
 
         // LE test du retour utilisateur : la feuille de saisie hors-ligne
         // doit lister les élèves (« Aucun élève à noter » sinon).
-        final rosterOffline = await container.read(assessmentGradesProvider(
-          (assessmentId: 1, classSubjectId: 1, periodId: 1),
-        ).future);
-        expect(rosterOffline, hasLength(3),
-            reason:
-                "[offline] les 3 élèves de la classe doivent être notables");
-        expect(rosterOffline.map((e) => e.studentName),
-            containsAll(['Élève1 Prénom', 'Élève2 Prénom', 'Élève3 Prénom']));
+        final rosterOffline = await container.read(
+          assessmentGradesProvider(
+            (
+              assessmentId: 1,
+              classSubjectId: 1,
+              periodId: 1,
+              classroomId: null
+            ),
+          ).future,
+        );
+        expect(
+          rosterOffline,
+          hasLength(3),
+          reason: '[offline] les 3 élèves de la classe doivent être notables',
+        );
+        expect(
+          rosterOffline.map((e) => e.studentName),
+          containsAll(['Élève1 Prénom', 'Élève2 Prénom', 'Élève3 Prénom']),
+        );
       });
 
       test(
@@ -640,34 +681,43 @@ void main() {
 
         // Phase en ligne : premier container (l'app d'hier).
         {
-          final container = ProviderContainer(overrides: [
-            databaseProvider.overrideWith((ref) => db),
-            dioProvider.overrideWith(
-                (ref) => _routingDio(_routesFor(serverPatched: variant))),
-            connectionProvider.overrideWith((ref) => _FakeConnectionNotifier(ref)),
-            authProvider.overrideWith(() => _FakeAuthNotifier(_teacherAuth())),
-          ]);
+          final container = ProviderContainer(
+            overrides: [
+              databaseProvider.overrideWith((ref) => db),
+              dioProvider.overrideWith(
+                (ref) => _routingDio(_routesFor(serverPatched: variant)),
+              ),
+              connectionProvider
+                  .overrideWith((ref) => _FakeConnectionNotifier(ref)),
+              authProvider
+                  .overrideWith(() => _FakeAuthNotifier(_teacherAuth())),
+            ],
+          );
           addTearDown(container.dispose);
           await runOnlinePhase(container);
         }
 
         // L'app est fermée puis rouverte HORS-LIGNE : nouveau container,
         // AUCUN appel réseau possible (routes vides → rejet).
-        final containerOffline = ProviderContainer(overrides: [
-          databaseProvider.overrideWith((ref) => db),
-          dioProvider.overrideWith((ref) {
-            final dio = Dio(BaseOptions(
-              connectTimeout: const Duration(milliseconds: 50),
-            ));
-            dio.interceptors.add(_RejectAllInterceptor());
-            return dio;
-          }),
-          connectionProvider.overrideWith((ref) {
-            final n = _FakeConnectionNotifier(ref);
-            return n;
-          }),
-          authProvider.overrideWith(() => _FakeAuthNotifier(_teacherAuth())),
-        ]);
+        final containerOffline = ProviderContainer(
+          overrides: [
+            databaseProvider.overrideWith((ref) => db),
+            dioProvider.overrideWith((ref) {
+              final dio = Dio(
+                BaseOptions(
+                  connectTimeout: const Duration(milliseconds: 50),
+                ),
+              );
+              dio.interceptors.add(_RejectAllInterceptor());
+              return dio;
+            }),
+            connectionProvider.overrideWith((ref) {
+              final n = _FakeConnectionNotifier(ref);
+              return n;
+            }),
+            authProvider.overrideWith(() => _FakeAuthNotifier(_teacherAuth())),
+          ],
+        );
         addTearDown(containerOffline.dispose);
         addTearDown(db.close);
 
@@ -676,21 +726,65 @@ void main() {
                 as _FakeConnectionNotifier)
             .forceOffline();
 
-        final assessmentsOffline = await containerOffline
-            .read(assessmentsProvider(
-                const AssessmentsQuery(classSubjectId: 1, periodId: 1))
-                .future);
-        expect(assessmentsOffline, isNotEmpty,
-            reason: "[redémarrage offline] l'évaluation doit être en cache");
+        final assessmentsOffline = await containerOffline.read(
+          assessmentsProvider(
+            const AssessmentsQuery(classSubjectId: 1, periodId: 1),
+          ).future,
+        );
+        expect(
+          assessmentsOffline,
+          isNotEmpty,
+          reason: "[redémarrage offline] l'évaluation doit être en cache",
+        );
 
-        final rosterOffline = await containerOffline
-            .read(assessmentGradesProvider(
-          (assessmentId: 1, classSubjectId: 1, periodId: 1),
-        ).future);
-        expect(rosterOffline, hasLength(3),
-            reason:
-                '[redémarrage offline] les élèves doivent être notables');
+        final rosterOffline = await containerOffline.read(
+          assessmentGradesProvider(
+            (
+              assessmentId: 1,
+              classSubjectId: 1,
+              periodId: 1,
+              classroomId: null
+            ),
+          ).future,
+        );
+        expect(
+          rosterOffline,
+          hasLength(3),
+          reason: '[redémarrage offline] les élèves doivent être notables',
+        );
       });
     });
   }
+
+  test(
+      'sync pull seul → hors-ligne sans avoir ouvert la page Notes → roster '
+      'disponible depuis Drift', () async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    final container = ProviderContainer(
+      overrides: [
+        databaseProvider.overrideWith((ref) => db),
+        dioProvider.overrideWith(
+          (ref) => _routingDio(_routesFor(serverPatched: true)),
+        ),
+        connectionProvider.overrideWith((ref) => _FakeConnectionNotifier(ref)),
+        authProvider.overrideWith(() => _FakeAuthNotifier(_teacherAuth())),
+      ],
+    );
+    addTearDown(container.dispose);
+    addTearDown(db.close);
+
+    final conn =
+        container.read(connectionProvider.notifier) as _FakeConnectionNotifier;
+    conn.forceOnline();
+    final result = await container.read(syncEngineProvider).pull();
+    expect(result.errors, isEmpty);
+
+    conn.forceOffline();
+    final roster = await container.read(
+      assessmentGradesProvider(
+        (assessmentId: 1, classSubjectId: 1, periodId: 1, classroomId: null),
+      ).future,
+    );
+    expect(roster, hasLength(3));
+  });
 }

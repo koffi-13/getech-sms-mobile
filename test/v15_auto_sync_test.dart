@@ -77,8 +77,10 @@ void main() {
 
   group('[V15] isNetworkFailure (repli outbox vs erreur serveur)', () {
     test('NetworkException (timeout/refus) → repli outbox', () {
-      expect(isNetworkFailure(const NetworkException('connexion refusée')),
-          isTrue);
+      expect(
+        isNetworkFailure(const NetworkException('connexion refusée')),
+        isTrue,
+      );
     });
 
     test('ApiException sans status (pas de réponse serveur) → repli outbox',
@@ -88,16 +90,20 @@ void main() {
 
     test('403 serveur → remonté à l’utilisateur (PAS de repli)', () {
       expect(
-          isNetworkFailure(
-              const ApiException('Permission insuffisante', statusCode: 403)),
-          isFalse);
+        isNetworkFailure(
+          const ApiException('Permission insuffisante', statusCode: 403),
+        ),
+        isFalse,
+      );
     });
 
     test('422 validation → remonté à l’utilisateur (PAS de repli)', () {
       expect(
-          isNetworkFailure(
-              const ApiException('Champ invalide', statusCode: 422)),
-          isFalse);
+        isNetworkFailure(
+          const ApiException('Champ invalide', statusCode: 422),
+        ),
+        isFalse,
+      );
     });
 
     test('401 → remonté (re-login), pas de repli silencieux', () {
@@ -118,7 +124,7 @@ void main() {
       subjectId: 7,
     );
 
-    final rows = const [
+    const rows = [
       RankingRowDto(
         rank: 1,
         studentId: 101,
@@ -183,8 +189,7 @@ void main() {
         () async {
       final container = ProviderContainer();
       addTearDown(container.dispose);
-      final result =
-          await container.read(rankingProvider(qSubject).future);
+      final result = await container.read(rankingProvider(qSubject).future);
       expect(result, isEmpty);
     });
   });

@@ -103,14 +103,34 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
   @override
   void dispose() {
     for (final c in [
-      _nom, _prenoms, _matricule, _groupe,
-      _birthPlace, _birthPrefecture, _birthRegion, _birthCountry,
-      _previousSchool, _transport,
-      _phone, _email, _address, _city,
-      _allergies, _doctor,
-      _pereNom, _perePrenoms, _perePhone, _pereProfession,
-      _mereNom, _merePrenoms, _merePhone, _mereProfession,
-      _tuteurNom, _tuteurPrenoms, _tuteurPhone, _tuteurEmail,
+      _nom,
+      _prenoms,
+      _matricule,
+      _groupe,
+      _birthPlace,
+      _birthPrefecture,
+      _birthRegion,
+      _birthCountry,
+      _previousSchool,
+      _transport,
+      _phone,
+      _email,
+      _address,
+      _city,
+      _allergies,
+      _doctor,
+      _pereNom,
+      _perePrenoms,
+      _perePhone,
+      _pereProfession,
+      _mereNom,
+      _merePrenoms,
+      _merePhone,
+      _mereProfession,
+      _tuteurNom,
+      _tuteurPrenoms,
+      _tuteurPhone,
+      _tuteurEmail,
       _tuteurRelation,
     ]) {
       c.dispose();
@@ -180,8 +200,9 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
         setState(() => _loaded = true);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-              content: Text('Impossible de charger l\'élève : $e'),
-              backgroundColor: Colors.red.shade700),
+            content: Text('Impossible de charger l\'élève : $e'),
+            backgroundColor: Colors.red.shade700,
+          ),
         );
       }
     }
@@ -193,7 +214,8 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
 
     return Scaffold(
       appBar: AppBar(
-          title: Text(_isEdit ? 'Modifier l\'élève' : 'Nouvel élève')),
+        title: Text(_isEdit ? 'Modifier l\'élève' : 'Nouvel élève'),
+      ),
       body: !_loaded
           ? const AppLoading()
           : Form(
@@ -209,8 +231,9 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
                         labelText: 'Nom *',
                         hintText: 'Nom de famille',
                       ),
-                      validator: (v) =>
-                          (v == null || v.trim().isEmpty) ? 'Champ requis' : null,
+                      validator: (v) => (v == null || v.trim().isEmpty)
+                          ? 'Champ requis'
+                          : null,
                     ),
                     TextFormField(
                       controller: _prenoms,
@@ -223,16 +246,19 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
                       controller: _matricule,
                       decoration: InputDecoration(
                         labelText: _isEdit ? 'Matricule' : 'Matricule',
-                        helperText: _isEdit
-                            ? null
-                            : 'Laissez vide pour auto-générer',
+                        helperText:
+                            _isEdit ? null : 'Laissez vide pour auto-générer',
                       ),
                     ),
                     DropdownButtonFormField<Sexe>(
-                      value: _sexe,
+                      initialValue: _sexe,
                       items: Sexe.values
-                          .map((s) => DropdownMenuItem(
-                              value: s, child: Text(s.label)))
+                          .map(
+                            (s) => DropdownMenuItem(
+                              value: s,
+                              child: Text(s.label),
+                            ),
+                          )
                           .toList(),
                       onChanged: (v) => setState(() => _sexe = v),
                       decoration: const InputDecoration(labelText: 'Sexe'),
@@ -241,18 +267,21 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
                       contentPadding: EdgeInsets.zero,
                       title: const Text('Date de naissance'),
                       subtitle: Text(
-                          _dob == null ? 'Non définie' : DateFormatter.date(_dob!)),
+                        _dob == null
+                            ? 'Non définie'
+                            : DateFormatter.date(_dob!),
+                      ),
                       trailing: const Icon(Icons.calendar_today),
                       onTap: _pickDob,
                     ),
                     TextFormField(
                       controller: _groupe,
                       decoration: const InputDecoration(
-                          labelText: 'Groupe (optionnel)'),
+                        labelText: 'Groupe (optionnel)',
+                      ),
                     ),
                   ]),
-                  _section(context, 'Lieu de naissance',
-                      Icons.place_outlined, [
+                  _section(context, 'Lieu de naissance', Icons.place_outlined, [
                     TextFormField(
                       controller: _birthPlace,
                       decoration:
@@ -260,7 +289,8 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
                     ),
                     TextFormField(
                       controller: _birthPrefecture,
-                      decoration: const InputDecoration(labelText: 'Préfecture'),
+                      decoration:
+                          const InputDecoration(labelText: 'Préfecture'),
                     ),
                     TextFormField(
                       controller: _birthRegion,
@@ -276,16 +306,23 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
                     classroomsAsync.when(
                       data: (list) {
                         // Garde : la valeur doit exister dans les items.
-                        final effectiveValue = (list.any((c) => c.id == _classroomId))
-                            ? _classroomId
-                            : null;
+                        final effectiveValue =
+                            (list.any((c) => c.id == _classroomId))
+                                ? _classroomId
+                                : null;
                         return DropdownButtonFormField<int>(
-                          value: effectiveValue,
+                          initialValue: effectiveValue,
                           items: [
                             const DropdownMenuItem(
-                                value: null, child: Text('Non classé')),
-                            ...list.map((c) => DropdownMenuItem(
-                                value: c.id, child: Text(c.name))),
+                              value: null,
+                              child: Text('Non classé'),
+                            ),
+                            ...list.map(
+                              (c) => DropdownMenuItem(
+                                value: c.id,
+                                child: Text(c.name),
+                              ),
+                            ),
                           ],
                           onChanged: (v) => setState(() => _classroomId = v),
                           decoration:
@@ -296,43 +333,53 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
                       error: (e, st) => Text('Erreur classes : $e'),
                     ),
                     DropdownButtonFormField<StudentStatus>(
-                      value: _status,
+                      initialValue: _status,
                       items: StudentStatus.values
-                          .map((s) => DropdownMenuItem(
-                              value: s, child: Text(s.label)))
+                          .map(
+                            (s) => DropdownMenuItem(
+                              value: s,
+                              child: Text(s.label),
+                            ),
+                          )
                           .toList(),
                       onChanged: (v) => setState(() => _status = v),
-                      decoration:
-                          const InputDecoration(labelText: 'Statut'),
+                      decoration: const InputDecoration(labelText: 'Statut'),
                     ),
                     DropdownButtonFormField<InscriptionType>(
-                      value: _inscriptionType,
+                      initialValue: _inscriptionType,
                       items: InscriptionType.values
-                          .map((s) => DropdownMenuItem(
-                              value: s, child: Text(s.label)))
+                          .map(
+                            (s) => DropdownMenuItem(
+                              value: s,
+                              child: Text(s.label),
+                            ),
+                          )
                           .toList(),
                       onChanged: (v) => setState(() => _inscriptionType = v),
                       decoration: const InputDecoration(
-                          labelText: 'Type d\'inscription'),
+                        labelText: 'Type d\'inscription',
+                      ),
                     ),
                     TextFormField(
                       controller: _previousSchool,
                       decoration: const InputDecoration(
-                          labelText: 'École précédente'),
+                        labelText: 'École précédente',
+                      ),
                     ),
                     TextFormField(
                       controller: _transport,
                       decoration: const InputDecoration(
-                          labelText: 'Transport'),
+                        labelText: 'Transport',
+                      ),
                     ),
                   ]),
-                  _section(
-                      context, 'Contact', Icons.contact_phone_outlined, [
+                  _section(context, 'Contact', Icons.contact_phone_outlined, [
                     TextFormField(
                       controller: _phone,
                       keyboardType: TextInputType.phone,
                       decoration: const InputDecoration(
-                          labelText: 'Téléphone'),
+                        labelText: 'Téléphone',
+                      ),
                     ),
                     TextFormField(
                       controller: _email,
@@ -348,49 +395,69 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
                       decoration: const InputDecoration(labelText: 'Ville'),
                     ),
                   ]),
-                  _section(context, 'Médical', Icons.medical_services_outlined,
-                      [
+                  _section(
+                      context, 'Médical', Icons.medical_services_outlined, [
                     DropdownButtonFormField<BloodType>(
                       // [Fix-BLOODTYPE] Garde défensive : si une valeur
                       // BloodType.inconnu subsistait (données corrompues),
                       // on la traite comme « non renseignée » — l'assertion
                       // DropdownButton exige exactement un item portant la
                       // valeur, et « inconnu » n'est PAS dans les items.
-                      value: (_bloodType == null || _bloodType == BloodType.inconnu)
+                      initialValue: (_bloodType == null ||
+                              _bloodType == BloodType.inconnu)
                           ? null
                           : _bloodType,
                       items: const [
                         DropdownMenuItem(value: null, child: Text('Inconnu')),
                         DropdownMenuItem(
-                            value: BloodType.aPlus, child: Text('A+')),
+                          value: BloodType.aPlus,
+                          child: Text('A+'),
+                        ),
                         DropdownMenuItem(
-                            value: BloodType.aMoins, child: Text('A-')),
+                          value: BloodType.aMoins,
+                          child: Text('A-'),
+                        ),
                         DropdownMenuItem(
-                            value: BloodType.bPlus, child: Text('B+')),
+                          value: BloodType.bPlus,
+                          child: Text('B+'),
+                        ),
                         DropdownMenuItem(
-                            value: BloodType.bMoins, child: Text('B-')),
+                          value: BloodType.bMoins,
+                          child: Text('B-'),
+                        ),
                         DropdownMenuItem(
-                            value: BloodType.abPlus, child: Text('AB+')),
+                          value: BloodType.abPlus,
+                          child: Text('AB+'),
+                        ),
                         DropdownMenuItem(
-                            value: BloodType.abMoins, child: Text('AB-')),
+                          value: BloodType.abMoins,
+                          child: Text('AB-'),
+                        ),
                         DropdownMenuItem(
-                            value: BloodType.oPlus, child: Text('O+')),
+                          value: BloodType.oPlus,
+                          child: Text('O+'),
+                        ),
                         DropdownMenuItem(
-                            value: BloodType.oMoins, child: Text('O-')),
+                          value: BloodType.oMoins,
+                          child: Text('O-'),
+                        ),
                       ],
                       onChanged: (v) => setState(() => _bloodType = v),
                       decoration: const InputDecoration(
-                          labelText: 'Groupe sanguin'),
+                        labelText: 'Groupe sanguin',
+                      ),
                     ),
                     TextFormField(
                       controller: _allergies,
                       decoration: const InputDecoration(
-                          labelText: 'Allergies'),
+                        labelText: 'Allergies',
+                      ),
                     ),
                     TextFormField(
                       controller: _doctor,
                       decoration: const InputDecoration(
-                          labelText: 'Médecin traitant'),
+                        labelText: 'Médecin traitant',
+                      ),
                     ),
                   ]),
                   _section(context, 'Père', Icons.man_outlined, [
@@ -410,7 +477,8 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
                     ),
                     TextFormField(
                       controller: _pereProfession,
-                      decoration: const InputDecoration(labelText: 'Profession'),
+                      decoration:
+                          const InputDecoration(labelText: 'Profession'),
                     ),
                   ]),
                   _section(context, 'Mère', Icons.woman_outlined, [
@@ -430,11 +498,12 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
                     ),
                     TextFormField(
                       controller: _mereProfession,
-                      decoration: const InputDecoration(labelText: 'Profession'),
+                      decoration:
+                          const InputDecoration(labelText: 'Profession'),
                     ),
                   ]),
-                  _section(context, 'Tuteur', Icons.supervisor_account_outlined,
-                      [
+                  _section(
+                      context, 'Tuteur', Icons.supervisor_account_outlined, [
                     TextFormField(
                       controller: _tuteurNom,
                       textCapitalization: TextCapitalization.characters,
@@ -458,7 +527,8 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
                     TextFormField(
                       controller: _tuteurRelation,
                       decoration: const InputDecoration(
-                          labelText: 'Relation (ex. oncle, tuteur légal)'),
+                        labelText: 'Relation (ex. oncle, tuteur légal)',
+                      ),
                     ),
                   ]),
                   const SizedBox(height: 24),
@@ -468,8 +538,7 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
                         ? const SizedBox(
                             width: 18,
                             height: 18,
-                            child:
-                                CircularProgressIndicator(strokeWidth: 2),
+                            child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : const Icon(Icons.save_outlined),
                     label: const Text('Enregistrer'),
@@ -482,7 +551,11 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
   }
 
   Widget _section(
-      BuildContext context, String title, IconData icon, List<Widget> fields) {
+    BuildContext context,
+    String title,
+    IconData icon,
+    List<Widget> fields,
+  ) {
     final theme = Theme.of(context);
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
@@ -492,17 +565,19 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Row(children: [
-                Icon(icon, size: 18, color: theme.colorScheme.primary),
-                const SizedBox(width: 8),
-                Text(title,
+              Row(
+                children: [
+                  Icon(icon, size: 18, color: theme.colorScheme.primary),
+                  const SizedBox(width: 8),
+                  Text(
+                    title,
                     style: theme.textTheme.titleSmall
-                        ?.copyWith(fontWeight: FontWeight.w700)),
-              ]),
+                        ?.copyWith(fontWeight: FontWeight.w700),
+                  ),
+                ],
+              ),
               const SizedBox(height: 4),
-              ...fields
-                  .expand((f) => [f, const SizedBox(height: 12)])
-                  .toList()
+              ...fields.expand((f) => [f, const SizedBox(height: 12)]).toList()
                 ..removeLast(),
             ],
           ),
@@ -524,33 +599,39 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
   StudentDto _buildDto() {
     final parents = <StudentParentDto>[];
     if (_pereNom.text.trim().isNotEmpty || _perePhone.text.trim().isNotEmpty) {
-      parents.add(StudentParentDto(
-        role: 'PERE',
-        nom: _pereNom.text.trim(),
-        prenoms: _perePrenoms.text.trim(),
-        phone: _perePhone.text.trim(),
-        profession: _pereProfession.text.trim(),
-      ));
+      parents.add(
+        StudentParentDto(
+          role: 'PERE',
+          nom: _pereNom.text.trim(),
+          prenoms: _perePrenoms.text.trim(),
+          phone: _perePhone.text.trim(),
+          profession: _pereProfession.text.trim(),
+        ),
+      );
     }
     if (_mereNom.text.trim().isNotEmpty || _merePhone.text.trim().isNotEmpty) {
-      parents.add(StudentParentDto(
-        role: 'MERE',
-        nom: _mereNom.text.trim(),
-        prenoms: _merePrenoms.text.trim(),
-        phone: _merePhone.text.trim(),
-        profession: _mereProfession.text.trim(),
-      ));
+      parents.add(
+        StudentParentDto(
+          role: 'MERE',
+          nom: _mereNom.text.trim(),
+          prenoms: _merePrenoms.text.trim(),
+          phone: _merePhone.text.trim(),
+          profession: _mereProfession.text.trim(),
+        ),
+      );
     }
     final guardians = <GuardianDto>[];
     if (_tuteurNom.text.trim().isNotEmpty ||
         _tuteurPhone.text.trim().isNotEmpty) {
-      guardians.add(GuardianDto(
-        nom: _tuteurNom.text.trim(),
-        prenoms: _tuteurPrenoms.text.trim(),
-        phone: _tuteurPhone.text.trim(),
-        email: _tuteurEmail.text.trim(),
-        relation: _tuteurRelation.text.trim(),
-      ));
+      guardians.add(
+        GuardianDto(
+          nom: _tuteurNom.text.trim(),
+          prenoms: _tuteurPrenoms.text.trim(),
+          phone: _tuteurPhone.text.trim(),
+          email: _tuteurEmail.text.trim(),
+          relation: _tuteurRelation.text.trim(),
+        ),
+      );
     }
 
     return StudentDto(
@@ -597,9 +678,11 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(_isEdit
-                ? 'Élève modifié.'
-                : 'Élève enregistré (synchronisation serveur en arrière-plan).'),
+            content: Text(
+              _isEdit
+                  ? 'Élève modifié.'
+                  : 'Élève enregistré (synchronisation serveur en arrière-plan).',
+            ),
           ),
         );
         context.pop();
@@ -608,8 +691,9 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-              content: Text('Erreur : $e'),
-              backgroundColor: Colors.red.shade700),
+            content: Text('Erreur : $e'),
+            backgroundColor: Colors.red.shade700,
+          ),
         );
       }
     } finally {

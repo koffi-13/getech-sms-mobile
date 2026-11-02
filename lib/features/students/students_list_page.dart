@@ -64,8 +64,10 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
   @override
   Widget build(BuildContext context) {
     final auth = ref.watch(authProvider);
-    final canRead = hasPermission(auth.permissions, RbacPermissions.studentRead);
-    final canCreate = hasPermission(auth.permissions, RbacPermissions.studentCreate);
+    final canRead =
+        hasPermission(auth.permissions, RbacPermissions.studentRead);
+    final canCreate =
+        hasPermission(auth.permissions, RbacPermissions.studentCreate);
 
     if (!canRead) {
       return Scaffold(
@@ -180,7 +182,8 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
               if (_filter != StudentFilter.empty && _filter.search.isEmpty) ...[
                 const SizedBox(width: 8),
                 TextButton.icon(
-                  onPressed: () => setState(() => _filter = StudentFilter.empty),
+                  onPressed: () =>
+                      setState(() => _filter = StudentFilter.empty),
                   icon: const Icon(Icons.clear, size: 16),
                   label: const Text('Reset'),
                   style: TextButton.styleFrom(
@@ -196,21 +199,25 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
     ];
 
     if (!scopeReady || studentsAsync.isLoading) {
-      slivers.add(const SliverFillRemaining(
-        hasScrollBody: false,
-        child: AppLoading(label: 'Chargement des élèves…'),
-      ));
+      slivers.add(
+        const SliverFillRemaining(
+          hasScrollBody: false,
+          child: AppLoading(label: 'Chargement des élèves…'),
+        ),
+      );
       return slivers;
     }
 
     if (studentsAsync.hasError) {
-      slivers.add(SliverFillRemaining(
-        hasScrollBody: false,
-        child: AppErrorWidget(
-          message: studentsAsync.error.toString(),
-          onRetry: _refresh,
+      slivers.add(
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: AppErrorWidget(
+            message: studentsAsync.error.toString(),
+            onRetry: _refresh,
+          ),
         ),
-      ));
+      );
       return slivers;
     }
 
@@ -220,7 +227,7 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
     // [Fix-TEACHER-STUDENTS-SCOPE] Enseignant : seuls les élèves de SES
     // classes (enseignement ∪ titulariat) sont visibles, combinés ou
     // filtrés par le filtre de classe (restreint à ses classes).
-    final myClassroomIds = restricted ? scope!.myClassroomIds : null;
+    final myClassroomIds = restricted ? scope.myClassroomIds : null;
     final students = allStudents.where((s) {
       if (myClassroomIds != null) {
         final cid = s.classroomId;
@@ -246,42 +253,48 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
       return true;
     }).toList();
     if (students.isEmpty) {
-      slivers.add(SliverFillRemaining(
-        hasScrollBody: false,
-        child: EmptyState(
-          icon: Icons.person_search,
-          title: 'Aucun élève trouvé',
-          message: _filter == StudentFilter.empty
-              ? (restricted
-                  ? 'Aucun élève dans vos classes. Synchronisez ou contactez '
-                      'l\'administration.'
-                  : 'Aucun élève synchronisé. Tirez pour rafraîchir.')
-              : 'Essayez d\'ajuster vos filtres ou votre recherche.',
+      slivers.add(
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: EmptyState(
+            icon: Icons.person_search,
+            title: 'Aucun élève trouvé',
+            message: _filter == StudentFilter.empty
+                ? (restricted
+                    ? 'Aucun élève dans vos classes. Synchronisez ou contactez '
+                        'l\'administration.'
+                    : 'Aucun élève synchronisé. Tirez pour rafraîchir.')
+                : 'Essayez d\'ajuster vos filtres ou votre recherche.',
+          ),
         ),
-      ));
+      );
       return slivers;
     }
 
-    slivers.add(SliverPadding(
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      sliver: SliverList.separated(
-        itemCount: students.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 4),
-        itemBuilder: (context, i) => _StudentTile(
-          student: students[i],
-          canOpenDetails: !restricted ||
-              scope!.headClassrooms
-                  .any((c) => c.id == students[i].classroomId),
+    slivers.add(
+      SliverPadding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        sliver: SliverList.separated(
+          itemCount: students.length,
+          separatorBuilder: (_, __) => const SizedBox(height: 4),
+          itemBuilder: (context, i) => _StudentTile(
+            student: students[i],
+            canOpenDetails: !restricted ||
+                scope.headClassrooms
+                    .any((c) => c.id == students[i].classroomId),
+          ),
         ),
       ),
-    ));
+    );
 
     slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 80)));
     return slivers;
   }
 
-  String _classroomLabel(AsyncValue<List<ClassroomDto>> async,
-      TeacherScope? scope) {
+  String _classroomLabel(
+    AsyncValue<List<ClassroomDto>> async,
+    TeacherScope? scope,
+  ) {
     if (_filter.classroomId == null) {
       final restricted =
           scope != null && scope.isTeacher && !scope.isAdminOrHeadmaster;
@@ -294,8 +307,11 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
     );
   }
 
-  void _openClassroomPicker(BuildContext context,
-      AsyncValue<List<ClassroomDto>> async, TeacherScope? scope) {
+  void _openClassroomPicker(
+    BuildContext context,
+    AsyncValue<List<ClassroomDto>> async,
+    TeacherScope? scope,
+  ) {
     // [Fix-TEACHER-CLASSES-SCOPE-V9] Un enseignant ne filtre que parmi SES
     // classes — l'ancien code partait de TOUTES les classes puis y AJOUTAIT
     // celles du périmètre (union) : le filtre « Mes classes » listait donc
@@ -306,7 +322,7 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
         scope != null && scope.isTeacher && !scope.isAdminOrHeadmaster;
     var list = async.value ?? [];
     if (restricted) {
-      final myIds = scope!.myClassroomIds;
+      final myIds = scope.myClassroomIds;
       final byId = <int, ClassroomDto>{
         for (final c in list)
           if (myIds.contains(c.id)) c.id: c,
@@ -325,21 +341,28 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
           children: [
             ListTile(
               title: Text(
-                  restricted ? 'Toutes mes classes' : 'Toutes les classes'),
+                restricted ? 'Toutes mes classes' : 'Toutes les classes',
+              ),
               onTap: () {
-                setState(() => _filter = _filter.copyWith(clearClassroom: true));
+                setState(
+                  () => _filter = _filter.copyWith(clearClassroom: true),
+                );
                 Navigator.pop(ctx);
               },
             ),
-            ...list.map((c) => ListTile(
-                  title: Text(c.name),
-                  subtitle: c.levelLabel.isEmpty ? null : Text(c.levelLabel),
-                  trailing: _filter.classroomId == c.id ? const Icon(Icons.check) : null,
-                  onTap: () {
-                    setState(() => _filter = _filter.copyWith(classroomId: c.id));
-                    Navigator.pop(ctx);
-                  },
-                )),
+            ...list.map(
+              (c) => ListTile(
+                title: Text(c.name),
+                subtitle: c.levelLabel.isEmpty ? null : Text(c.levelLabel),
+                trailing: _filter.classroomId == c.id
+                    ? const Icon(Icons.check)
+                    : null,
+                onTap: () {
+                  setState(() => _filter = _filter.copyWith(classroomId: c.id));
+                  Navigator.pop(ctx);
+                },
+              ),
+            ),
           ],
         ),
       ),
@@ -361,13 +384,15 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
                 Navigator.pop(ctx);
               },
             ),
-            ...Sexe.values.map((v) => ListTile(
-                  title: Text(v.label),
-                  onTap: () {
-                    setState(() => _filter = _filter.copyWith(sexe: v));
-                    Navigator.pop(ctx);
-                  },
-                )),
+            ...Sexe.values.map(
+              (v) => ListTile(
+                title: Text(v.label),
+                onTap: () {
+                  setState(() => _filter = _filter.copyWith(sexe: v));
+                  Navigator.pop(ctx);
+                },
+              ),
+            ),
           ],
         ),
       ),
@@ -389,13 +414,15 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
                 Navigator.pop(ctx);
               },
             ),
-            ...StudentStatus.values.map((v) => ListTile(
-                  title: Text(v.label),
-                  onTap: () {
-                    setState(() => _filter = _filter.copyWith(status: v));
-                    Navigator.pop(ctx);
-                  },
-                )),
+            ...StudentStatus.values.map(
+              (v) => ListTile(
+                title: Text(v.label),
+                onTap: () {
+                  setState(() => _filter = _filter.copyWith(status: v));
+                  Navigator.pop(ctx);
+                },
+              ),
+            ),
           ],
         ),
       ),
@@ -413,19 +440,23 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
             ListTile(
               title: const Text('Tous les types d\'inscription'),
               onTap: () {
-                setState(() =>
-                    _filter = _filter.copyWith(clearInscriptionType: true));
+                setState(
+                  () => _filter = _filter.copyWith(clearInscriptionType: true),
+                );
                 Navigator.pop(ctx);
               },
             ),
-            ...InscriptionType.values.map((v) => ListTile(
-                  title: Text(v.label),
-                  onTap: () {
-                    setState(() =>
-                        _filter = _filter.copyWith(inscriptionType: v));
-                    Navigator.pop(ctx);
-                  },
-                )),
+            ...InscriptionType.values.map(
+              (v) => ListTile(
+                title: Text(v.label),
+                onTap: () {
+                  setState(
+                    () => _filter = _filter.copyWith(inscriptionType: v),
+                  );
+                  Navigator.pop(ctx);
+                },
+              ),
+            ),
           ],
         ),
       ),
@@ -465,7 +496,7 @@ class _OfflineBanner extends ConsumerWidget {
             Expanded(
               child: Text(
                 'Mode hors-ligne — les données affichées peuvent être obsolètes',
-                style: const TextStyle(fontSize: 12),
+                style: TextStyle(fontSize: 12),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -546,9 +577,9 @@ class _StudentTile extends StatelessWidget {
           if (!canOpenDetails) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
-                content: Text(
-                    'Les détails des élèves sont réservés au professeur '
-                    'principal de la classe.'),
+                content:
+                    Text('Les détails des élèves sont réservés au professeur '
+                        'principal de la classe.'),
                 duration: Duration(seconds: 3),
               ),
             );

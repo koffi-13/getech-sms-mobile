@@ -11,7 +11,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../features/connections/connection_state.dart';
-import '../auth/auth_state.dart';
 import '../config/app_config.dart';
 import 'api_endpoints.dart';
 import 'api_exceptions.dart';
@@ -19,16 +18,18 @@ import 'auth_interceptor.dart';
 
 /// Provider du client Dio principal (avec auth + gestion d'erreurs + baseUrl auto).
 final dioProvider = Provider<Dio>((ref) {
-  final dio = Dio(BaseOptions(
-    connectTimeout: AppConfig.connectTimeout,
-    receiveTimeout: AppConfig.receiveTimeout,
-    sendTimeout: AppConfig.sendTimeout,
-    headers: {
-      'Accept': 'application/json',
-      'Content-Type': 'application/json',
-    },
-    responseType: ResponseType.json,
-  ));
+  final dio = Dio(
+    BaseOptions(
+      connectTimeout: AppConfig.connectTimeout,
+      receiveTimeout: AppConfig.receiveTimeout,
+      sendTimeout: AppConfig.sendTimeout,
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      responseType: ResponseType.json,
+    ),
+  );
 
   // [Fix-BASE-URL] Intercepteur qui résout les URLs relatives en URLs complètes.
   // Ordre IMPORTANT : le baseUrl interceptor doit être AVANT les autres
@@ -38,14 +39,16 @@ final dioProvider = Provider<Dio>((ref) {
   dio.interceptors.add(ApiExceptionInterceptor());
 
   if (AppConfig.isDebug) {
-    dio.interceptors.add(LogInterceptor(
-      requestHeader: false,
-      responseHeader: false,
-      requestBody: true,
-      responseBody: true,
-      error: true,
-      logPrint: (o) => debugPrint('[DIO] $o'),
-    ));
+    dio.interceptors.add(
+      LogInterceptor(
+        requestHeader: false,
+        responseHeader: false,
+        requestBody: true,
+        responseBody: true,
+        error: true,
+        logPrint: (o) => debugPrint('[DIO] $o'),
+      ),
+    );
   }
 
   ref.onDispose(dio.close);
@@ -100,10 +103,15 @@ extension ApiRequestExtension on Dio {
     Options? options,
   }) async {
     try {
-      return await get<T>(url,
-          queryParameters: query, options: options ?? Options());
+      return await get<T>(
+        url,
+        queryParameters: query,
+        options: options ?? Options(),
+      );
     } on DioException catch (e) {
-      throw (e.error is ApiException) ? e.error as Object : dioErrorToApiException(e);
+      throw (e.error is ApiException)
+          ? e.error as Object
+          : dioErrorToApiException(e);
     }
   }
 
@@ -115,7 +123,9 @@ extension ApiRequestExtension on Dio {
     try {
       return await post<T>(url, data: data, options: options ?? Options());
     } on DioException catch (e) {
-      throw (e.error is ApiException) ? e.error as Object : dioErrorToApiException(e);
+      throw (e.error is ApiException)
+          ? e.error as Object
+          : dioErrorToApiException(e);
     }
   }
 
@@ -127,7 +137,9 @@ extension ApiRequestExtension on Dio {
     try {
       return await patch<T>(url, data: data, options: options ?? Options());
     } on DioException catch (e) {
-      throw (e.error is ApiException) ? e.error as Object : dioErrorToApiException(e);
+      throw (e.error is ApiException)
+          ? e.error as Object
+          : dioErrorToApiException(e);
     }
   }
 
@@ -135,7 +147,9 @@ extension ApiRequestExtension on Dio {
     try {
       return await delete<T>(url, options: options ?? Options());
     } on DioException catch (e) {
-      throw (e.error is ApiException) ? e.error as Object : dioErrorToApiException(e);
+      throw (e.error is ApiException)
+          ? e.error as Object
+          : dioErrorToApiException(e);
     }
   }
 }
