@@ -1062,18 +1062,20 @@ void main() {
       'ids': [21],
       'has_more': false,
     };
+    // [Fix-SYNC-EDT-FIELD-MAP] V18 : format RÉEL du serveur —
+    // class_subject_id (résolu localement via la table class_subjects
+    // ci-dessus : classroom 1 / subject 1 / teacher 1) + day_of_week
+    // 0..6 (Lundi=0), PAS de week_type ni classroom_id/subject_id.
     tables['weekly_schedules'] = {
       'rows': [
         {
           'id': 31,
-          'classroom_id': 1,
-          'subject_id': 1,
-          'teacher_id': 1,
-          'time_slot_id': 1,
-          'day_of_week': 1,
-          'start_time': '08:00',
-          'end_time': '09:00',
-          'week_type': null,
+          'class_subject_id': 1,
+          'day_of_week': 0,
+          'start_time': '08:00:00',
+          'end_time': '09:00:00',
+          'room': null,
+          'active': true,
         },
       ],
       'ids': [31],
