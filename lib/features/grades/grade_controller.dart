@@ -822,18 +822,35 @@ Future<void> _cachePeriodsFromDtos(
 /// Miroir du desktop (`GradeService.get_periods(session, year, cycle_id)` via
 /// `classroom.level.cycle_id`) : on matche `period.cycle_id ==
 /// classroom.cycle_id` ([Fix-PERIOD-CYCLE] : `cycle_id` est exposé par
-/// `PeriodResponse` et `ClassroomResponse`). Si le filtre ne renvoie rien,
-/// le sélecteur reste vide plutôt que de proposer une autre période.
+/// `PeriodResponse` et `ClassroomResponse`).
+///
+/// [Fix-PERIOD-CYCLE-UNKNOWN] V18 — règle de repli en deux temps (spec
+/// utilisateur n°3) :
+///   - cycle CONNU sans période associée → liste VIDE (ne JAMAIS remplacer
+///     un cycle connu sans résultat par la liste de toutes les périodes) ;
+///   - cycle INCONNU (classe sans `cycle_id` : serveur sans table `levels`
+///     dans le pull, cache non résolu) → repli sur la liste complète des
+///     périodes actives : le dropdown reste utilisable au lieu d'un blocage
+///     muet (régression dea0674 : liste vide systématique).
 final periodsForClassroomProvider = FutureProvider.autoDispose
     .family<List<PeriodDto>, int>((ref, classroomId) async {
   ref.watch(syncGenerationProvider);
   final periods = await ref.watch(periodsProvider.future);
   final classrooms = await ref.watch(classroomsForGradesProvider.future);
   final classroom = classrooms.where((c) => c.id == classroomId).firstOrNull;
-  if (classroom == null || classroom.cycleId == null) {
-    return const <PeriodDto>[];
+  if (classroom == null) {
+    // Classe inconnue du cache : pas d'information de cycle → liste complète
+    // (jamais un sélecteur vide bloquant).
+    return periods;
   }
-  return periods.where((p) => p.cycleId == classroom.cycleId).toList();
+  final cycleId = classroom.cycleId;
+  if (cycleId == null) {
+    // Cycle non résolu (payload serveur sans levels / cycle_id) : repli
+    // documenté sur la liste complète — le filtrage reprendra dès que le
+    // cycle sera résolu (prochain pull avec levels).
+    return periods;
+  }
+  return periods.where((p) => p.cycleId == cycleId).toList();
 });
 
 /// Période active (celle du jour) d'une liste — miroir de

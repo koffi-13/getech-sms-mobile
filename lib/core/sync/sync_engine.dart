@@ -934,13 +934,21 @@ class SyncEngine {
   // colonnes sont NULL — elles seront peuplées par le prochain
   // `_fetchFromApi()` du contrôleur Classes (qui utilise `insertOrReplace`
   // avec currentStudentsCount explicite — voir ClassroomController._saveToLocal).
+  //
+  // [Fix-SYNC-CYCLE-RESOLVE] V18 : après l'upsert des classes, on RE-PARCOURT
+  // les lignes dont `cycleId` est resté NULL alors qu'un `level_id` connu
+  // existe dans la table locale `levels` — le cas se produit quand le serveur
+  // envoie `levels` APRÈS `classrooms` dans une page ultérieure (pagination
+  // ou ordre des tables côté registre serveur) : la première passe a laissé
+  // cycleId=null, la résolution par level_id est alors définitivement
+  // manquée (le prochain pull incrémental ne renverra plus ces classes).
   Future<void> _applyClassroomsPull(
     List<Map<String, dynamic>> rows,
     DateTime syncedAt,
   ) async {
     final levels = await _db.select(_db.levels).get();
     final cycleByLevelId = {
-      for (final level in levels) level.id: level.cycleId
+      for (final level in levels) level.id: level.cycleId,
     };
     final existingClassrooms = await (_db.select(_db.classrooms)
           ..where((t) => t.id.isIn(rows.map(_rId))))
@@ -1003,6 +1011,26 @@ class SyncEngine {
             );
       }
     });
+
+    // [Fix-SYNC-CYCLE-RESOLVE] V18 — deuxième passe : classes encore sans
+    // cycle alors que leur `level_id` existe désormais dans `levels`
+    // (table arrivée après `classrooms` dans le même pull ou un pull
+    // précédent). Sans cette passe, le cycle restait NULL à vie et le
+    // dropdown Périodes retombait sur la liste complète (ou vide avant
+    // le fix dea0674-inverse) au lieu du cycle de la classe.
+    final unresolved = await (_db.select(_db.classrooms)
+          ..where((t) => t.cycleId.isNull())
+          ..where((t) => t.levelId.isIn(cycleByLevelId.keys)))
+        .get();
+    for (final classroom in unresolved) {
+      final cycleId = cycleByLevelId[classroom.levelId];
+      if (cycleId == null) continue;
+      await (_db.update(_db.classrooms)
+            ..where((t) => t.id.equals(classroom.id)))
+          .write(ClassroomsCompanion(cycleId: Value(cycleId)));
+      _log.i('Cycle résolu (2e passe) : classe #${classroom.id} '
+          '« ${classroom.name} » → cycle $cycleId');
+    }
   }
 
   // [Fix-SYNC-RESOLVE-IDS] V17 — Bug 2 résiduel #2
@@ -1015,6 +1043,54 @@ class SyncEngine {
   // `inscriptionType` / `status` du mobile. Sans cette résolution, le filtre
   // `localActiveStudentCounts isNotIn(['EXCU','ABANDON'])` ne servait à rien
   // (colonne toujours NULL → tous les élèves passaient par `| isNull()`).
+  // [Fix-SYNC-CYCLE-RESOLVE] V18 — réplication de `levels` + résolution
+  // rétroactive du cycle des classes déjà en cache (miroir de la 2e passe
+  // de [_applyClassroomsPull], pour le cas où levels arrive après).
+  Future<void> _applyLevelsPull(
+    List<Map<String, dynamic>> rows,
+    DateTime syncedAt,
+  ) async {
+    await _db.batch((b) {
+      for (final row in rows) {
+        b.insert(
+          _db.levels,
+          LevelsCompanion.insert(
+            id: Value(_rId(row)),
+            name: _rStr(row, 'name'),
+            code: Value(_rStrN(row, 'code')),
+            cycleId: Value(_rIntN(row, 'cycle_id')),
+            order: Value(_rInt(row, 'order', d: 0)),
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: const Value(false),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
+      }
+    });
+
+    // Résolution rétroactive : classes sans cycle dont le niveau est
+    // désormais connu.
+    final cycleByLevelId = {
+      for (final level in await _db.select(_db.levels).get())
+        if (level.cycleId != null) level.id: level.cycleId,
+    };
+    if (cycleByLevelId.isEmpty) return;
+    final unresolved = await (_db.select(_db.classrooms)
+          ..where((t) => t.cycleId.isNull())
+          ..where((t) => t.levelId.isIn(cycleByLevelId.keys)))
+        .get();
+    for (final classroom in unresolved) {
+      final cycleId = cycleByLevelId[classroom.levelId];
+      if (cycleId == null) continue;
+      await (_db.update(_db.classrooms)
+            ..where((t) => t.id.equals(classroom.id)))
+          .write(ClassroomsCompanion(cycleId: Value(cycleId)));
+      _log.i('Cycle résolu (levels) : classe #${classroom.id} '
+          '« ${classroom.name} » → cycle $cycleId');
+    }
+  }
+
   Future<void> _applyStudentClassAssignmentsPull(
     List<Map<String, dynamic>> rows,
     DateTime syncedAt,
@@ -1121,6 +1197,16 @@ class SyncEngine {
     // servait à rien (toutes les lignes passaient par `| isNull()`).
     if (table == 'student_class_assignments') {
       await _applyStudentClassAssignmentsPull(rows, syncedAt);
+      return;
+    }
+
+    // [Fix-SYNC-CYCLE-RESOLVE] V18 : quand `levels` est répliqué (surtout
+    // APRÈS `classrooms` — page ultérieure de la pagination), on résout
+    // rétroactivement le cycle des classes déjà en cache dont cycleId est
+    // NULL. Sans cela, un serveur qui pagine classrooms avant levels laisse
+    // le cycle indéfiniment non résolu (dropdown Périodes dégradé).
+    if (table == 'levels') {
+      await _applyLevelsPull(rows, syncedAt);
       return;
     }
 
