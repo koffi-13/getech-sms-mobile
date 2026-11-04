@@ -18,6 +18,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+          cache: gradle
 
       - name: Flutter 3.41.9 (stable)
         uses: subosito/flutter-action@v2
@@ -41,7 +42,21 @@ jobs:
         run: flutter test --no-pub
 
       - name: Build APK release (arm64, keystore projet)
-        run: flutter build apk --release --target-platform android-arm64
+        run: |
+          # Retry : Maven Central renvoie parfois des 429 transitoires ; le
+          # cache ~/.gradle du runner conserve chaque artefact déjà résolu,
+          # donc chaque tentative reprend là où la précédente s'est arrêtée.
+          for i in 1 2 3 4 5; do
+            echo "=== tentative de build $i/5 ==="
+            if flutter build apk --release --target-platform android-arm64; then
+              echo "BUILD OK à la tentative $i"
+              exit 0
+            fi
+            echo "échec — pause 120 s avant retry"
+            sleep 120
+          done
+          echo "ÉCHEC après 5 tentatives"
+          exit 1
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
