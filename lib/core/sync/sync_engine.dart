@@ -24,7 +24,22 @@ final log_pkg.Logger _log = log_pkg.Logger(
 );
 
 const _mobileCacheVersionKey = '__mobile_cache_version__';
-const _mobileCacheVersion = 3;
+
+// [Fix-SYNC-CACHE-VERSION-DELTA] V20 — 3 → 4. Retour utilisateur : après
+// installation de la nouvelle APK PAR-DESSUS l'ancienne, « les périodes se
+// chargent hors-ligne mais pas les évaluations ». Cause : l'ancienne APK
+// (e1e07ef) contenait DÉJÀ la version 3 (introduite à dea0674) et avait
+// synchronisé → syncMetadata portait lastCount=3 avec un curseur RÉCENT.
+// La nouvelle APK voyait « lastCount == 3 == _mobileCacheVersion » → pull
+// DELTA (since = curseur récent) ; or le serveur filtre
+// `updated_at > since` : les évaluations créées il y a longtemps (jamais
+// modifiées) n'étaient JAMAIS renvoyées, et la table locale restait vide.
+// Les périodes s'affichaient car l'ancienne app les répliquait déjà (cache
+// conservé par la mise à jour) → symptôme asymétrique.
+// Bump → tout appareil venant d'une APK antérieure force un pull COMPLET
+// (since = 2000-01-01) et reconstitue les tables vides (assessments,
+// weekly_schedules, cycles…). Régression : v20_assessments_delta_pull_test.
+const _mobileCacheVersion = 4;
 
 // ---------------------------------------------------------------------------
 // Helpers de lecture JSON (le serveur utilise du snake_case).
