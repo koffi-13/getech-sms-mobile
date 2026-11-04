@@ -42,9 +42,12 @@ import 'package:getech_sms_mobile/features/grades/grade_controller.dart';
 import 'package:getech_sms_mobile/features/schedule/schedule_controller.dart';
 import 'package:getech_sms_mobile/shared/models/auth_dto.dart';
 
-/// Chemin du payload réel capturé (généré par l'E2E serveur, hors dépôt).
-const _payloadPath =
-    '/home/z/my-project/scripts/e2e_pull_real.json';
+/// Payload réel capturé (généré par l'E2E serveur). Version committée dans le
+/// dépôt (test/fixtures) pour que la suite tourne sur CI ; fallback sandbox
+/// pour les sessions locales où une capture plus fraîche existerait.
+final String _payloadPath = File('test/fixtures/e2e_pull_real.json').existsSync()
+    ? 'test/fixtures/e2e_pull_real.json'
+    : '/home/z/my-project/scripts/e2e_pull_real.json';
 
 class _PullOnlyInterceptor extends Interceptor {
   _PullOnlyInterceptor(this.payload);
