@@ -1420,7 +1420,18 @@ Future<void> _cacheAssessmentsFromDtos(
             id: d.Value(a.id),
             classSubjectId: a.classSubjectId ?? classSubjectId ?? 0,
             periodId: d.Value(a.periodId ?? periodId),
-            title: a.name,
+            // [Fix-SYNC-ASSESSMENT-NULL-NAME] V21 — le serveur autorise
+            // `name` NULL (REST renvoie `name or ""`) ; sans repli, le
+            // titre vide violait la contrainte Drift (min 1 caractère) et
+            // le batch ENTIER du cache échouait silencieusement (catch
+            // best-effort) : même EN LIGNE, le cache Drift ne se
+            // remplissait pas pour cette matière. Repli : nom, sinon type,
+            // sinon « Évaluation #id ».
+            title: a.name.trim().isNotEmpty
+                ? a.name
+                : (a.assessmentTypeName.trim().isNotEmpty
+                    ? a.assessmentTypeName
+                    : 'Évaluation #${a.id}'),
             type: d.Value(
               a.assessmentTypeName.isEmpty ? 'DEVOIR' : a.assessmentTypeName,
             ),

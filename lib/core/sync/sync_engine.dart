@@ -75,6 +75,11 @@ DateTime? _rDt(Map<String, dynamic> r, String k) {
   return null;
 }
 
+/// [Fix-SYNC-ASSESSMENT-NULL-NAME] V21 — retourne la chaîne si elle est
+/// non vide après trim, sinon null (chaîne de repli en cascade).
+String? _nonEmpty(String? s) =>
+    (s == null || s.trim().isEmpty) ? null : s;
+
 // ---------------------------------------------------------------------------
 // SyncState & Progress
 // ---------------------------------------------------------------------------
@@ -1305,7 +1310,56 @@ class SyncEngine {
     try {
       await _db.batch((b) {
         for (final row in rows) {
-          switch (table) {
+          _upsertRow(b, table, row, syncedAt);
+        }
+      });
+    } catch (e) {
+      // [Fix-SYNC-PER-ROW-RETRY] V21 — le batch est ATOMIQUE : une seule
+      // ligne invalide (ex. champ NOT NULL absent du payload serveur) fait
+      // échouer TOUTE la table. Avant ce correctif, l'échec était avalé
+      // silencieusement : le pull se disait « succès », le curseur
+      // avançait, et la table n'était JAMAIS répliquée (retour utilisateur
+      // « toujours rien » pour les évaluations alors que les périodes,
+      // elles, passaient). On rejoue maintenant LIGNE PAR LIGNE : seules
+      // les lignes fautives sont perdues, et l'erreur remonte à la boucle
+      // de pull (pageErrors) pour diagnostic au lieu d'être invisible.
+      _log.w('Batch table "$table" échoué ($e) — rejeu ligne par ligne');
+      var failed = 0;
+      for (final row in rows) {
+        try {
+          await _db.batch((b) => _upsertRow(b, table, row, syncedAt));
+        } catch (rowError) {
+          failed++;
+          _log.e(
+            'Pull : ligne ignorée table "$table" '
+            'id=${_rId(row)} ($rowError)',
+          );
+        }
+      }
+      if (failed > 0) {
+        // Remonte à la boucle de pull → pageErrors → SyncResult.errors
+        // (visible dans les journaux et l'écran de synchro) au lieu d'une
+        // perte silencieuse.
+        throw StateError(
+          'Table $table : $failed/${rows.length} ligne(s) ignorée(s)',
+        );
+      }
+    }
+  }
+
+  /// [Fix-SYNC-PER-ROW-RETRY] V21 — un upsert d'UNE ligne de pull (appelé
+  /// par le batch de [_applyTableChanges] puis, en cas d'échec atomique,
+  /// rejeu ligne par ligne). Le comportement d'insertion est identique au
+  /// batch d'origine (insertOrReplace, mêmes companions) : seule la
+  /// granularité change.
+  void _upsertRow(
+    Batch b,
+    String table,
+    Map<String, dynamic> row,
+    DateTime syncedAt,
+  ) {
+    final sw = table;
+    switch (sw) {
             case 'establishments':
               b.insert(
                 _db.establishments,
@@ -1480,10 +1534,25 @@ class SyncEngine {
                   id: Value(_rId(row)),
                   classSubjectId: _rInt(row, 'class_subject_id'),
                   periodId: Value(_rIntN(row, 'period_id')),
-                  // [Fix-SYNC-FIELD-MAP] Le serveur envoie `name` /
-                  // `date_taken` (colonnes réelles du modèle Assessment) —
-                  // l'ancienne lecture `title` / `date` était TOUJOURS vide.
-                  title: _rStrN(row, 'title') ?? _rStrN(row, 'name') ?? '',
+                  // [Fix-SYNC-ASSESSMENT-NULL-NAME] V21 — le serveur
+                  // autorise `name` NULL (modèle String(255) nullable ;
+                  // l'UI desktop crée `name_field.value.strip() or None`
+                  // → main_page.py:9155, et la duplication de période
+                  // aussi :9419) et le REST renvoie même `name or ""`.
+                  // L'ancienne lecture `?? ''` produisait un titre VIDE →
+                  // InvalidDataException (contrainte Drift min 1
+                  // caractère) → le batch de TOUTE la table assessments
+                  // échouait SILENCIEUSEusement (catch sans remontée) →
+                  // zéro évaluation hors-ligne, à CHAQUE synchro, alors
+                  // que le pull se disait « succès » (retour utilisateur
+                  // « toujours rien » après le fix v1.0.2 du pull complet).
+                  // Repli : nom serveur, sinon type d'évaluation, sinon
+                  // « Évaluation #id » — JAMAIS vide.
+                  title: _nonEmpty(
+                        _rStrN(row, 'title') ?? _rStrN(row, 'name'),
+                      ) ??
+                      _nonEmpty(_rStrN(row, 'assessment_type_name')) ??
+                      'Évaluation #${_rId(row)}',
                   type: Value(_rStr(row, 'type', d: 'DEVOIR')),
                   date: Value(
                     _rDt(row, 'date') ?? _rDt(row, 'date_taken'),
@@ -1823,20 +1892,13 @@ class SyncEngine {
               // label) — acceptée silencieusement : le mobile ne la stocke
               // pas (pas de table Drift dédiée), la résolution
               // classroom→cycle passe par levels.cycle_id.
-              _log.d('Table cycles : ${rows.length} ligne(s) '
+              _log.d('Table cycles : 1 ligne '
                   '(résolution via levels.cycle_id)');
               break;
 
             default:
               _log.w('Table non gérée par le sync engine : $table '
-                  '(${rows.length} lignes ignorées)');
-          }
-        }
-      });
-    } catch (e) {
-      _log.e('Erreur batch upsert table "$table" : $e');
-      // [Fix-SYNC-FAIL-SOFT] V11 : plus de rethrow — l'appelant (boucle de
-      // pull) journalise par table et poursuit avec les tables suivantes.
+                  '(1 ligne ignorée)');
     }
   }
 
