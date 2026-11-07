@@ -1178,6 +1178,78 @@ class SyncEngine {
     }
   }
 
+  /// [Fix-SYNC-COURSE-SESSIONS-RESOLVE] V22 — réplication de
+  /// `course_sessions` avec résolution `class_subject_id` → (classe,
+  /// matière) via la table locale `class_subjects` (miroir de
+  /// [_applyWeeklySchedulesPull]). Le serveur envoie selon les déploiements :
+  ///   {id, class_subject_id, teacher_id, date, scheduled_start_time,
+  ///    start_time, end_time, state, notes}
+  /// Les colonnes classroom_id / subject_id séparées sont utilisées quand
+  /// elles sont présentes (déploiements récents), sinon résolues localement.
+  Future<void> _applyCourseSessionsPull(
+    List<Map<String, dynamic>> rows,
+    DateTime syncedAt,
+  ) async {
+    final classSubjects = await _db.select(_db.classSubjects).get();
+    final csById = {
+      for (final cs in classSubjects) cs.id: cs,
+    };
+
+    await _db.transaction(() async {
+      for (final row in rows) {
+        final id = _rId(row);
+        final csId = _rIntN(row, 'class_subject_id');
+        final cs = csId == null ? null : csById[csId];
+        final startAt = _rDt(row, 'start_at');
+        String? _hhmm(dynamic v) {
+          final s = v == null ? null : v.toString();
+          if (s == null || s.isEmpty) return null;
+          return s.length >= 8 ? s.substring(0, 5) : s;
+        }
+
+        await _db.into(_db.courseSessions).insertOnConflictUpdate(
+              CourseSessionsCompanion.insert(
+                id: Value(id),
+                weeklyScheduleId: Value(_rIntN(row, 'weekly_schedule_id')),
+                classroomId: Value(
+                  _rIntN(row, 'classroom_id') ?? cs?.classroomId,
+                ),
+                subjectId: Value(
+                  _rIntN(row, 'subject_id') ?? cs?.subjectId,
+                ),
+                teacherId: Value(
+                  _rIntN(row, 'teacher_id') ?? cs?.teacherId,
+                ),
+                date: startAt ?? (_rDt(row, 'date') ?? DateTime.now()),
+                startTime: Value(
+                  _hhmm(_rStrN(row, 'start_time')) ??
+                      _hhmm(_rStrN(row, 'scheduled_start_time')) ??
+                      (startAt?.toIso8601String().substring(11, 16)),
+                ),
+                endTime: Value(
+                  _hhmm(_rStrN(row, 'end_time')) ??
+                      (() {
+                        final endAt = _rDt(row, 'end_at');
+                        return endAt?.toIso8601String().substring(11, 16);
+                      })(),
+                ),
+                state: Value(
+                  _rStr(row, 'state', d: 'PENDING'),
+                ),
+                syncedAt: Value(syncedAt),
+                isDirty: const Value(false),
+                isDeleted: const Value(false),
+              ),
+            );
+      }
+    });
+
+    if (rows.isNotEmpty) {
+      _log.i('Sessions répliquées : ${rows.length} session(s) '
+          '(résolues via ${csById.length} class_subjects)');
+    }
+  }
+
   Future<void> _applyStudentClassAssignmentsPull(
     List<Map<String, dynamic>> rows,
     DateTime syncedAt,
@@ -1304,6 +1376,18 @@ class SyncEngine {
     // le cycle indéfiniment non résolu (dropdown Périodes dégradé).
     if (table == 'levels') {
       await _applyLevelsPull(rows, syncedAt);
+      return;
+    }
+
+    // [Fix-SYNC-COURSE-SESSIONS-RESOLVE] V22 : course_sessions sorti du
+    // batch — la ligne serveur ne porte que `class_subject_id` (+ ids
+    // séparés selon les déploiements) : il faut résoudre matière/classe
+    // via la table locale `class_subjects` (miroir de
+    // _applyWeeklySchedulesPull). L'ancien mappage laissit classroomId
+    // NULL et rangea l'id de class_subject dans subjectId (espace d'ids
+    // faux) → l'historique d'absences hors-ligne affichait « matière ? ».
+    if (table == 'course_sessions') {
+      await _applyCourseSessionsPull(rows, syncedAt);
       return;
     }
 
@@ -1554,6 +1638,12 @@ class SyncEngine {
                       _nonEmpty(_rStrN(row, 'assessment_type_name')) ??
                       'Évaluation #${_rId(row)}',
                   type: Value(_rStr(row, 'type', d: 'DEVOIR')),
+                  // [Fix-RANKING-OFFLINE] V22 — FK vers le référentiel
+                  // local assessment_types : catégorie CLASS/EXAM pour le
+                  // classement hors-ligne (miroir de la formule serveur).
+                  assessmentTypeId: Value(
+                    _rIntN(row, 'assessment_type_id'),
+                  ),
                   date: Value(
                     _rDt(row, 'date') ?? _rDt(row, 'date_taken'),
                   ),
@@ -1578,6 +1668,31 @@ class SyncEngine {
 
             // [Grade-Validation] `grades` est routé en tête de méthode vers
             // _applyGradesPull (préservation des marques) — pas de cas ici.
+            // [Fix-SYNC-COURSE-SESSIONS-RESOLVE] V22 : course_sessions est
+            // routé en tête de méthode vers _applyCourseSessionsPull
+            // (résolution class_subject_id → classe/matière) — pas de cas ici.
+            case 'assessment_types':
+              // [Fix-RANKING-OFFLINE] V22 — référentiel des catégories
+              // d'évaluation (CLASS/EXAM). Table globale du serveur (sans
+              // establishment_id) ; répliquée telle quelle. La catégorie
+              // arrive en MAJUSCULES ('CLASS' / 'EXAM') — repli 'CLASS'.
+              b.insert(
+                _db.assessmentTypes,
+                AssessmentTypesCompanion.insert(
+                  id: Value(_rId(row)),
+                  code: _nonEmpty(_rStrN(row, 'code')) ??
+                      'TYPE-${_rId(row)}',
+                  name: Value(_rStrN(row, 'name')),
+                  category: Value(
+                    (_rStrN(row, 'category') ?? 'CLASS').toUpperCase(),
+                  ),
+                  syncedAt: Value(syncedAt),
+                  isDirty: const Value(false),
+                  isDeleted: const Value(false),
+                ),
+                mode: InsertMode.insertOrReplace,
+              );
+              break;
             case 'students':
               b.insert(
                 _db.students,
@@ -1824,7 +1939,15 @@ class SyncEngine {
                 _db.studentAbsences,
                 StudentAbsencesCompanion.insert(
                   id: Value(_rId(row)),
-                  courseSessionId: _rInt(row, 'course_session_id'),
+                  // [Fix-SYNC-ABSENCE-SESSION-ID] V22 — le registre serveur
+                  // envoie `session_id` (sync_registry.py) alors que la
+                  // colonne Drift s'appelle courseSessionId : l'ancienne
+                  // lecture `course_session_id` tombait TOUJOURS sur le
+                  // défaut 0 → les absences n'étaient liées à AUCUNE
+                  // session (historique hors-ligne vide, décomptes à 0).
+                  // On lit les deux clés (défense aux déploiements mixtes).
+                  courseSessionId: _rIntN(row, 'course_session_id') ??
+                      _rInt(row, 'session_id'),
                   studentId: _rInt(row, 'student_id'),
                   isJustified: Value(_rBool(row, 'is_justified')),
                   reason: Value(_rStrN(row, 'reason')),
@@ -1873,6 +1996,10 @@ class SyncEngine {
                   lastName: Value(
                     _rStrN(row, 'last_name') ?? _rStrN(row, 'prenoms'),
                   ),
+                  // [Fix-EDT-TEACHERS-OFFLINE] V22 — rôle principal :
+                  // filtrage local des enseignants hors-ligne (EDT admin
+                  // « Par enseignant », consultation des présences).
+                  role: Value(_rStrN(row, 'role')),
                   email: Value(_rStrN(row, 'email')),
                   phone: Value(_rStrN(row, 'phone')),
                   photoPath: Value(_rStrN(row, 'photo_path')),

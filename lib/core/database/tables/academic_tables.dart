@@ -54,6 +54,24 @@ class ClassSubjects extends Table {
   BoolColumn get isDeleted => boolean().withDefault(const Constant(false))();
 }
 
+/// Référentiel des types d'évaluation (miroir serveur `assessment_types`).
+///
+/// [Fix-RANKING-OFFLINE] V22 — la catégorie (CLASS / EXAM) est la donnée
+/// clé de la formule du classement côté serveur :
+///   moyenne_matière = (moyenne_classe + note_composition) / 2
+/// Sans cette table locale, le classement hors-ligne ne pouvait pas
+/// distinguer devoirs/interros (CLASS) des compositions (EXAM) et aurait
+/// calculé des moyennes différentes de l'affichage en ligne.
+class AssessmentTypes extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  TextColumn get code => text().withLength(min: 1, max: 32)();
+  TextColumn get name => text().nullable()();
+  TextColumn get category => text().withDefault(const Constant('CLASS'))();
+  DateTimeColumn get syncedAt => dateTime().nullable()();
+  BoolColumn get isDirty => boolean().withDefault(const Constant(false))();
+  BoolColumn get isDeleted => boolean().withDefault(const Constant(false))();
+}
+
 /// Évaluation.
 class Assessments extends Table {
   IntColumn get id => integer().autoIncrement()();
@@ -61,6 +79,9 @@ class Assessments extends Table {
   IntColumn get periodId => integer().nullable()();
   TextColumn get title => text().withLength(min: 1, max: 255)();
   TextColumn get type => text().withDefault(const Constant('DEVOIR'))();
+  // [Fix-RANKING-OFFLINE] V22 — FK vers le référentiel local
+  // assessment_types : catégorie CLASS/EXAM pour le calcul hors-ligne.
+  IntColumn get assessmentTypeId => integer().nullable()();
   DateTimeColumn get date => dateTime().nullable()();
   RealColumn get maxScore => real().withDefault(const Constant(20.0))();
   RealColumn get coefficient => real().withDefault(const Constant(1.0))();

@@ -38,6 +38,7 @@ import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
 import '../../shared/models/grade_dto.dart';
 import 'grade_utils.dart';
+import 'ranking_offline.dart';
 
 final _log = Logger();
 
@@ -1814,7 +1815,19 @@ final rankingProvider = FutureProvider.autoDispose
     ),
   );
   if (!conn.isPaired || conn.serverUrl == null) {
-    return await readRankingCache(q) ?? const <RankingRowDto>[];
+    // [Fix-RANKING-OFFLINE] V22 — même sans appairage actif, le cache Drift
+    // (dernier serveur synchronisée) permet de calculer le classement.
+    // Best-effort : une base locale injoignable (binding non initialisé,
+    // fichier corrompu…) retombe sur le cache SharedPreferences seul.
+    final cached = await readRankingCache(q);
+    if (cached != null) return cached;
+    try {
+      final offline = await computeRankingOffline(ref, q);
+      if (offline.rows.isNotEmpty) return offline.rows;
+    } catch (_) {
+      // Base locale indisponible — comportement historique préservé.
+    }
+    return const <RankingRowDto>[];
   }
   // [Fix-AUTO-SYNC] V15 : rafraîchissement après chaque synchro utile.
   ref.watch(syncGenerationProvider);
@@ -1823,6 +1836,19 @@ final rankingProvider = FutureProvider.autoDispose
   if (definitelyOffline) {
     final cached = await readRankingCache(q);
     if (cached != null) return cached;
+    // [Fix-RANKING-OFFLINE] V22 — plus d'erreur sèche : le classement est
+    // RECALCULÉ depuis le cache Drift (notes/évaluations/types répliqués
+    // par la synchro) avec la même formule que le serveur. L'ancien
+    // comportement levait « Classement indisponible hors-ligne » dès que
+    // la page n'avait jamais été consultée en ligne (le cache
+    // SharedPreferences ne s'écrit qu'à l'occasion d'une consultation).
+    // Best-effort : base locale injoignable → message historique.
+    try {
+      final offline = await computeRankingOffline(ref, q);
+      if (offline.rows.isNotEmpty) return offline.rows;
+    } catch (_) {
+      // Base locale indisponible — on retombe sur le message ci-dessous.
+    }
     throw const ApiException(
       'Classement indisponible hors-ligne : aucune donnée en cache pour '
       'cette classe et cette période. Il s\'affichera automatiquement dès '
@@ -1859,10 +1885,17 @@ final rankingProvider = FutureProvider.autoDispose
         statusCode: 403,
       );
     }
-    // [Fix-RANKING-OFFLINE] réseau KO en cours de requête → cache local.
+    // [Fix-RANKING-OFFLINE] réseau KO en cours de requête → cache local,
+    // puis recalcul Drift (V22 — même priorité que le mode hors-ligne).
     if (isNetworkFailure(api)) {
       final cached = await readRankingCache(q);
       if (cached != null) return cached;
+      try {
+        final offline = await computeRankingOffline(ref, q);
+        if (offline.rows.isNotEmpty) return offline.rows;
+      } catch (_) {
+        // Base locale indisponible — message historique ci-dessous.
+      }
       throw const ApiException(
         'Classement indisponible : le serveur est injoignable et aucune '
         'donnée n\'est en cache pour cette classe et cette période.',

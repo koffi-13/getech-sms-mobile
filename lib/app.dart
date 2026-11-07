@@ -18,6 +18,7 @@ import 'core/notifications/notification_store.dart';
 import 'core/sync/auto_sync.dart';
 import 'features/attendance/attendance_history_page.dart';
 import 'features/attendance/attendance_page.dart';
+import 'features/attendance/attendance_review_page.dart';
 import 'features/auth/login_page.dart';
 import 'features/classrooms/classroom_detail_page.dart';
 import 'features/classrooms/classrooms_list_page.dart';
@@ -215,6 +216,12 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/attendance',
         builder: (context, state) => const AttendancePage(),
+      ),
+      // [Fix-ATTENDANCE-REVIEW] V22 — consultation des présences (admins,
+      // lecture seule, servie par le cache Drift → fonctionne hors-ligne).
+      GoRoute(
+        path: '/attendance/review',
+        builder: (context, state) => const AttendanceReviewPage(),
       ),
       GoRoute(
         path: '/attendance/history',

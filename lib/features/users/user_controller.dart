@@ -206,13 +206,69 @@ Future<void> _cacheUsersFromDtos(Ref ref, List<UserDto> users) async {
 /// (multi-rôles) — d'où un dropdown « Enseignant » de l'EDT incomplet
 /// (« 3 chargés sur 7 »). Repli : filtrage client de la liste complète
 /// si le serveur ne supporte pas le paramètre `role`.
+/// [Fix-EDT-TEACHERS-OFFLINE] V22 — enseignants depuis le cache Drift
+/// (table `users`, colonne `role` répliquée par la synchro). Sert le
+/// dropdown « Par enseignant » de l'EDT et la consultation des présences
+/// quand le serveur ne répond pas — l'ancien comportement renvoyait une
+/// liste VIDE (plus aucun choix) dès la perte du réseau.
+Future<List<UserDto>> _teachersFromLocal(Ref ref) async {
+  try {
+    final db = ref.read(databaseProvider);
+    final rows = await (db.select(db.users)
+          ..where((t) => t.isDeleted.equals(false))
+          ..where((t) => t.isActive.equals(true)))
+        .get();
+    final teachers = rows
+        .where((u) {
+          final role = (u.role ?? '').toLowerCase();
+          return role.contains('teacher') || role.contains('enseignant');
+        })
+        .map(
+          (u) => UserDto(
+            id: u.id,
+            username: u.username,
+            firstName: u.firstName,
+            lastName: u.lastName,
+            email: u.email ?? '',
+            phone: u.phone,
+            photoPath: u.photoPath,
+            sexe: Sexe.fromCode(u.sexe),
+            isActive: u.isActive,
+            isSuperuser: u.isSuperuser,
+            role: u.role,
+          ),
+        )
+        .toList()
+      ..sort((a, b) => _teacherLabel(a).compareTo(_teacherLabel(b)));
+    return teachers;
+  } catch (_) {
+    return const [];
+  }
+}
+
 final teachersListProvider =
     FutureProvider.autoDispose<List<UserDto>>((ref) async {
+  // [Fix-EDT-TEACHERS-OFFLINE] V22 — hors-ligne : cache Drift AVANT tout
+  // appel réseau (le GET /users?role=teacher n'est pas joignable).
   final conn = ref.watch(
-    connectionProvider
-        .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)),
+    connectionProvider.select(
+      (c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      ),
+    ),
   );
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return _teachersFromLocal(ref);
+  }
+  if (!conn.canReachServer && !conn.isChecking) {
+    return _teachersFromLocal(ref);
+  }
+  // [Fix-AUTO-SYNC] rafraîchissement après chaque synchro utile (les
+  // rôles des utilisateurs répliqués peuvent avoir changé).
+  ref.watch(syncGenerationProvider);
 
   final dio = ref.watch(dioProvider);
   final url = buildUrl(conn.serverUrl!, ApiEndpoints.users);
@@ -249,6 +305,8 @@ final teachersListProvider =
         : dioErrorToApiException(e);
     if (api.statusCode == 403) return const [];
     _log.w('teachersListProvider : ${api.message}');
+    // [Fix-EDT-TEACHERS-OFFLINE] réseau KO en cours de requête → cache.
+    if (api is NetworkException) return _teachersFromLocal(ref);
     rethrow;
   } catch (e) {
     _log.w('teachersListProvider : $e');

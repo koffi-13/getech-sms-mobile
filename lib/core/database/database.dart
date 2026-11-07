@@ -35,6 +35,7 @@ const List<String> replicatedTables = [
   'classrooms',
   'subjects',
   'class_subjects',
+  'assessment_types',
   'assessments',
   'grades',
   'students',
@@ -65,6 +66,7 @@ const List<String> replicatedTables = [
   Classrooms,
   Subjects,
   ClassSubjects,
+  AssessmentTypes,
   Assessments,
   Grades,
   Students,
@@ -98,7 +100,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forFile(String fileName) : super(_openConnection(fileName));
 
   @override
-  int get schemaVersion => 5;
+  int get schemaVersion => 6;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -166,6 +168,21 @@ class AppDatabase extends _$AppDatabase {
             await m.addColumn(periods, periods.cycleId);
             await m.addColumn(periods, periods.cycleName);
             await m.addColumn(levels, levels.cycleId);
+          }
+          // v5 → v6 [Fix-RANKING-OFFLINE / Fix-EDT-TEACHERS-OFFLINE] :
+          // - nouvelle table `assessment_types` (référentiel des catégories
+          //   CLASS/EXAM — le classement hors-ligne applique la même formule
+          //   que le serveur : (moyenne_classe + composition) / 2) ;
+          // - `assessments.assessment_type_id` : FK vers ce référentiel ;
+          // - `users.role` : rôle principal de l'utilisateur — le dropdown
+          //   « Par enseignant » de l'EDT et la consultation des présences
+          //   filtrent les enseignants localement quand le serveur ne
+          //   répond pas.
+          if (from < 6) {
+            await m.createTable(assessmentTypes);
+            await m.addColumn(
+                assessments, assessments.assessmentTypeId);
+            await m.addColumn(users, users.role);
           }
         },
         beforeOpen: (details) async {

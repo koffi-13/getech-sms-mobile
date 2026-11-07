@@ -133,6 +133,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
   @override
   Widget build(BuildContext context) {
     final conn = ref.watch(connectionProvider);
+    final auth = ref.watch(authProvider);
     final classrooms = ref.watch(classroomsForScheduleProvider);
     final scopeAsync = ref.watch(teacherScopeProvider);
     final scope = scopeAsync.valueOrNull;
@@ -145,6 +146,15 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
       appBar: AppBar(
         title: const Text('Présence'),
         actions: [
+          // [Fix-ATTENDANCE-REVIEW] V22 — consultation des présences pour
+          // l'administration (lecture seule, servie par le cache Drift →
+          // accessible même hors-ligne ; la saisie, elle, reste en ligne).
+          if (auth.isAdminOrHeadmaster || auth.isSuperuser)
+            IconButton(
+              tooltip: 'Consulter les présences',
+              icon: const Icon(Icons.fact_check_outlined),
+              onPressed: () => context.push('/attendance/review'),
+            ),
           // [Fix-PRESENCE-ONLINE] La saisie n'est proposée QUE lorsque la
           // connexion au serveur est établie (y compris pendant la
           // vérification initiale : état indéterminé = pas de saisie).
