@@ -49,6 +49,7 @@ import 'features/finance/record_payment_page.dart';
 import 'features/establishments/establishment_detail_page.dart';
 import 'features/establishments/establishments_page.dart';
 import 'features/students/student_import_page.dart';
+import 'shared/widgets/content_sized_grid.dart';
 
 /// Provider du mode de thème (système / clair / sombre).
 final themeModeProvider = StateProvider<ThemeMode>((ref) => ThemeMode.system);
@@ -561,13 +562,9 @@ class _MoreGridPage extends ConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(title: const Text('Plus')),
-      body: GridView.count(
+      body: ContentSizedGrid(
         crossAxisCount: 3,
         padding: const EdgeInsets.all(16),
-        crossAxisSpacing: 12,
-        mainAxisSpacing: 12,
-        childAspectRatio:
-            0.78, // Encore augmenté pour éviter les overflows sur petits écrans
         children: items
             .map(
               (i) => Card(

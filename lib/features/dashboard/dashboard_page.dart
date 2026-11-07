@@ -352,13 +352,7 @@ class _TeacherDashboardContent extends StatelessWidget {
           ),
 
         // --- KPIs du périmètre enseignant ---
-        GridView.count(
-          crossAxisCount: 2,
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          crossAxisSpacing: 12,
-          mainAxisSpacing: 12,
-          childAspectRatio: 1.25,
+        ContentSizedGrid(
           children: [
             KpiCard(
               label: 'Mes classes',
@@ -643,13 +637,7 @@ class _KpiGrid extends ConsumerWidget {
     final canSeeUsers =
         hasPermission(auth.permissions, RbacPermissions.userRead);
 
-    return GridView.count(
-      crossAxisCount: 2,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      crossAxisSpacing: 12,
-      mainAxisSpacing: 12,
-      childAspectRatio: 1.25,
+    return ContentSizedGrid(
       children: [
         KpiCard(
           label: 'Effectif élèves',
