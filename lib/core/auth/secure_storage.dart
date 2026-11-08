@@ -120,6 +120,10 @@ class SecureStorage {
   }
 
   /// Stocke les credentials (pour reconnexion automatique, optionnel).
+  ///
+  /// [Fix-SERVER-DATA-LEAK] V17 — plus utilisé en écriture (voir
+  /// [saveCredentialsFor] par profil) ; conservé pour la migration et les
+  /// tests uniquement.
   Future<void> saveCredentials(String username, String password) =>
       _storage.write(
         key: AppConfig.keyCredentials,
@@ -131,5 +135,17 @@ class SecureStorage {
     if (raw == null || !raw.contains(':::')) return null;
     final parts = raw.split(':::');
     return (username: parts[0], password: parts[1]);
+  }
+
+  /// [Fix-SERVER-DATA-LEAK] V17 — nom de la clé credentials globale
+  /// (lecture/suppression uniquement, plus jamais écrite en production).
+  String get credentialsKey => AppConfig.keyCredentials;
+
+  /// [Fix-SERVER-DATA-LEAK] V17 — supprime les clés GLOBALES legacy
+  /// (JWT + credentials) : elles peuvent contenir le token d'un AUTRE
+  /// serveur et étaient restaurées à tort après une bascule de profil.
+  Future<void> deleteLegacyGlobalKeys() async {
+    await _storage.delete(key: AppConfig.keyJwt);
+    await _storage.delete(key: AppConfig.keyCredentials);
   }
 }

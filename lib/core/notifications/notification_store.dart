@@ -13,6 +13,10 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../cache/profile_scoped_cache.dart';
+import '../../features/connections/connection_state.dart';
+import '../../features/connections/server_profiles.dart';
+
 /// Catégories de notifications (icône + couleur du centre).
 enum NotificationCategory {
   grades('Notes'),
@@ -91,13 +95,32 @@ class NotificationEntry {
 
 /// Stockage local des notifications (SharedPreferences, plafonnées à
 /// [_maxEntries], la plus récente en premier).
+///
+/// [Fix-SERVER-DATA-LEAK] V17 — la clé est désormais SCOPÉE par profil de
+/// serveur (`getech.notifications.history.<profileId>`) : les
+/// notifications d'un serveur (validations de notes, synchros) ne doivent
+/// pas apparaître dans le centre de notifications d'un autre établissement
+/// après une bascule. La clé globale legacy est purgée par
+/// [purgeGlobalCaches] à chaque bascule/re-appairage.
 class NotificationStore {
-  static const String _key = 'getech.notifications.history';
+  static const String _keyBase = 'getech.notifications.history';
   static const int _maxEntries = 50;
+
+  final Ref _ref;
+
+  NotificationStore(this._ref);
+
+  /// Clé SharedPreferences du profil actif.
+  Future<String> _activeKey() async {
+    final pid = _ref.read(activeProfileIdProvider);
+    final conn = _ref.read(connectionProvider);
+    final profileId = pid ?? conn.profileId;
+    return profileScopedKey(_keyBase, profileId);
+  }
 
   Future<List<NotificationEntry>> load() async {
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_key);
+    final raw = prefs.getString(await _activeKey());
     if (raw == null) return const [];
     try {
       final rows = (jsonDecode(raw) as List)
@@ -120,7 +143,7 @@ class NotificationStore {
         .take(_maxEntries)
         .toList();
     await prefs.setString(
-      _key,
+      await _activeKey(),
       jsonEncode(capped.map((e) => e.toJson()).toList()),
     );
   }
@@ -149,13 +172,13 @@ class NotificationStore {
 
   Future<void> clear() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_key);
+    await prefs.remove(await _activeKey());
   }
 }
 
 /// Provider du store.
 final notificationStoreProvider =
-    Provider<NotificationStore>((ref) => NotificationStore());
+    Provider<NotificationStore>((ref) => NotificationStore(ref));
 
 /// État du centre : liste + compteur non-lus.
 class NotificationCenterState {

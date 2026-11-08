@@ -128,10 +128,19 @@ class AuthNotifier extends Notifier<AuthState> {
     };
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('session_snapshot_$profileId', jsonEncode(payload));
+    // [Fix-SERVER-DATA-LEAK] V17 — écriture PAR PROFIL uniquement. Les
+    // clés globales legacy (`getech.jwt`, `getech.credentials`) ne sont
+    // PLUS alimentées : elles servaient à restaurer le token d'un AUTRE
+    // serveur après une bascule (« l'application tente toujours de se
+    // diriger vers l'ancien » — retour S4).
     await _storage.saveJwtFor(profileId, login.accessToken);
     await _storage.saveCredentialsFor(profileId, username, password);
-    await _storage.saveJwt(login.accessToken);
-    await _storage.saveCredentials(username, password);
+    // Nettoyage best-effort des clés legacy globales (si présentes d'une
+    // version antérieure) pour qu'aucune donnée d'un autre serveur ne
+    // puisse être restaurée.
+    try {
+      await _storage.deleteLegacyGlobalKeys();
+    } catch (_) {}
   }
 
   Future<AuthState?> _restoreSessionFromSnapshot() async {
@@ -150,8 +159,9 @@ class AuthNotifier extends Notifier<AuthState> {
           .map((e) => e.toString())
           .toList();
       final establishmentId = (map['establishmentId'] as num?)?.toInt();
-      final token =
-          await _storage.getJwtFor(profileId) ?? await _storage.getJwt();
+      // [Fix-SERVER-DATA-LEAK] V17 — JWT du PROFIL uniquement (jamais la
+      // clé globale legacy, qui peut appartenir à un autre serveur).
+      final token = await _storage.getJwtFor(profileId);
       if (token == null || token.isEmpty) return null;
       return AuthState(
         token: token,
@@ -166,8 +176,18 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   /// Restaure la session JWT depuis le stockage sécurisé au démarrage.
+  ///
+  /// [Fix-SERVER-DATA-LEAK] V17 — ne lit PLUS la clé JWT globale legacy
+  /// (`getech.jwt`) : elle peut contenir le token d'un AUTRE serveur (ex :
+  /// production) envoyé ensuite au serveur actif (ex : développement) →
+  /// « User not found » / 500 incohérents après un re-appairage. On lit
+  /// UNIQUEMENT la clé du profil actif ; la clé globale n'est plus écrite
+  /// ([_persistSessionSnapshot]) et est purgée à la déconnexion.
   Future<void> _restoreSession() async {
-    final token = await _storage.getJwt();
+    final profileToken = await _storage.getJwtFor(_profileId);
+    final token = (profileToken != null && profileToken.isNotEmpty)
+        ? profileToken
+        : await _restoreSessionFromSnapshot().then((s) => s?.token);
     if (token == null || token.isEmpty) {
       final snapshot = await _restoreSessionFromSnapshot();
       if (snapshot != null) {
@@ -219,8 +239,9 @@ class AuthNotifier extends Notifier<AuthState> {
       return true;
     } on DioException catch (e) {
       final profileId = _profileId;
-      final stored = await _storage.getCredentialsFor(profileId) ??
-          await _storage.getCredentials();
+      // [Fix-SERVER-DATA-LEAK] V17 — credentials du PROFIL actif
+      // uniquement (jamais la clé globale legacy d'un autre serveur).
+      final stored = await _storage.getCredentialsFor(profileId);
       final snapshot = await _restoreSessionFromSnapshot();
       final isNetworkProblem = e.type == DioExceptionType.connectionError ||
           e.type == DioExceptionType.connectionTimeout ||
@@ -369,8 +390,16 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   /// Déconnexion locale (efface le JWT).
+  ///
+  /// [Fix-SERVER-DATA-LEAK] V17 — efface le JWT DU PROFIL (et non plus
+  /// uniquement la clé globale) + purge les clés globales legacy pour
+  /// qu'aucune session d'un autre serveur ne soit restaurée ensuite.
   Future<void> logoutLocal() async {
-    await _storage.deleteJwt();
+    try {
+      final profileId = _profileId;
+      await _storage.deleteJwtFor(profileId);
+      await _storage.deleteLegacyGlobalKeys();
+    } catch (_) {}
     state = const AuthState();
   }
 
@@ -390,9 +419,11 @@ class AuthNotifier extends Notifier<AuthState> {
   Future<void> handleUnauthorized() async {
     if (state.token == null) return;
 
+    // [Fix-SERVER-DATA-LEAK] V17 — credentials du PROFIL actif uniquement :
+    // le refresh doit aller au serveur du profil courant, jamais vers
+    // l'ancien serveur avec des identifiants d'un autre.
     final profileId = _profileId;
-    final saved = await _storage.getCredentialsFor(profileId) ??
-        await _storage.getCredentials();
+    final saved = await _storage.getCredentialsFor(profileId);
     final estabCode = ref.read(connectionProvider).establishmentCode ?? '';
     if (saved != null && estabCode.isNotEmpty) {
       final ok = await login(

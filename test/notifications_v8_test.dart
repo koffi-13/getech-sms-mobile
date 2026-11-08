@@ -5,6 +5,7 @@
 library;
 
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:getech_sms_mobile/core/notifications/notification_store.dart';
 import 'package:getech_sms_mobile/shared/widgets/app_error_widget.dart';
@@ -12,6 +13,19 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  /// [Fix-SERVER-DATA-LEAK] V17 — NotificationStore prend un Ref (clé
+  /// d'historique désormais scopée par profil de serveur). Un
+  /// ProviderContainer neuf par test garantit l'isolation ; le Ref du
+  /// container lu via un provider relais fait l'affaire.
+  NotificationStore makeStore() {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final refProvider = Provider<NotificationStore>((ref) {
+      return NotificationStore(ref);
+    });
+    return container.read(refProvider);
+  }
 
   NotificationEntry entry(
     int id,
@@ -35,7 +49,7 @@ void main() {
     });
 
     test('add + load : la plus récente en premier', () async {
-      final store = NotificationStore();
+      final store = makeStore();
       await store.add(
         entry(
           1,
@@ -57,7 +71,7 @@ void main() {
     });
 
     test('add déduplique par id (remplacement)', () async {
-      final store = NotificationStore();
+      final store = makeStore();
       await store.add(entry(7, 'Première version'));
       await store.add(entry(7, 'Version corrigée'));
       final entries = await store.load();
@@ -66,7 +80,7 @@ void main() {
     });
 
     test('markAllRead / markRead / clear', () async {
-      final store = NotificationStore();
+      final store = makeStore();
       await store.add(entry(1, 'A'));
       await store.add(entry(2, 'B'));
       await store.markRead(1);
@@ -84,7 +98,7 @@ void main() {
     });
 
     test('plafonnement à 50 entrées (les plus anciennes sortent)', () async {
-      final store = NotificationStore();
+      final store = makeStore();
       for (var i = 0; i < 60; i++) {
         await store.add(
           entry(
@@ -102,7 +116,7 @@ void main() {
     });
 
     test('round-trip JSON complet (catégorie + route + lu)', () async {
-      final store = NotificationStore();
+      final store = makeStore();
       await store.add(
         NotificationEntry(
           id: 42,

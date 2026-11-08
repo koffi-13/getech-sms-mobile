@@ -20,6 +20,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/auth/teacher_scope.dart';
+import '../../core/cache/profile_scoped_cache.dart';
 import '../../core/config/constants.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
@@ -43,14 +44,27 @@ class OfflineDashboardException implements Exception {
 }
 
 /// Statistiques du tableau de bord : `GET /dashboard/stats`.
+///
+/// [Fix-SERVER-DATA-LEAK] V17 — le cache est désormais PAR PROFIL de
+/// serveur (`getech.cache.dashboard.<profileId>`) : les KPIs d'un serveur
+/// (ex : production) ne peuvent PLUS s'afficher dans l'Accueil d'un autre
+/// (ex : développement) après une bascule ou un re-appairage — retour
+/// utilisateur S4 : « je vois les statistiques d'un autre serveur dans
+/// l'Accueil d'un autre ».
 final dashboardStatsProvider =
     FutureProvider.autoDispose<DashboardStatsDto>((ref) async {
   final conn = ref.watch(connectionProvider);
   final prefs = await SharedPreferences.getInstance();
 
+  // Cache SCOPÉ au profil actif (jamais la clé globale legacy).
+  final cacheKey = profileScopedKey(
+    _keyDashboardCache,
+    conn.profileId,
+  );
+
   // Tenter de récupérer le cache
   DashboardStatsDto? cachedStats;
-  final cachedStr = prefs.getString(_keyDashboardCache);
+  final cachedStr = prefs.getString(cacheKey);
   if (cachedStr != null) {
     try {
       cachedStats = DashboardStatsDto.fromJson(jsonDecode(cachedStr));
@@ -75,8 +89,12 @@ final dashboardStatsProvider =
     }
 
     final stats = DashboardStatsDto.fromJson(Map<String, dynamic>.from(data));
-    // Mettre à jour le cache
-    await prefs.setString(_keyDashboardCache, jsonEncode(data));
+    // Mettre à jour le cache SCOPÉ (et effacer la clé globale legacy si
+    // elle traîne d'une version antérieure).
+    await prefs.setString(cacheKey, jsonEncode(data));
+    if (prefs.containsKey(_keyDashboardCache)) {
+      await prefs.remove(_keyDashboardCache);
+    }
 
     return stats;
   } catch (e) {

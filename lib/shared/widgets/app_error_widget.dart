@@ -140,6 +140,9 @@ class AppErrorWidget extends StatelessWidget {
     // [Fix-ERROR-HUMANIZE] plus d'exception brute affichée à l'écran.
     final friendly = humanize(message);
     if (compact) {
+      // [Fix-FONT-SCALE-OVERFLOW] V17 — en grande police, le message + le
+      // bouton « Réessayer » dépassaient la ligne : le texte est Flexible
+      // (ellipsis) et le bouton ne force plus la largeur.
       return Padding(
         padding: const EdgeInsets.all(12),
         child: Row(
@@ -154,7 +157,12 @@ class AppErrorWidget extends StatelessWidget {
               ),
             ),
             if (onRetry != null)
-              TextButton(onPressed: onRetry, child: const Text('Réessayer')),
+              Flexible(
+                child: TextButton(
+                  onPressed: onRetry,
+                  child: const Text('Réessayer'),
+                ),
+              ),
           ],
         ),
       );
@@ -169,14 +177,22 @@ class AppErrorWidget extends StatelessWidget {
             const SizedBox(height: 16),
             Text(
               'Une erreur est survenue',
+              textAlign: TextAlign.center,
               style: theme.textTheme.titleMedium,
             ),
             const SizedBox(height: 8),
-            Text(
-              friendly,
-              textAlign: TextAlign.center,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
+            Flexible(
+              // [Fix-FONT-SCALE-OVERFLOW] V17 — message d'erreur pouvant
+              // être long + grande police : la colonne reste contrainte
+              // (scrollable par le parent) sans overflow rigide.
+              child: SingleChildScrollView(
+                child: Text(
+                  friendly,
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
               ),
             ),
             if (onRetry != null) ...[

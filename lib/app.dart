@@ -561,59 +561,74 @@ class _MoreGridPage extends ConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(title: const Text('Plus')),
-      body: GridView.count(
-        crossAxisCount: 3,
+      // [Fix-FONT-SCALE-OVERFLOW] V17 — GridView avec `childAspectRatio`
+      // FIXE débordait dès que la police système était agrandie (les
+      // libellés « Emploi du temps », « Import élèv. »… passaient sur 2-3
+      // lignes → bande jaune « OVERFLOWED » sous chaque tuile). Un
+      // `GridView.builder` avec hauteur dynamique via `_MoreTile` (Layout
+      // Builder) calcule la hauteur réelle du contenu : la grille
+      // s'agrandit verticalement au lieu de déborder.
+      body: GridView.builder(
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 3,
+          crossAxisSpacing: 12,
+          mainAxisSpacing: 12,
+          // [Fix-FONT-SCALE-OVERFLOW] V17 — hauteur de tuile dynamique :
+          // suit le facteur de police système (labels multi-lignes).
+          mainAxisExtent: 118 *
+              MediaQuery.textScalerOf(context).scale(14) /
+              14,
+        ),
         padding: const EdgeInsets.all(16),
-        crossAxisSpacing: 12,
-        mainAxisSpacing: 12,
-        childAspectRatio:
-            0.78, // Encore augmenté pour éviter les overflows sur petits écrans
-        children: items
-            .map(
-              (i) => Card(
-                margin: EdgeInsets.zero,
-                child: InkWell(
-                  onTap: () => context.push(i.route),
-                  borderRadius: BorderRadius.circular(16),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 4,
-                      vertical: 8,
-                    ),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: i.color.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          child: Icon(i.icon, color: i.color, size: 24),
-                        ),
-                        const SizedBox(height: 8),
-                        Flexible(
-                          child: Text(
-                            i.label,
-                            textAlign: TextAlign.center,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context)
-                                .textTheme
-                                .labelSmall
-                                ?.copyWith(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 10, // Réduit à 10 pour sécurité
-                                ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+        itemCount: items.length,
+        itemBuilder: (context, i) => _MoreTile(item: items[i]),
+      ),
+    );
+  }
+}
+
+/// Tuile individuelle du menu « Plus » : hauteur de CONTENU (icône +
+/// libellé multi-lignes) au lieu d'un ratio fixe — insensible à la taille
+/// de police système ([Fix-FONT-SCALE-OVERFLOW] V17).
+class _MoreTile extends StatelessWidget {
+  const _MoreTile({required this.item});
+  final _MoreItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: EdgeInsets.zero,
+      child: InkWell(
+        onTap: () => context.push(item.route),
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: item.color.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(item.icon, color: item.color, size: 24),
+              ),
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2),
+                child: Text(
+                  item.label,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context)
+                      .textTheme
+                      .labelSmall
+                      ?.copyWith(fontWeight: FontWeight.bold),
                 ),
               ),
-            )
-            .toList(),
+            ],
+          ),
+        ),
       ),
     );
   }

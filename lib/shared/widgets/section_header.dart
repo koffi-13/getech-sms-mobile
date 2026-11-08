@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
 
 /// En-tête de section avec titre + action optionnelle.
+///
+/// [Fix-FONT-SCALE-OVERFLOW] V17 — en grande taille de police, le bouton
+/// d'action plaçait le titre en overflow horizontal (Row non contraint).
+/// Le titre/sous-titre est désormais dans un `Flexible` et l'action est
+/// contrainte avec ellipsis ; le sous-titre passe sur 2 lignes max.
 class SectionHeader extends StatelessWidget {
   const SectionHeader({
     super.key,
@@ -28,17 +33,21 @@ class SectionHeader extends StatelessWidget {
             Icon(icon, size: 18, color: theme.colorScheme.primary),
             const SizedBox(width: 8),
           ],
-          Expanded(
+          Flexible(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: theme.textTheme.titleMedium,
                 ),
                 if (subtitle != null)
                   Text(
                     subtitle!,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
@@ -47,9 +56,15 @@ class SectionHeader extends StatelessWidget {
             ),
           ),
           if (actionLabel != null && onAction != null)
-            TextButton(
-              onPressed: onAction,
-              child: Text(actionLabel!),
+            Flexible(
+              child: TextButton(
+                onPressed: onAction,
+                child: Text(
+                  actionLabel!,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
             ),
         ],
       ),

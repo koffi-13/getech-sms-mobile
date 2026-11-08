@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/config/app_config.dart';
+import '../../core/cache/profile_scoped_cache.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/auth/secure_storage.dart';
 import 'server_profiles.dart';
@@ -169,9 +170,16 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
     // (serverProfileRegistryProvider -> MultiServerController.bootstrap) :
     // il applique le profil actif via applyProfile(). On ne lit plus les
     // clés legacy ici.
+    //
+    // [Fix-SERVER-DATA-LEAK] V17 — last_sync_at/count sont désormais SCOPÉS
+    // par profil : l'horodatage affiché dans Connexions doit être celui du
+    // serveur ACTIF, pas celui du dernier serveur synchronisé (retour S4 :
+    // données d'un autre serveur visibles après bascule).
+    final conn = state;
+    final pid = conn.profileId;
     final prefs = await SharedPreferences.getInstance();
-    final lastSync = prefs.getString('last_sync_at');
-    final lastCount = prefs.getInt('last_sync_count');
+    final lastSync = prefs.getString(profileScopedKey('last_sync_at', pid));
+    final lastCount = prefs.getInt(profileScopedKey('last_sync_count', pid));
     if (lastSync != null || lastCount != null) {
       state = state.copyWith(
         lastSyncAt: lastSync != null ? DateTime.tryParse(lastSync) : null,
@@ -188,6 +196,14 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
         ) ??
         '';
 
+    // [Fix-SERVER-DATA-LEAK] V17 — recharge l'horodatage de synchro du
+    // PROFIL appliqué (clé scopée), sinon l'ancien serveur restait
+    // affiché dans Connexions après une bascule.
+    final prefs = await SharedPreferences.getInstance();
+    final pid = profile.id;
+    final lastSync = prefs.getString(profileScopedKey('last_sync_at', pid));
+    final lastCount = prefs.getInt(profileScopedKey('last_sync_count', pid));
+
     state = state.copyWith(
       status: ServerStatus.checking,
       profileId: profile.id,
@@ -195,6 +211,9 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
       establishmentCode: profile.establishmentCode,
       establishmentName: profile.establishmentName,
       pairingToken: token.isEmpty ? null : token,
+      lastSyncAt:
+          lastSync != null ? DateTime.tryParse(lastSync) : state.lastSyncAt,
+      lastSyncCount: lastCount ?? state.lastSyncCount,
       clearError: true,
     );
     if (!state.forceOffline) checkStatus();
@@ -310,9 +329,16 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
 
   Future<void> recordSync({int count = 0}) async {
     final now = DateTime.now();
+    // [Fix-SERVER-DATA-LEAK] V17 — horodatage SCOPÉ au profil actif : la
+    // date « dernière synchro » affichée doit correspondre au serveur
+    // courant, pas au dernier serveur synchronisé.
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('last_sync_at', now.toIso8601String());
-    await prefs.setInt('last_sync_count', count);
+    final pid = state.profileId;
+    await prefs.setString(
+      profileScopedKey('last_sync_at', pid),
+      now.toIso8601String(),
+    );
+    await prefs.setInt(profileScopedKey('last_sync_count', pid), count);
     state = state.copyWith(lastSyncAt: now, lastSyncCount: count);
   }
 

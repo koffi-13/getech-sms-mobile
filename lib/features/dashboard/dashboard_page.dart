@@ -132,6 +132,20 @@ class DashboardPage extends ConsumerWidget {
   }
 }
 
+/// [Fix-FONT-SCALE-OVERFLOW] V17 — Hauteur (px) d'une tuile KPI pour la
+/// taille de police EFFECTIVE de l'utilisateur.
+///
+/// Avant : `childAspectRatio: 1.25` fixe → en grande police système
+/// (paramètres d'accessibilité), la valeur + le libellé de la tuile
+/// dépassaient la hauteur calculée → bandes jaunes « OVERFLOWED » sur
+/// tout l'Accueil (retour S4 : « overflows surtout avec une taille de
+/// police grande »). La hauteur suit désormais le facteur de police,
+/// plafonnée pour rester raisonnable.
+double kpiTileExtent(BuildContext context) {
+  final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
+  return (110 * scale).clamp(96.0, 190.0);
+}
+
 /// [Notif-V8] Cloche du Centre de notifications : badge du nombre de
 /// notifications non lues, ouvre /notifications.
 class _NotificationBell extends ConsumerWidget {
@@ -352,14 +366,21 @@ class _TeacherDashboardContent extends StatelessWidget {
           ),
 
         // --- KPIs du périmètre enseignant ---
-        GridView.count(
-          crossAxisCount: 2,
+        // [Fix-FONT-SCALE-OVERFLOW] V17 — hauteur de ligne calculée
+        // d'après la taille de police effective (au lieu d'un ratio
+        // fixe 1.25 qui débordait dès que l'utilisateur agrandit la
+        // police système).
+        GridView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
-          crossAxisSpacing: 12,
-          mainAxisSpacing: 12,
-          childAspectRatio: 1.25,
-          children: [
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 2,
+            crossAxisSpacing: 12,
+            mainAxisSpacing: 12,
+            mainAxisExtent: kpiTileExtent(context),
+          ),
+          itemCount: 4,
+          itemBuilder: (context, i) => [
             KpiCard(
               label: 'Mes classes',
               value: '${data.classCount}',
@@ -387,7 +408,7 @@ class _TeacherDashboardContent extends StatelessWidget {
               color: Colors.deepOrange,
               onTap: () => context.push('/schedule'),
             ),
-          ],
+          ][i],
         ),
         const SizedBox(height: 16),
 
@@ -643,56 +664,64 @@ class _KpiGrid extends ConsumerWidget {
     final canSeeUsers =
         hasPermission(auth.permissions, RbacPermissions.userRead);
 
-    return GridView.count(
-      crossAxisCount: 2,
+    // [Fix-FONT-SCALE-OVERFLOW] V17 — hauteur de ligne calculée d'après
+    // la taille de police effective (au lieu du ratio fixe seul, qui
+    // débordait dès que l'utilisateur agrandissait la police système).
+    final tiles = <Widget>[
+      KpiCard(
+        label: 'Effectif élèves',
+        value: '${stats.totalStudents}',
+        icon: Icons.people,
+        color: Theme.of(context).colorScheme.primary,
+        onTap: () => context.push('/students'),
+      ),
+      KpiCard(
+        label: 'Classes',
+        value: '${stats.totalClassrooms}',
+        icon: Icons.school,
+        color: Colors.teal,
+        onTap: () => context.push('/classrooms'),
+      ),
+      KpiCard(
+        label: 'Enseignants',
+        value: '${stats.totalTeachers}',
+        icon: Icons.badge,
+        color: Colors.indigo,
+      ),
+      if (canSeeUsers)
+        KpiCard(
+          label: 'Utilisateurs',
+          value: '${stats.totalUsers}',
+          icon: Icons.manage_accounts,
+          color: Colors.deepPurple,
+        ),
+      if (canSeePayments) ...[
+        KpiCard(
+          label: 'Paiements',
+          value: '${stats.totalPayments}',
+          icon: Icons.payments,
+          color: Colors.green,
+        ),
+        KpiCard(
+          label: 'Solde dû',
+          value: MoneyFormatter.compact(stats.totalBalanceDue),
+          icon: Icons.account_balance_wallet,
+          color: Colors.red.shade700,
+        ),
+      ],
+    ];
+
+    return GridView.builder(
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
-      crossAxisSpacing: 12,
-      mainAxisSpacing: 12,
-      childAspectRatio: 1.25,
-      children: [
-        KpiCard(
-          label: 'Effectif élèves',
-          value: '${stats.totalStudents}',
-          icon: Icons.people,
-          color: Theme.of(context).colorScheme.primary,
-          onTap: () => context.push('/students'),
-        ),
-        KpiCard(
-          label: 'Classes',
-          value: '${stats.totalClassrooms}',
-          icon: Icons.school,
-          color: Colors.teal,
-          onTap: () => context.push('/classrooms'),
-        ),
-        KpiCard(
-          label: 'Enseignants',
-          value: '${stats.totalTeachers}',
-          icon: Icons.badge,
-          color: Colors.indigo,
-        ),
-        if (canSeeUsers)
-          KpiCard(
-            label: 'Utilisateurs',
-            value: '${stats.totalUsers}',
-            icon: Icons.manage_accounts,
-            color: Colors.deepPurple,
-          ),
-        if (canSeePayments) ...[
-          KpiCard(
-            label: 'Paiements',
-            value: '${stats.totalPayments}',
-            icon: Icons.payments,
-            color: Colors.green,
-          ),
-          KpiCard(
-            label: 'Solde dû',
-            value: MoneyFormatter.compact(stats.totalBalanceDue),
-            icon: Icons.account_balance_wallet,
-            color: Colors.red.shade700,
-          ),
-        ],
-      ],
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
+        mainAxisExtent: kpiTileExtent(context),
+      ),
+      itemCount: tiles.length,
+      itemBuilder: (context, i) => tiles[i],
     );
   }
 }
@@ -751,16 +780,23 @@ class _PaymentTile extends StatelessWidget {
       ),
       title: Row(
         children: [
-          Expanded(
+          // [Fix-FONT-SCALE-OVERFLOW] V17 — le montant et le badge se
+          // partagent la ligne sans déborder en grande police.
+          Flexible(
             child: Text(
               MoneyFormatter.format(p.amount, withSymbol: false),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: theme.textTheme.titleSmall?.copyWith(
                 fontWeight: FontWeight.w700,
                 color: Colors.green.shade700,
               ),
             ),
           ),
-          if (status != null) _PaymentStatusBadge(status: status),
+          if (status != null) ...[
+            const SizedBox(width: 8),
+            Flexible(child: _PaymentStatusBadge(status: status)),
+          ],
         ],
       ),
       subtitle: Wrap(

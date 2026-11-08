@@ -29,7 +29,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/auth/secure_storage.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/auth/teacher_scope.dart';
+import '../../core/cache/profile_scoped_cache.dart';
 import '../../core/database/database.dart';
+import '../../core/notifications/notification_service.dart';
+import '../../core/notifications/notification_store.dart';
+import '../../core/sync/auto_sync.dart';
 import '../../core/sync/sync_engine.dart';
 import 'connection_state.dart';
 import 'connections_controller.dart';
@@ -389,6 +393,14 @@ class ServerProfileRegistry {
       _log.w('Suppression base locale ${prof.dbFile} impossible : $e');
     }
 
+    // [Fix-SERVER-DATA-LEAK] V17 — supprime aussi le snapshot de session
+    // SharedPreferences du profil oublié (sinon la session d'un serveur
+    // oublié restait restaurable).
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('session_snapshot_$id');
+    } catch (_) {}
+
     if (_activeId == id) {
       _activeId = _profiles.isNotEmpty ? _profiles.first.id : null;
     }
@@ -467,6 +479,12 @@ class MultiServerController {
   ///      authProvider rebuild) ;
   ///   4. invalide la base Drift (fichier par profil) et les caches de
   ///      données dérivés.
+  ///
+  /// [Fix-SERVER-DATA-LEAK] V17 — PURGE des caches GLOBAUX avant la
+  /// bascule : sans elle, l'Accueil du nouveau serveur affichait les KPIs
+  /// du précédent (« je vois les statistiques d'un autre serveur dans
+  /// l'Accueil d'un autre » — retour S4), les classements et notifications
+  /// d'un autre établissement restaient visibles.
   /// Ne fait rien si l'id est inconnu ou déjà actif.
   Future<void> switchTo(String id) async {
     final reg = _registry;
@@ -474,6 +492,14 @@ class MultiServerController {
     if (id == reg.activeId) return;
     final profile = reg.byId(id);
     if (profile == null) return;
+
+    // Purge AVANT la bascule : les caches globaux ne doivent plus exister
+    // au moment où le nouveau profil devient actif.
+    await purgeGlobalCaches();
+    // Annule aussi une synchro auto en attente qui viserait l'ancien
+    // serveur (sinon elle poussait l'outbox de l'ancien profil vers le
+    // nouveau serveur).
+    _ref.read(autoSyncControllerProvider).cancelPending();
 
     await reg.setActive(id);
     await reg.recordConnected(id);
@@ -483,6 +509,12 @@ class MultiServerController {
 
   /// Enregistre un appairage réussi (nouveau serveur ou re-appairage) et
   /// bascule dessus.
+  ///
+  /// [Fix-SERVER-DATA-LEAK] V17 — purge les caches GLOBAUX de l'éventuel
+  /// profil précédent : un re-appairage vers un AUTRE serveur ne doit pas
+  /// conserver les KPIs/classements/notifications de l'ancien (retour S4 :
+  /// stats de PRODUCTION affichées dans l'Accueil de la DEV, puis erreur
+  /// 500 après re-appairage).
   Future<ServerProfile> completePairing({
     required String serverUrl,
     required String establishmentCode,
@@ -492,6 +524,12 @@ class MultiServerController {
     final reg = _registry;
     if (reg == null) {
       throw StateError('Registre multi-serveurs non initialisé');
+    }
+    final wasOtherActive =
+        reg.active != null && reg.active!.serverUrl != serverUrl;
+    if (wasOtherActive) {
+      await purgeGlobalCaches();
+      _ref.read(autoSyncControllerProvider).cancelPending();
     }
     final profile = await reg.upsertFromPairing(
       serverUrl: serverUrl,
@@ -510,6 +548,9 @@ class MultiServerController {
     final reg = _registry;
     if (reg == null) return;
     final nextId = await reg.forget(id);
+    // [Fix-SERVER-DATA-LEAK] V17 — purge des caches globaux : les données
+    // du serveur oublié ne doivent plus s'afficher nulle part.
+    await purgeGlobalCaches();
     if (nextId == null) {
       _ref.read(activeProfileIdProvider.notifier).state = null;
       _ref.read(connectionProvider.notifier).markUnpaired();
@@ -523,6 +564,11 @@ class MultiServerController {
 
   /// Réinitialise les caches de session : auth (JWT par serveur), base
   /// Drift (fichier par serveur), scope enseignant, données de modules.
+  ///
+  /// [Fix-SERVER-DATA-LEAK] V17 — le cache de l'Accueil et le centre de
+  /// notifications sont révoqués en PLUS de la base Drift : ce sont des
+  /// caches SharedPreferences qui survivaient à la bascule et affichaient
+  /// les données du précédent serveur.
   Future<void> _resetSession() async {
     final ref = _ref;
     // La base Drift se ferme (onDispose) et se rouvre sur le nouveau fichier.
@@ -532,6 +578,10 @@ class MultiServerController {
     ref.invalidate(teacherScopeProvider);
     ref.invalidate(serverInfoProvider);
     ref.invalidate(pairedDevicesProvider);
+    // [Fix-SERVER-DATA-LEAK] V17 — révoque AUSSI les providers qui cachent
+    // en SharedPreferences avec des clés désormais scopées par profil.
+    ref.invalidate(notificationCenterProvider);
+    ref.invalidate(courseRemindersSchedulerProvider);
     // Tentative de restauration de session + pull initial (non bloquant).
     try {
       final engine = ref.read(syncEngineProvider);
