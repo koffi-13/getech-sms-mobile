@@ -758,10 +758,10 @@ void main() {
     final marker = await (db.select(db.syncMetadata)
           ..where((t) => t.tableNameColumn.equals('__mobile_cache_version__')))
         .getSingleOrNull();
-    // [Fix-SYNC-CACHE-VERSION-DELTA] V20 : la version du code est 4 (bump
-    // 3→4 pour forcer le pull complet des appareils venant de l'ancienne
-    // APK — cf. v20_assessments_delta_pull_test pour le scénario complet).
-    expect(marker?.lastCount, 4);
+    // [Fix-SYNC-CACHE-VERSION-DELTA] V20/V23 : la version du code est 5
+    // (bump 4→5 pour forcer le pull complet des appareils venant d'une APK
+    // ≤ v1.0.4 — cf. v20_assessments_delta_pull_test).
+    expect(marker?.lastCount, 5);
   });
 
   test('le pull utilise le watermark du cache du profil actif', () async {
@@ -773,10 +773,10 @@ void main() {
           SyncMetadataCompanion.insert(
             tableNameColumn: '__mobile_cache_version__',
             lastSyncedAt: Value(profileWatermark),
-            // [Fix-SYNC-CACHE-VERSION-DELTA] V20 : version COURANTE du code
-            // (4) — le watermark du marqueur n'est utilisé que si la version
-            // correspond ; sinon pull complet (since=2000).
-            lastCount: const Value(4),
+            // [Fix-SYNC-CACHE-VERSION-DELTA] V20/V23 : version COURANTE du
+            // code (5) — le watermark du marqueur n'est utilisé que si la
+            // version correspond ; sinon pull complet (since=2000).
+            lastCount: const Value(5),
           ),
         );
 

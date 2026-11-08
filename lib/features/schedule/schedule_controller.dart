@@ -270,6 +270,12 @@ Future<List<WeeklyScheduleDto>> _scheduleFromLocal(
             startTime: r.startTime ?? '',
             endTime: r.endTime ?? '',
             room: r.room,
+            // [Fix-REAL-EDT] V23 — weekType ET weekTypeRaw : sans weekType,
+            // le défaut WeekType.a rendait matchesWeek(WeekType.b) FAUX
+            // pour les cours de semaine B servis hors-ligne.
+            weekType: _weekTypeFromLocal(r.weekType) == 'B'
+                ? WeekType.b
+                : WeekType.a,
             weekTypeRaw: _weekTypeFromLocal(r.weekType),
           ),
         )
@@ -405,6 +411,11 @@ Future<List<WeeklyScheduleDto>> _teacherScheduleFromLocal(
             startTime: r.startTime ?? '',
             endTime: r.endTime ?? '',
             room: r.room,
+            // [Fix-REAL-EDT] V23 — idem _scheduleFromLocal : sans weekType,
+            // les cours de semaine B étaient servis comme semaine A.
+            weekType: _weekTypeFromLocal(r.weekType) == 'B'
+                ? WeekType.b
+                : WeekType.a,
             weekTypeRaw: _weekTypeFromLocal(r.weekType),
           ),
         )

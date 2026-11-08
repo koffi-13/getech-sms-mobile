@@ -3,11 +3,13 @@
 /// offline-first.
 ///
 /// - En ligne (`connection.canReachServer`) : appels REST `/subjects/*` et
-///   `/class-subjects/*` via [dioProvider] + [buildUrl]. Aucun cache Drift en
-///   V1 (les matières sont des données d'administration — surface de codegen
-///   limitée).
-/// - Hors-ligne : les écritures sont mises en file d'attente via
-///   [outboxProvider] pour être poussées ultérieurement par le [SyncEngine].
+///   `/class-subjects/*` via [dioProvider] + [buildUrl].
+/// - Hors-ligne ([Fix-SUBJECTS-OFFLINE] V23) : lecture depuis le cache
+///   Drift (`subjects` / `class_subjects`, rempli par la synchro) — la
+///   page Matières restait une erreur réseau avant ce repli alors que la
+///   table est répliquée depuis la V1.
+/// - Écritures : mises en file d'attente via [outboxProvider] pour être
+///   poussées ultérieurement par le [SyncEngine].
 ///
 /// RBAC : SUBJECT_MANAGE pour toutes les écritures (création / édition /
 /// affectation / suppression). La lecture est ouverte à GRADE_READ (les
@@ -15,13 +17,16 @@
 library;
 
 import 'package:dio/dio.dart';
+import 'package:drift/drift.dart' as d;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart' as log_pkg;
 
+import '../../core/database/database.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
 import '../../core/sync/outbox.dart';
+import '../../core/sync/sync_engine.dart' show syncGenerationProvider;
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
 
@@ -36,13 +41,30 @@ final log_pkg.Logger _log = log_pkg.Logger(
 
 /// Liste des matières filtrée par recherche : `GET /subjects?search=`.
 ///
-/// Renvoie une liste vide si le serveur est non appairé. Les erreurs 403
-/// (RBAC insuffisant) sont transformées en liste vide.
+/// [Fix-SUBJECTS-OFFLINE] V23 — hors-ligne ou réseau coupé : cache Drift
+/// (`subjects`, rempli par la synchro). En ligne, la réponse met le cache
+/// à jour (best-effort) pour les consultations suivantes.
 final subjectsListProvider =
     FutureProvider.autoDispose.family<List<SubjectDto>, String>(
         (ref, search) async {
-  final conn = ref.watch(connectionProvider);
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+  // [Fix-AUTO-SYNC] rafraîchissement après chaque synchro utile.
+  ref.watch(syncGenerationProvider);
+  final conn = ref.watch(
+    connectionProvider.select(
+      (c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      ),
+    ),
+  );
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return _subjectsFromLocal(ref, search);
+  }
+  if (!conn.canReachServer && !conn.isChecking) {
+    return _subjectsFromLocal(ref, search);
+  }
 
   final dio = ref.watch(dioProvider);
   try {
@@ -53,13 +75,17 @@ final subjectsListProvider =
         'per_page': 200,
       },
     );
-    return _parseSubjectList(resp.data);
+    final subjects = _parseSubjectList(resp.data);
+    await _cacheSubjectsFromDtos(ref, subjects);
+    return subjects;
   } on DioException catch (e) {
     final api = (e.error is ApiException)
         ? e.error as ApiException
         : dioErrorToApiException(e);
     if (api.statusCode == 403) return const [];
     _log.w('subjectsListProvider : ${api.message}');
+    // [Fix-SUBJECTS-OFFLINE] réseau KO en cours de requête → cache Drift.
+    if (api is NetworkException) return _subjectsFromLocal(ref, search);
     rethrow;
   } catch (e) {
     _log.w('subjectsListProvider : $e');
@@ -67,15 +93,94 @@ final subjectsListProvider =
   }
 });
 
+/// [Fix-SUBJECTS-OFFLINE] V23 — matières servies par le cache Drift
+/// (recherche insensible à la casse sur nom + code).
+Future<List<SubjectDto>> _subjectsFromLocal(Ref ref, String search) async {
+  try {
+    final db = ref.read(databaseProvider);
+    final rows = await (db.select(db.subjects)
+          ..where((t) => t.isDeleted.equals(false))
+          ..orderBy([(t) => d.OrderingTerm.asc(t.name)]))
+        .get();
+    final needle = search.trim().toLowerCase();
+    return rows
+        .where((s) =>
+            needle.isEmpty ||
+            s.name.toLowerCase().contains(needle) ||
+            (s.code ?? '').toLowerCase().contains(needle))
+        .map(
+          (s) => SubjectDto(
+            id: s.id,
+            name: s.name,
+            code: s.code ?? '',
+            isActive: true,
+          ),
+        )
+        .toList();
+  } catch (_) {
+    return const [];
+  }
+}
+
+/// [Fix-SUBJECTS-OFFLINE] V23 — persiste les matières de l'API dans le
+/// cache Drift (best-effort, upsert par id).
+Future<void> _cacheSubjectsFromDtos(
+  Ref ref,
+  List<SubjectDto> subjects,
+) async {
+  if (subjects.isEmpty) return;
+  try {
+    final db = ref.read(databaseProvider);
+    final now = DateTime.now();
+    await db.batch((batch) {
+      for (final s in subjects) {
+        batch.insert(
+          db.subjects,
+          SubjectsCompanion.insert(
+            id: d.Value(s.id),
+            name: s.name,
+            code: d.Value(s.code.isEmpty ? null : s.code),
+            syncedAt: d.Value(now),
+            isDirty: const d.Value(false),
+            isDeleted: const d.Value(false),
+          ),
+          mode: d.InsertMode.insertOrReplace,
+        );
+      }
+    });
+  } catch (_) {
+    // Cache non essentiel : ne jamais bloquer l'affichage.
+  }
+}
+
 /// Matières affectées à une classe : `GET /class-subjects?classroom_id=`.
 ///
 /// Repli sur `/grades/class-subjects?classroom_id=` (endpoint du module Notes)
 /// si le premier renvoie 404 — les deux exposent le même schéma ClassSubjectDto.
+///
+/// [Fix-SUBJECTS-OFFLINE] V23 — hors-ligne ou réseau coupé : cache Drift
+/// (`class_subjects` + `subjects`, remplis par la synchro) — l'affectation
+/// des matières d'une classe restait une erreur réseau avant ce repli.
 final classSubjectsForClassroomProvider =
     FutureProvider.autoDispose.family<List<ClassSubjectDto>, int>(
         (ref, classroomId) async {
-  final conn = ref.watch(connectionProvider);
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+  ref.watch(syncGenerationProvider);
+  final conn = ref.watch(
+    connectionProvider.select(
+      (c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      ),
+    ),
+  );
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return _classSubjectsFromLocal(ref, classroomId);
+  }
+  if (!conn.canReachServer && !conn.isChecking) {
+    return _classSubjectsFromLocal(ref, classroomId);
+  }
 
   final dio = ref.watch(dioProvider);
   try {
@@ -102,12 +207,66 @@ final classSubjectsForClassroomProvider =
     }
     if (api.statusCode == 403) return const [];
     _log.w('classSubjectsForClassroomProvider : ${api.message}');
+    // [Fix-SUBJECTS-OFFLINE] réseau KO en cours de requête → cache Drift.
+    if (api is NetworkException) {
+      return _classSubjectsFromLocal(ref, classroomId);
+    }
     rethrow;
   } catch (e) {
     _log.w('classSubjectsForClassroomProvider : $e');
     rethrow;
   }
 });
+
+/// [Fix-SUBJECTS-OFFLINE] V23 — matières d'une classe depuis le cache
+/// Drift (jointure locale class_subjects × subjects × users).
+Future<List<ClassSubjectDto>> _classSubjectsFromLocal(
+  Ref ref,
+  int classroomId,
+) async {
+  try {
+    final db = ref.read(databaseProvider);
+    final rows = await (db.select(db.classSubjects)
+          ..where((t) => t.classroomId.equals(classroomId))
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    if (rows.isEmpty) return const [];
+    final subjects = {
+      for (final s in await db.select(db.subjects).get()) s.id: s,
+    };
+    final users = await db.select(db.users).get();
+    final userById = {
+      for (final u in users) u.id: u,
+    };
+    return rows
+        .map((cs) {
+          final subject = subjects[cs.subjectId];
+          final teacher = cs.teacherId == null ? null : userById[cs.teacherId];
+          // Convention « NOM Prénoms » : cf. [Fix-SYNC-FIELD-MAP-V11] —
+          // firstName reçoit `nom`, lastName reçoit `prenoms`.
+          final teacherName = teacher == null
+              ? null
+              : [teacher.firstName, teacher.lastName]
+                  .where((p) => p != null && p.isNotEmpty)
+                  .join(' ');
+          return ClassSubjectDto(
+            id: cs.id,
+            subjectId: cs.subjectId,
+            subjectName: subject?.name ?? 'Matière #${cs.subjectId}',
+            subjectCode: subject?.code ?? '',
+            coefficient: cs.coefficient,
+            assignedTeacherId: cs.teacherId,
+            assignedTeacherName:
+                (teacherName == null || teacherName.isEmpty) ? null : teacherName,
+            classroomId: classroomId,
+          );
+        })
+        .toList()
+      ..sort((a, b) => a.subjectName.compareTo(b.subjectName));
+  } catch (_) {
+    return const [];
+  }
+}
 
 // ===========================================================================
 // Repository (écritures : create / update / affectation / suppression).

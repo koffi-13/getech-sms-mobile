@@ -203,7 +203,7 @@ void main() {
           ..where((t) => t.tableNameColumn
               .equals('__mobile_cache_version__')))
         .getSingle();
-    expect(marqueur.lastCount, 4,
+    expect(marqueur.lastCount, 5,
         reason: 'le marqueur doit être passé à la version 4');
 
     // ── PHASE 4 : le repli provider hors-ligne sert les évaluations ──

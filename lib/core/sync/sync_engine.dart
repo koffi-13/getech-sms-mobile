@@ -39,7 +39,14 @@ const _mobileCacheVersionKey = '__mobile_cache_version__';
 // Bump → tout appareil venant d'une APK antérieure force un pull COMPLET
 // (since = 2000-01-01) et reconstitue les tables vides (assessments,
 // weekly_schedules, cycles…). Régression : v20_assessments_delta_pull_test.
-const _mobileCacheVersion = 4;
+//
+// [Fix-SYNC-REAL-EDT] V23 — 4 → 5 : le VRAI emploi du temps
+// (schedule_entries/schedule_sessions) n'est répliqué que depuis cette
+// version ; les APK ≤ v1.0.4 n'ont qu'un cache weekly_schedules VIDE (table
+// théorique jamais écrite par les écrans → EDT hors-ligne vide, retour
+// utilisateur 2026-11-08). Le bump force le pull complet qui remplit le
+// cache EDT réel dès la première reconnexion.
+const _mobileCacheVersion = 5;
 
 // ---------------------------------------------------------------------------
 // Helpers de lecture JSON (le serveur utilise du snake_case).
@@ -194,6 +201,14 @@ class SyncEngine {
   /// Base locale — initialisée depuis le provider (WATCH) pour suivre la
   /// bascule de serveur : le moteur est recréé avec la base du profil actif.
   late final AppDatabase _db;
+
+  /// [Fix-SYNC-REAL-EDT] V23 — sessions du VRAI EDT reçues lors du pull en
+  /// cours (id → class_subject_id/room/active), en attente des
+  /// `schedule_entries` qui arrivent dans la MÊME page (l'ordre des tables
+  /// de la réponse n'est pas garanti : on mémorise les sessions pour
+  /// résoudre les entrées quoi qu'il arrive).
+  Map<int, ({int? classSubjectId, String? room, bool isActive})>
+      _pendingScheduleSessions = {};
 
   Future<SyncResult> syncNow() async {
     final notifier = _ref.read(syncProgressProvider.notifier);
@@ -1250,6 +1265,80 @@ class SyncEngine {
     }
   }
 
+  /// [Fix-SYNC-REAL-EDT] V23 — convertit les `schedule_entries` du VRAI
+  /// emploi du temps en lignes du cache `weeklySchedules`, avec l'ID DE
+  /// L'ENTRY (le même que GET /schedule renvoie → le cache écrit en ligne
+  /// par _saveScheduleToLocal et celui-ci se remplacent proprement).
+  ///
+  /// Résolutions locales :
+  /// - session_id → class_subject_id → (classe, matière, enseignant) ;
+  /// - time_slot_id → (jour 1..6, horaires HH:mm) — time_slots est envoyée
+  ///   AVANT dans la même réponse (ordre alphabétique du registre) ;
+  /// - week_type : NULL → 'ALL' (sentinel « toutes les semaines ») ;
+  /// - is_active=false → isDeleted=true (le reconcile purge en suite).
+  ///
+  /// Les sessions reçues APRÈS les entrées (ordre non garanti) sont
+  /// réinjectées depuis [_pendingScheduleSessions] ; une session inconnue
+  /// (page de pagination différente) laisse l'entrée de côté SANS erreur —
+  /// elle sera résolue au prochain pull complet (bump _mobileCacheVersion).
+  Future<void> _applyRealEdtEntriesPull(
+    List<Map<String, dynamic>> rows,
+    DateTime syncedAt,
+  ) async {
+    final classSubjects = await _db.select(_db.classSubjects).get();
+    final csById = {for (final cs in classSubjects) cs.id: cs};
+    final timeSlots = await _db.select(_db.timeSlots).get();
+    final tsById = {for (final ts in timeSlots) ts.id: ts};
+
+    var applied = 0;
+    var skipped = 0;
+    await _db.transaction(() async {
+      for (final row in rows) {
+        final id = _rId(row);
+        final sessionId = _rIntN(row, 'session_id');
+        final session = _pendingScheduleSessions[sessionId];
+        if (session == null) {
+          skipped++;
+          continue;
+        }
+        final cs = session.classSubjectId == null
+            ? null
+            : csById[session.classSubjectId];
+        final tsId = _rIntN(row, 'time_slot_id');
+        final ts = tsId == null ? null : tsById[tsId];
+        final isActive = _rBool(row, 'is_active', d: true) && session.isActive;
+
+        await _db.into(_db.weeklySchedules).insertOnConflictUpdate(
+              WeeklySchedulesCompanion.insert(
+                // ID de l'entry = ID vu par GET /schedule (cohérence cache).
+                id: Value(id),
+                classroomId: Value(cs?.classroomId),
+                subjectId: Value(cs?.subjectId),
+                teacherId: Value(cs?.teacherId),
+                timeSlotId: tsId ?? 0,
+                dayOfWeek: ts?.dayOfWeek ?? 1,
+                startTime: Value(ts?.startTime),
+                endTime: Value(ts?.endTime),
+                // Salle : la session porte la salle (miroir GET /schedule
+                // qui lit sched_session.room).
+                room: Value(session.room),
+                // NULL = toutes les semaines → sentinel 'ALL'.
+                weekType: Value(_rStrN(row, 'week_type') ?? 'ALL'),
+                syncedAt: Value(syncedAt),
+                isDirty: const Value(false),
+                isDeleted: Value(!isActive),
+              ),
+            );
+        applied++;
+      }
+    });
+
+    if (rows.isNotEmpty) {
+      _log.i('EDT réel répliqué : $applied/${rows.length} entrée(s)'
+          '${skipped > 0 ? ' ($skipped session(s) non résolue(s))' : ''}');
+    }
+  }
+
   Future<void> _applyStudentClassAssignmentsPull(
     List<Map<String, dynamic>> rows,
     DateTime syncedAt,
@@ -1388,6 +1477,32 @@ class SyncEngine {
     // faux) → l'historique d'absences hors-ligne affichait « matière ? ».
     if (table == 'course_sessions') {
       await _applyCourseSessionsPull(rows, syncedAt);
+      return;
+    }
+
+    // [Fix-SYNC-REAL-EDT] V23 — le VRAI emploi du temps (celui que les
+    // éditeurs desktop/mobile écrivent) vit dans schedule_entries →
+    // schedule_sessions : la table weekly_schedules répliquée depuis V18
+    // est une table THÉORIQUE jamais écrite par les écrans → EDT
+    // hors-ligne VIDE alors qu'il s'affichait en ligne (retour
+    // utilisateur 2026-11-08). Les deux tables sont résolues ENSEMBLE :
+    // les entrées sont converties en lignes weeklySchedules avec l'ID de
+    // l'entry (le même que renvoie GET /schedule → cohérence du cache),
+    // jour + horaires venant de time_slots, classe/matière/enseignant de
+    // class_subjects, salle de la session.
+    if (table == 'schedule_sessions') {
+      _pendingScheduleSessions = {
+        for (final row in rows)
+          _rId(row): (
+            classSubjectId: _rIntN(row, 'class_subject_id'),
+            room: _rStrN(row, 'room'),
+            isActive: _rBool(row, 'is_active', d: true),
+          ),
+      };
+      return;
+    }
+    if (table == 'schedule_entries') {
+      await _applyRealEdtEntriesPull(rows, syncedAt);
       return;
     }
 

@@ -38,6 +38,7 @@ import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
 import '../../shared/models/grade_dto.dart';
 import 'grade_utils.dart';
+import 'bulletin_offline.dart';
 import 'ranking_offline.dart';
 
 final _log = Logger();
@@ -1975,22 +1976,64 @@ final bulletinProvider = FutureProvider.autoDispose
     .family<BulletinDto, BulletinQuery>((ref, q) async {
   // [Fix-HEARTBEAT-REBUILD] select : voir classroomsForGradesProvider.
   final conn = ref.watch(
-    connectionProvider
-        .select((c) => (isPaired: c.isPaired, serverUrl: c.serverUrl)),
+    connectionProvider.select(
+      (c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      ),
+    ),
   );
+
+  // [Fix-BULLETIN-OFFLINE] V23 — bulletin recalculé depuis le cache Drift
+  // (même formule que le serveur) quand il est injoignable. Best-effort :
+  // une base locale indisponible retombe sur les messages historiques.
+  BulletinDto? offlineBulletin;
+  try {
+    offlineBulletin = await computeBulletinOffline(ref, q);
+  } catch (_) {
+    offlineBulletin = null;
+  }
+
   if (!conn.isPaired || conn.serverUrl == null) {
+    if (offlineBulletin != null) return offlineBulletin;
     throw const ApiException('Serveur non configuré');
   }
-  final dio = ref.watch(dioProvider);
-  final resp = await dio.get(
-    buildUrl(conn.serverUrl!, ApiEndpoints.bulletin(q.studentId)),
-    queryParameters: {
-      'classroom_id': q.classroomId,
-      'period_id': q.periodId,
-    },
-  );
-  if (resp.data is! Map) {
-    throw const ApiException('Réponse bulletin invalide');
+  final definitelyOffline = !conn.canReachServer && !conn.isChecking;
+  if (definitelyOffline) {
+    if (offlineBulletin != null) return offlineBulletin;
+    throw const ApiException(
+      'Bulletin indisponible hors-ligne : aucune donnée en cache pour cet '
+      'élève, cette classe et cette période. Il s\'affichera '
+      'automatiquement dès la reconnexion au serveur.',
+    );
   }
-  return BulletinDto.fromJson(Map<String, dynamic>.from(resp.data as Map));
+
+  // [Fix-AUTO-SYNC] rafraîchissement après chaque synchro utile.
+  ref.watch(syncGenerationProvider);
+
+  final dio = ref.watch(dioProvider);
+  try {
+    final resp = await dio.get(
+      buildUrl(conn.serverUrl!, ApiEndpoints.bulletin(q.studentId)),
+      queryParameters: {
+        'classroom_id': q.classroomId,
+        'period_id': q.periodId,
+      },
+    );
+    if (resp.data is! Map) {
+      throw const ApiException('Réponse bulletin invalide');
+    }
+    return BulletinDto.fromJson(Map<String, dynamic>.from(resp.data as Map));
+  } on DioException catch (e) {
+    final api = (e.error is ApiException)
+        ? e.error as ApiException
+        : dioErrorToApiException(e);
+    // [Fix-BULLETIN-OFFLINE] réseau KO en cours de requête → cache Drift.
+    if (isNetworkFailure(api) && offlineBulletin != null) {
+      return offlineBulletin;
+    }
+    rethrow;
+  }
 });
