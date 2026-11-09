@@ -45,5 +45,7 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>GeTech-SMS utilise la caméra pour scanner le QR code d'appairage du serveur.</string>
 </dict>
 </plist>

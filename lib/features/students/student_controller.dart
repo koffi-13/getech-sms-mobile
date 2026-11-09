@@ -364,7 +364,19 @@ class StudentController extends StateNotifier<AsyncValue<List<StudentDto>>> {
           );
     }
 
-    return rows.map<StudentDto>((row) {
+    // [Fix-STUDENT-DUPLICATE] Fan-out du LEFT JOIN : un élève avec
+    // plusieurs assignations (locale NULL-year + serveur) apparaissait en
+    // DOUBLE. On déduplique par students.id en gardant la ligne à
+    // l'assignation la plus récente (id le plus grand).
+    final seenIds = <int>{};
+    final deduped = rows.toList()
+      ..sort((a, b) =>
+          (b.readTableOrNull(db.studentClassAssignments)?.id ?? -1)
+              .compareTo(
+                  a.readTableOrNull(db.studentClassAssignments)?.id ?? -1));
+    deduped.retainWhere(
+        (row) => seenIds.add(row.readTable(db.students).id));
+    return deduped.map<StudentDto>((row) {
       final s = row.readTable(db.students);
       final c = row.readTableOrNull(db.classrooms);
       final assign = row.readTableOrNull(db.studentClassAssignments);
@@ -1071,18 +1083,46 @@ class StudentRepository {
     // Mise à jour de l'assignation si la classe change (upsert : delete
     // non-dirty puis insert — l'update seul serait un no-op sans ligne).
     if (req.classroomId != null) {
-      await (db.delete(db.studentClassAssignments)
-            ..where((t) => t.studentId.equals(id) & t.isDirty.equals(false)))
-          .go();
-      await db.into(db.studentClassAssignments).insert(
-            StudentClassAssignmentsCompanion.insert(
-              studentId: id,
-              classroomId: req.classroomId!,
-              status: d.Value(req.status?.code),
-              inscriptionType: d.Value(req.inscriptionType?.code),
-              isDirty: const d.Value(true),
-            ),
-          );
+      // [Fix-STUDENT-DUPLICATE] Avant : chaque modification supprimait
+      // les assignations non-dirty et en insérait une NOUVELLE avec
+      // schoolYearId NULL ; le PATCH serveur recréait AUSSI la sienne →
+      // le LEFT JOIN de _fetchFromLocal matchait les deux (isNull() |
+      // equals(activeYear)) → élève affiché en DOUBLE après reconnexion.
+      // Désormais : si la classe ne change pas, on met juste à jour
+      // l'assignation existante ; sinon on remplace réellement.
+      final existing = await (db.select(db.studentClassAssignments)
+            ..where((t) =>
+                t.studentId.equals(id) &
+                t.isDeleted.equals(false)))
+          .get();
+      final unchanged = existing.any(
+          (a) => a.classroomId == req.classroomId && !a.isDirty);
+      if (unchanged) {
+        for (final a in existing.where((a) => !a.isDirty)) {
+          await (db.update(db.studentClassAssignments)
+                ..where((t) => t.id.equals(a.id)))
+              .write(StudentClassAssignmentsCompanion(
+                status: d.Value(req.status?.code ?? a.status),
+                inscriptionType:
+                    d.Value(req.inscriptionType?.code ?? a.inscriptionType),
+                isDirty: const d.Value(true),
+              ));
+        }
+      } else {
+        await (db.delete(db.studentClassAssignments)
+              ..where((t) =>
+                  t.studentId.equals(id) & t.isDirty.equals(false)))
+            .go();
+        await db.into(db.studentClassAssignments).insert(
+              StudentClassAssignmentsCompanion.insert(
+                studentId: id,
+                classroomId: req.classroomId!,
+                status: d.Value(req.status?.code),
+                inscriptionType: d.Value(req.inscriptionType?.code),
+                isDirty: const d.Value(true),
+              ),
+            );
+      }
     }
 
     // Satellites 1-1 : upsert (delete non-dirty + insert).

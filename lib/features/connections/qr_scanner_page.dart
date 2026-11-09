@@ -176,6 +176,27 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
     _bootstrap();
   }
 
+  /// [Fix-QR-BLACK-SCREEN] Relance propre de la caméra : stop + start
+  /// dans un try/catch — start() sur un contrôleur déjà actif lève une
+  /// erreur en mobile_scanner 5.x qui restait non interceptée.
+  Future<void> _restartCamera() async {
+    setState(() {
+      _permissionDenied = false;
+      _startError = null;
+      _starting = true;
+    });
+    try {
+      await _controller.stop();
+    } catch (_) {}
+    try {
+      await _controller.start();
+    } catch (e) {
+      setState(() => _startError = e.toString());
+    } finally {
+      if (mounted) setState(() => _starting = false);
+    }
+  }
+
   Future<void> _bootstrap() async {
     // hasTorch n'est plus disponible dans la nouvelle API mobile_scanner
     // On assume la torche disponible par défaut
@@ -434,6 +455,25 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
         MobileScanner(
           controller: _controller,
           onDetect: _onDetect,
+          // [Fix-QR-BLACK-SCREEN] Sans errorBuilder, une erreur de
+          // démarrage caméra (permission refusée définitivement, caméra
+          // occupée par une autre app, libération CameraX pas encore
+          // terminée à la réouverture) était AVALÉE et la preview
+          // restait NOIRE sans message. On affiche l'écran d'erreur dédié
+          // (_CameraError, code mort jusqu'ici) avec un bouton Réessayer.
+          errorBuilder: (context, error) {
+            if (error.code == MobileScannerErrorCode.permissionDenied) {
+              setState(() => _permissionDenied = true);
+            } else {
+              setState(() => _startError = error.errorCode ?? '\$error');
+            }
+            return _CameraError(
+              message: 'Caméra indisponible '
+                  '(${error.errorCode ?? error.code}). '
+                  'Vérifiez la permission caméra ou réessayez.',
+              onManual: _restartCamera,
+            );
+          },
         ),
         // Viseur carré centré
         _ScannerOverlay(colorScheme: theme.colorScheme),

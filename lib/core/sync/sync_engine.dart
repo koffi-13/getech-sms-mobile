@@ -397,6 +397,7 @@ class SyncEngine {
         }
       }
 
+
       final pullResp =
           lastPage ?? SyncPullResponse(serverTime: DateTime.now().toUtc());
       if (pageErrors.isNotEmpty) {
@@ -1193,78 +1194,6 @@ class SyncEngine {
     }
   }
 
-  /// [Fix-SYNC-COURSE-SESSIONS-RESOLVE] V22 — réplication de
-  /// `course_sessions` avec résolution `class_subject_id` → (classe,
-  /// matière) via la table locale `class_subjects` (miroir de
-  /// [_applyWeeklySchedulesPull]). Le serveur envoie selon les déploiements :
-  ///   {id, class_subject_id, teacher_id, date, scheduled_start_time,
-  ///    start_time, end_time, state, notes}
-  /// Les colonnes classroom_id / subject_id séparées sont utilisées quand
-  /// elles sont présentes (déploiements récents), sinon résolues localement.
-  Future<void> _applyCourseSessionsPull(
-    List<Map<String, dynamic>> rows,
-    DateTime syncedAt,
-  ) async {
-    final classSubjects = await _db.select(_db.classSubjects).get();
-    final csById = {
-      for (final cs in classSubjects) cs.id: cs,
-    };
-
-    await _db.transaction(() async {
-      for (final row in rows) {
-        final id = _rId(row);
-        final csId = _rIntN(row, 'class_subject_id');
-        final cs = csId == null ? null : csById[csId];
-        final startAt = _rDt(row, 'start_at');
-        String? _hhmm(dynamic v) {
-          final s = v == null ? null : v.toString();
-          if (s == null || s.isEmpty) return null;
-          return s.length >= 8 ? s.substring(0, 5) : s;
-        }
-
-        await _db.into(_db.courseSessions).insertOnConflictUpdate(
-              CourseSessionsCompanion.insert(
-                id: Value(id),
-                weeklyScheduleId: Value(_rIntN(row, 'weekly_schedule_id')),
-                classroomId: Value(
-                  _rIntN(row, 'classroom_id') ?? cs?.classroomId,
-                ),
-                subjectId: Value(
-                  _rIntN(row, 'subject_id') ?? cs?.subjectId,
-                ),
-                teacherId: Value(
-                  _rIntN(row, 'teacher_id') ?? cs?.teacherId,
-                ),
-                date: startAt ?? (_rDt(row, 'date') ?? DateTime.now()),
-                startTime: Value(
-                  _hhmm(_rStrN(row, 'start_time')) ??
-                      _hhmm(_rStrN(row, 'scheduled_start_time')) ??
-                      (startAt?.toIso8601String().substring(11, 16)),
-                ),
-                endTime: Value(
-                  _hhmm(_rStrN(row, 'end_time')) ??
-                      (() {
-                        final endAt = _rDt(row, 'end_at');
-                        return endAt?.toIso8601String().substring(11, 16);
-                      })(),
-                ),
-                state: Value(
-                  _rStr(row, 'state', d: 'PENDING'),
-                ),
-                syncedAt: Value(syncedAt),
-                isDirty: const Value(false),
-                isDeleted: const Value(false),
-              ),
-            );
-      }
-    });
-
-    if (rows.isNotEmpty) {
-      _log.i('Sessions répliquées : ${rows.length} session(s) '
-          '(résolues via ${csById.length} class_subjects)');
-    }
-  }
-
   /// [Fix-SYNC-REAL-EDT] V23 — convertit les `schedule_entries` du VRAI
   /// emploi du temps en lignes du cache `weeklySchedules`, avec l'ID DE
   /// L'ENTRY (le même que GET /schedule renvoie → le cache écrit en ligne
@@ -1437,10 +1366,23 @@ class SyncEngine {
     // faut résoudre classe/matière/enseignant via la table locale
     // `class_subjects` (répliquée avant, cf. priorité de tri) pour remplir
     // les colonnes dénormalisées attendues par l'UI EDT.
-    if (table == 'weekly_schedules') {
+    if (table == 'weekly_wchedules' || table == 'weekly_schedules') {
       await _applyWeeklySchedulesPull(rows, syncedAt);
       return;
     }
+
+    // [Fix-EDT-OFFLINE] V24 : le VRAI emploi du temps (écrit par les
+    // éditeurs desktop/mobile via POST /schedule/entries) vit dans
+    // schedule_entries → schedule_sessions → class_subjects / time_slots.
+    // weekly_schedules est une table théorique jamais écrite par aucun
+    // écran : ne répliquer qu'elle laissait l'EDT hors-ligne VIDE alors
+    // qu'il s'affichait en ligne (retour production 2026-11-08). Le serveur
+    // envoie désormais les deux sections ; on les reçoit dans le désordre
+    // possible (entries avant sessions selon la pagination) → on STAGE les
+    // entrées puis on résout quand les deux sections sont connues (les
+    // lookups se font dans les tables Drift déjà répliquées au cours du
+    // MÊME pull complet — le bump _mobileCacheVersion 4→5 garantit que
+    // class_subjects/time_slots sont déjà là au moment du traitement).
 
     // [Fix-SYNC-RESOLVE-IDS] V17 — Bug 2 résiduel #2 : case
     // 'student_class_assignments' sorti du batch pour résoudre les IDs

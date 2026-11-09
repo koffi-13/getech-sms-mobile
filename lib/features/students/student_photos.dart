@@ -36,6 +36,29 @@ import '../connections/connection_state.dart';
 /// - les erreurs réseau/serveur (timeout, 5xx, connexion) sont réessayables
 ///   après un court délai ([_transientRetryAfter]).
 class StudentPhotoCache {
+  /// [Fix-PHOTO-OFFLINE] Préchargement des photos après synchro : le cache
+  /// disque n'était rempli qu'à l'AFFICHAGE d'un avatar (lazy) — une session
+  /// en ligne sans consultation de la liste laissait le cache vide → aucune
+  /// photo hors-ligne. Ce préchargement (best-effort, silencieux, plafonné)
+  /// s'exécute après un pull réussi.
+  static Future<void> prefetchPhotos(
+    List<int> studentIds,
+    String? serverUrl,
+  ) async {
+    if (serverUrl == null || studentIds.isEmpty) return;
+    final cache = StudentPhotoCache();
+    final dio = _cacheDio;
+    // Plafond : 50 photos par synchro (bande passante LAN maîtrisée).
+    final ids = studentIds.take(50).toList();
+    for (final id in ids) {
+      try {
+        await cache.providerFor(id).resolve(cache, serverUrl, dio);
+      } catch (_) {
+        // silencieux : le lazy-loading reprendra à l'affichage.
+      }
+    }
+  }
+
   StudentPhotoCache({required Dio dio, required this.serverUrl})
       : _dio = dio;
 

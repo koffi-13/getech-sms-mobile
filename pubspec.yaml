@@ -1,7 +1,11 @@
 name: getech_sms_mobile
 description: "Application mobile companion (iOS + Android) pour le système de gestion scolaire GeTech-SMS. Offline-first, synchronisation avec le terminal principal desktop (FastAPI)."
 publish_to: "none"
+<<<<<<< HEAD
 version: 1.0.6+7
+=======
+version: 1.0.5+6
+>>>>>>> 5ac1a8a (fix(mobile): EDT hors-ligne + périodes vides + doublons élèves + scan noir + photos [Fix-EDT-OFFLINE / Fix-PERIODS-PROD / Fix-STUDENT-DUPLICATE / Fix-QR-BLACK-SCREEN / Fix-PHOTO-EDIT] — v1.0.5+6)
 
 environment:
   sdk: ">=3.3.0 <4.0.0"

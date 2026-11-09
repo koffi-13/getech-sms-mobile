@@ -852,7 +852,17 @@ final periodsForClassroomProvider = FutureProvider.autoDispose
     // cycle sera résolu (prochain pull avec levels).
     return periods;
   }
-  return periods.where((p) => p.cycleId == cycleId).toList();
+  final filtered = periods.where((p) => p.cycleId == cycleId).toList();
+  if (filtered.isEmpty) {
+    // [Fix-PERIODS-PROD] Cycle connu mais AUCUNE période rattachée :
+    // les IDs de cycles divergent entre bases (COLLEGE=1/2 sur une base
+    // neuve, 3/4 sur une base peuplée) et les périodes « partagées »
+    // (cycle NULL côté serveur) sont légitimes. On sert la liste complète
+    // plutôt qu'un sélecteur VIDE qui bloquait la saisie de notes en
+    // production (retour 2026-11-09).
+    return periods;
+  }
+  return filtered;
 });
 
 /// Période active (celle du jour) d'une liste — miroir de

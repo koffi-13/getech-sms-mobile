@@ -3,6 +3,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -112,6 +113,73 @@ class _DetailBody extends StatelessWidget {
   final StudentDto student;
   final Future<void> Function() onRefresh;
 
+
+  /// [Fix-PHOTO-EDIT] Modifier la photo de l'élève : galerie ou caméra
+  /// (image_picker) puis upload multipart vers POST /students/{id}/photo
+  /// (endpoint serveur existant, 5 Mo max). Invalide le cache local.
+  Future<void> _changePhoto(BuildContext context) async {
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.photo_library),
+            title: const Text('Choisir dans la galerie'),
+            onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+          ),
+          ListTile(
+            leading: const Icon(Icons.photo_camera),
+            title: const Text('Prendre une photo'),
+            onTap: () => Navigator.pop(ctx, ImageSource.camera),
+          ),
+        ]),
+      ),
+    );
+    if (source == null) return;
+    final picker = ImagePicker();
+    final xfile = await picker.pickImage(
+      source: source,
+      maxWidth: 1024,
+      imageQuality: 80,
+    );
+    if (xfile == null) return;
+    final conn = ref.read(connectionProvider);
+    if (conn.serverUrl == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Modification de photo impossible hors connexion au serveur.')));
+      }
+      return;
+    }
+    final dio = ref.read(dioProvider);
+    try {
+      final form = FormData.fromMap({
+        'file': await MultipartFile.fromFile(
+          xfile.path,
+          filename: xfile.name,
+        ),
+      });
+      final resp = await dio.post(
+        buildUrl(conn.serverUrl!, '/students/${student.id}/photo'),
+        data: form,
+      );
+      if (resp.statusCode == 200 && mounted) {
+        await StudentPhotoCache.deleteCached(student.id);
+        StudentPhotoCache.resetStudentPhotoCache();
+        ref.read(syncGenerationProvider.notifier).state++;
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Photo mise à jour.')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(
+                  content: Text('Échec de l\'upload : ' + e.toString())));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return RefreshIndicator(
@@ -161,10 +229,24 @@ class _HeaderCard extends StatelessWidget {
           children: [
             // Photo via l'endpoint dédié GET /students/{id}/photo (cache
             // disque, fallback initiales) — `photo_path` n'est PAS une URL.
-            StudentAvatar(
+            Stack(
+              children: [
+                StudentAvatar(
               studentId: student.id,
               initials: student.displayInitials,
               radius: 44,
+            ),
+                Positioned(
+                  right: 0,
+                  bottom: 0,
+                  child: FloatingActionButton.small(
+                    heroTag: 'photo_edit_' + (student.id.toString()),
+                    onPressed: () => _changePhoto(context),
+                    tooltip: 'Modifier la photo',
+                    child: const Icon(Icons.photo_camera),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 12),
             Text(
