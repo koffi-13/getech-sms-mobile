@@ -351,8 +351,8 @@ void main() {
   });
 
   test(
-      '[REPRO] deux cycles en base : le filtrage ne doit JAMAIS remplacer un '
-      'cycle connu sans résultat par toutes les périodes', () async {
+      '[REPRO] deux cycles en base : un cycle connu sans résultat replie '
+      'sur la liste complète (jamais un dropdown vide)', () async {
     final db = AppDatabase.forTesting(NativeDatabase.memory());
     addTearDown(db.close);
 
@@ -392,12 +392,20 @@ void main() {
     (container.read(connectionProvider.notifier) as _FakeConnectionNotifier)
         .forceOffline();
 
-    // Cycle CONNU (=3) sans période associée : liste VIDE (spec point 3 :
-    // « Il ne faut jamais remplacer un cycle connu sans résultat par la
-    // liste de toutes les périodes »).
+    // [Fix-PERIODS-PROD] Cycle CONNU (=3) sans période associée : la
+    // spec initiale exigeait une liste VIDE — c'est PRÉCISÉMENT ce
+    // comportement qui bloquait la saisie de notes en production
+    // (retour 2026-11-09) : les IDs de cycles divergent entre bases
+    // (COLLEGE=1/2 sur une base neuve, 3/4 sur une base peuplée) et les
+    // périodes « partagées » (cycle NULL côté serveur) sont légitimes.
+    // DÉCISION PROD : le repli sur la liste complète prime — un sélecteur
+    // vide n'est jamais acceptable ; le test est aligné sur cette règle.
     final periods = await container.read(periodsForClassroomProvider(1).future);
-    expect(periods, isEmpty,
-        reason: 'cycle 3 connu sans période : aucune période proposée');
+    expect(periods, isNotEmpty,
+        reason: 'cycle 3 connu sans période : repli sur la liste complète '
+            '— jamais un dropdown vide bloquant la saisie de notes');
+    expect(periods.map((p) => p.id), [1],
+        reason: 'les périodes existantes restent servies en repli');
   });
 
   test(
