@@ -461,7 +461,7 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
           // terminée à la réouverture) était AVALÉE et la preview
           // restait NOIRE sans message. On affiche l'écran d'erreur dédié
           // (_CameraError, code mort jusqu'ici) avec un bouton Réessayer.
-          errorBuilder: (context, error) {
+          errorBuilder: (context, error, child) {
             final code = error.errorCode;
             if (code == MobileScannerErrorCode.permissionDenied) {
               setState(() => _permissionDenied = true);
