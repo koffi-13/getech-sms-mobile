@@ -1,18 +1,23 @@
-/// Page "Détail élève" : fiche complète (identité, contact, médical, scolarité,
-/// parents, tuteurs) + actions contextuelles (modifier / bulletin / absences).
+/// Fichier "Détail élève" : fiche complète (identité, contact, médical, scolarité,
+/// parents, tuteurs) + actions contextuelles (modifier / bulletin / absences)
+/// + édition de la photo (galerie/caméra → upload multipart).
 library;
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
-import 'package:image_picker/image_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../core/auth/auth_state.dart';
 import '../../core/config/constants.dart';
+import '../../core/network/api_endpoints.dart';
+import '../../core/network/dio_client.dart';
 import '../../core/utils/formatters.dart';
 import '../../core/utils/permissions.dart';
 import '../../shared/models/student_dto.dart';
 import '../../shared/widgets/widgets.dart';
+import '../connections/connection_state.dart';
 import 'student_controller.dart';
 import 'student_photos.dart';
 
@@ -93,8 +98,7 @@ class StudentDetailPage extends ConsumerWidget {
         ],
       ),
       body: async.when(
-        data: (s) => _DetailBody(student: s, onRefresh: () => _refresh(ref)),
-        loading: () => const AppLoading(label: 'Chargement de l\'élève…'),
+        data: (s) => _DetailBody(student: s, onRefresh: () => _refresh(ref)),        loading: () => const AppLoading(label: 'Chargement de l\'élève…'),
         error: (e, _) => AppErrorWidget(
           message: e.toString(),
           onRetry: () => _refresh(ref),
@@ -108,16 +112,24 @@ class StudentDetailPage extends ConsumerWidget {
 // Corps de la page
 // ---------------------------------------------------------------------------
 
-class _DetailBody extends StatelessWidget {
+/// [Fix-PHOTO-EDIT] ConsumerStatefulWidget : l'édition de photo a besoin de
+/// `ref` (connectionProvider, dioProvider) et de `mounted` après les awaits.
+class _DetailBody extends ConsumerStatefulWidget {
   const _DetailBody({required this.student, required this.onRefresh});
   final StudentDto student;
   final Future<void> Function() onRefresh;
 
+  @override
+  ConsumerState<_DetailBody> createState() => _DetailBodyState();
+}
 
-  /// [Fix-PHOTO-EDIT] Modifier la photo de l'élève : galerie ou caméra
-  /// (image_picker) puis upload multipart vers POST /students/{id}/photo
-  /// (endpoint serveur existant, 5 Mo max). Invalide le cache local.
-  Future<void> _changePhoto(BuildContext context) async {
+class _DetailBodyState extends ConsumerState<_DetailBody> {
+  StudentDto get student => widget.student;
+
+  /// Modifier la photo de l'élève : galerie ou caméra (image_picker) puis
+  /// upload multipart vers POST /students/{id}/photo (endpoint serveur
+  /// existant, 5 Mo max). Invalide le cache local et rafraîchit l'avatar.
+  Future<void> _changePhoto() async {
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -135,23 +147,26 @@ class _DetailBody extends StatelessWidget {
         ]),
       ),
     );
-    if (source == null) return;
+    if (source == null || !mounted) return;
+
     final picker = ImagePicker();
     final xfile = await picker.pickImage(
       source: source,
       maxWidth: 1024,
       imageQuality: 80,
     );
-    if (xfile == null) return;
+    if (xfile == null || !mounted) return;
+
     final conn = ref.read(connectionProvider);
     if (conn.serverUrl == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text(
-                'Modification de photo impossible hors connexion au serveur.')));
-      }
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text(
+          'Modification de photo impossible hors connexion au serveur.',
+        ),
+      ));
       return;
     }
+
     final dio = ref.read(dioProvider);
     try {
       final form = FormData.fromMap({
@@ -160,34 +175,35 @@ class _DetailBody extends StatelessWidget {
           filename: xfile.name,
         ),
       });
-      final resp = await dio.post(
+      await dio.post(
         buildUrl(conn.serverUrl!, '/students/${student.id}/photo'),
         data: form,
       );
-      if (resp.statusCode == 200 && mounted) {
-        await StudentPhotoCache.deleteCached(student.id);
-        StudentPhotoCache.resetStudentPhotoCache();
-        ref.read(syncGenerationProvider.notifier).state++;
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Photo mise à jour.')));
-      }
+      // Succès : purge le cache disque + les mémos négatifs (nouvelle
+      // instance de cache → l'avatar se re-télécharge immédiatement).
+      final cache = ref.read(studentPhotoCacheProvider);
+      await cache.deleteCached(student.id);
+      resetStudentPhotoCache(ref);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Photo mise à jour.')),
+      );
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-              .showSnackBar(SnackBar(
-                  content: Text('Échec de l\'upload : ' + e.toString())));
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Échec de l\'upload : ${e.toString()}')),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return RefreshIndicator(
-      onRefresh: onRefresh,
+      onRefresh: widget.onRefresh,
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          _HeaderCard(student: student),
+          _HeaderCard(student: student, onEditPhoto: _changePhoto),
           const SizedBox(height: 12),
           _IdentiteCard(student: student),
           const SizedBox(height: 12),
@@ -212,8 +228,9 @@ class _DetailBody extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 class _HeaderCard extends StatelessWidget {
-  const _HeaderCard({required this.student});
+  const _HeaderCard({required this.student, required this.onEditPhoto});
   final StudentDto student;
+  final Future<void> Function() onEditPhoto;
 
   @override
   Widget build(BuildContext context) {
@@ -229,19 +246,20 @@ class _HeaderCard extends StatelessWidget {
           children: [
             // Photo via l'endpoint dédié GET /students/{id}/photo (cache
             // disque, fallback initiales) — `photo_path` n'est PAS une URL.
+            // [Fix-PHOTO-EDIT] bouton galerie/caméra sur l'avatar.
             Stack(
               children: [
                 StudentAvatar(
-              studentId: student.id,
-              initials: student.displayInitials,
-              radius: 44,
-            ),
+                  studentId: student.id,
+                  initials: student.displayInitials,
+                  radius: 44,
+                ),
                 Positioned(
                   right: 0,
                   bottom: 0,
                   child: FloatingActionButton.small(
-                    heroTag: 'photo_edit_' + (student.id.toString()),
-                    onPressed: () => _changePhoto(context),
+                    heroTag: 'photo_edit_${student.id}',
+                    onPressed: onEditPhoto,
                     tooltip: 'Modifier la photo',
                     child: const Icon(Icons.photo_camera),
                   ),

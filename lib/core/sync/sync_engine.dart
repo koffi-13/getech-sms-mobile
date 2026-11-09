@@ -1,6 +1,8 @@
 /// Moteur de synchronisation offline-first (pull / push, server-wins).
 library;
 
+import 'dart:async';
+
 import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart' as log_pkg;
@@ -8,6 +10,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../features/connections/connection_state.dart';
 import '../../features/students/student_controller.dart';
+import '../../features/students/student_photos.dart';
 import '../../shared/models/grade_dto.dart';
 import '../../shared/models/student_dto.dart';
 import '../../shared/models/sync_dto.dart';
@@ -270,8 +273,41 @@ class SyncEngine {
     // lecture qui la surveillent se rafraîchissent tous seuls.
     if (finalResult.isSuccess && (pulled > 0 || pushed > 0)) {
       _ref.read(syncGenerationProvider.notifier).state++;
+
+      // [Fix-PHOTO-OFFLINE] Préchargement best-effort des photos des
+      // élèves du cache local : le disque n'était rempli qu'à l'affichage
+      // d'un avatar — sans consultation préalable de la liste, AUCUNE
+      // photo n'était disponible hors-ligne (retour production
+      // 2026-11-09). Plafonné à 50 ; la file interne régule la concurrence.
+      unawaited(_prefetchStudentPhotos());
     }
     return finalResult;
+  }
+
+  /// Cf. [Fix-PHOTO-OFFLINE] : construit un cache photo LOCAL (pas le
+  /// provider — éviterait une dépendance circulaire features ↔ core) et
+  /// précharge les photos des 50 premiers élèves non supprimés du Drift.
+  Future<void> _prefetchStudentPhotos() async {
+    try {
+      final url = _ref.read(connectionProvider).serverUrl;
+      if (url == null) return;
+      final rows = await (_db.select(_db.students)
+            ..where((t) => t.isDeleted.equals(false)))
+          .get();
+      if (rows.isEmpty) return;
+      final cache = StudentPhotoCache(
+        dio: _ref.read(dioProvider),
+        serverUrl: url,
+      );
+      await StudentPhotoCache.prefetchPhotos(
+        cache,
+        rows.map((s) => s.id).toList(),
+      );
+      _log.i('Photos préchargées (best-effort, ≤50) sur '
+          '${rows.length} élèves du cache local');
+    } catch (e) {
+      _log.w('Préchargement des photos ignoré ($e)');
+    }
   }
 
   Future<SyncResult> pull() async {

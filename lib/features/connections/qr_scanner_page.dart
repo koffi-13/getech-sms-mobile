@@ -462,14 +462,14 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
           // restait NOIRE sans message. On affiche l'écran d'erreur dédié
           // (_CameraError, code mort jusqu'ici) avec un bouton Réessayer.
           errorBuilder: (context, error) {
-            if (error.code == MobileScannerErrorCode.permissionDenied) {
+            final code = error.errorCode;
+            if (code == MobileScannerErrorCode.permissionDenied) {
               setState(() => _permissionDenied = true);
             } else {
-              setState(() => _startError = error.errorCode ?? '\$error');
+              setState(() => _startError = '$code');
             }
             return _CameraError(
-              message: 'Caméra indisponible '
-                  '(${error.errorCode ?? error.code}). '
+              message: 'Caméra indisponible ($code). '
                   'Vérifiez la permission caméra ou réessayez.',
               onManual: _restartCamera,
             );

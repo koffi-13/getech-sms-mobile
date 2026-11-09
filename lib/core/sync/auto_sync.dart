@@ -31,6 +31,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../features/connections/connection_state.dart';
 import '../network/network_state.dart';
+import '../notifications/notification_service.dart';
 import 'sync_engine.dart';
 
 /// Décision pure (testable) : faut-il déclencher une synchro automatique
@@ -127,7 +128,22 @@ class AutoSyncController {
     if (!conn.canReachServer) return;
     _running = true;
     try {
-      await _ref.read(syncEngineProvider).syncNow();
+      final result = await _ref.read(syncEngineProvider).syncNow();
+      // [Fix-NOTIF-AUTO] V25 : les notifications (validation/rejet des
+      // notes, résultat utile de synchro) n'étaient déclenchées que par
+      // les boutons MANUELS de synchro — les synchros automatiques
+      // (réseau rétabli, retour au premier plan, heartbeat) restaient
+      // muettes. Même post-traitement que dashboard/connections pages.
+      try {
+        if (result.isSuccess) {
+          await _ref
+              .read(notificationServiceProvider)
+              .maybeCheckGradeModifications();
+        }
+        await _ref.read(notificationServiceProvider).notifySyncResult(result);
+      } catch (_) {
+        // Une notification ne doit jamais casser la synchro auto.
+      }
     } catch (_) {
       // Les erreurs attendues sont déjà dans SyncResult ; on avale les
       // exceptions vraiment inattendues pour ne jamais crasher l'app.

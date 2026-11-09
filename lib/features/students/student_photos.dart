@@ -36,25 +36,25 @@ import '../connections/connection_state.dart';
 /// - les erreurs réseau/serveur (timeout, 5xx, connexion) sont réessayables
 ///   après un court délai ([_transientRetryAfter]).
 class StudentPhotoCache {
-  /// [Fix-PHOTO-OFFLINE] Préchargement des photos après synchro : le cache
+  /// [Fix-PHOTO-OFFLINE] Préchargement best-effort après synchro : le cache
   /// disque n'était rempli qu'à l'AFFICHAGE d'un avatar (lazy) — une session
   /// en ligne sans consultation de la liste laissait le cache vide → aucune
-  /// photo hors-ligne. Ce préchargement (best-effort, silencieux, plafonné)
-  /// s'exécute après un pull réussi.
+  /// photo hors-ligne. Appelé avec le cache du serveur actif ; plafonné pour
+  /// maîtriser la bande passante LAN ; silencieux (le lazy-loading reprend à
+  /// l'affichage en cas d'échec).
   static Future<void> prefetchPhotos(
-    List<int> studentIds,
-    String? serverUrl,
-  ) async {
-    if (serverUrl == null || studentIds.isEmpty) return;
-    final cache = StudentPhotoCache();
-    final dio = _cacheDio;
-    // Plafond : 50 photos par synchro (bande passante LAN maîtrisée).
-    final ids = studentIds.take(50).toList();
-    for (final id in ids) {
+    StudentPhotoCache cache,
+    List<int> studentIds, {
+    int limit = 50,
+  }) async {
+    if (cache.serverUrl == null || studentIds.isEmpty) return;
+    // Un accès par élève : la file interne (max 3 en vol) régule le débit,
+    // les 404 marquent l'absence, les échecs réseau restent réessayables.
+    for (final id in studentIds.take(limit)) {
       try {
-        await cache.providerFor(id).resolve(cache, serverUrl, dio);
+        await cache.providerFor(id);
       } catch (_) {
-        // silencieux : le lazy-loading reprendra à l'affichage.
+        // silencieux.
       }
     }
   }
