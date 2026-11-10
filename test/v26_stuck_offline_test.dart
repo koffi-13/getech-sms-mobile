@@ -23,6 +23,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:getech_sms_mobile/features/connections/connection_state.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() {
+    SharedPreferences.setMockInitialValues({});
+  });
   group('V26 — ConnectionState.copyWith', () {
     test('pairingForcedOffline est posé par setPairingForcedOffline'
         ' (simulation via copyWith, état hors ligne)', () {
@@ -96,12 +101,6 @@ void main() {
   });
 
   group('V26 — persistance du mode hors-ligne explicite (clé canonique)', () {
-    setUp(() async {
-      TestWidgetsFlutterBinding.ensureInitialized();
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.clear();
-    });
-
     test('clé canonique écrite par setForceOffline, clé legacy purgée',
         () async {
       final prefs = await SharedPreferences.getInstance();
