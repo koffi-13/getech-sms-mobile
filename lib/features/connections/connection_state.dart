@@ -285,6 +285,13 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
 
       final response = await dio.get(fullUrl);
       stopwatch.stop();
+      // [Fix-LATE-STATE-WRITE] Le ping est async et peut être lancé en
+      // arrière-plan (login [Fix-LOGIN-REFRESH-STATE], heartbeat, resume) :
+      // si le notifier a été libéré pendant l'attente, écrire `state` après
+      // `dispose` lève « Bad state: used after dispose » — en test cela
+      // fait échouer la suite APRES son terme ; en production cela
+      // remonterait une exception dans la zone racine. Garde `mounted`.
+      if (!mounted) return;
       _markServerReachable(stopwatch.elapsed);
     } catch (e) {
       // [Fix-ONLINE-DETECT] V24 (réellement effectif) — une réponse HTTP
@@ -299,9 +306,10 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
       final serverResponded = e is DioException && e.response != null;
       if (serverResponded) {
         stopwatch.stop();
-        _markServerReachable(stopwatch.elapsed);
+        if (mounted) _markServerReachable(stopwatch.elapsed);
         return;
       }
+      if (!mounted) return;
       if (state.status != ServerStatus.offline) {
         state = state.copyWith(
           status: ServerStatus.offline,
