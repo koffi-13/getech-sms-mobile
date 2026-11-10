@@ -27,9 +27,16 @@ class AppConfig {
   static const Duration jwtTtl = Duration(hours: 24);
 
   /// Timeouts réseau.
-  /// Le connectTimeout est volontairement élevé (20s) pour les réseaux LAN
-  /// lents ou les connexions vers un serveur desktop distant.
-  static const Duration connectTimeout = Duration(seconds: 20);
+  /// [Fix-LOGIN-20S] Le connectTimeout était de 20s « pour les réseaux LAN
+  /// lents » : sur un serveur desktop injoignable (IP erronée, pare-feu
+  /// qui DROPPE — cas fréquent sous Windows), le login patientait 20 s
+  /// avant d'afficher « Délai de connexion dépassé après 20s ». Sur un
+  /// LAN, une connexion TCP réussie prend < 1 s ; ce qui est lent c'est
+  /// la RÉPONSE, couverte par receiveTimeout. 8 s couvre largement les
+  /// cas réels (WiFi congesté, pont WiFi↔Ethernet) tout en divisant
+  /// l'attente d'erreur par 2,5. Le message d'erreur cite désormais la
+  /// constante — plus de « 20s » figé dans le texte.
+  static const Duration connectTimeout = Duration(seconds: 8);
   static const Duration receiveTimeout = Duration(seconds: 30);
   static const Duration sendTimeout = Duration(seconds: 30);
 

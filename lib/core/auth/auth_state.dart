@@ -212,6 +212,29 @@ class AuthNotifier extends Notifier<AuthState> {
       );
       return false;
     }
+    // [Fix-LOGIN-FAST-FAIL] Si le serveur est DÉJÀ connu injoignable par
+    // le heartbeat (statut offline) ou en mode hors-ligne forcé, et
+    // qu'aucun snapshot de session n'est disponible pour ce profil, ne
+    // pas lancer une requête vouée à l'échec : l'utilisateur attendait
+    // le timeout complet (20 s avant ce correctif) pour un message
+    // d'erreur prévisible. S'il y a un snapshot, on tente quand même la
+    // requête — le fallback hors-ligne (credentials identiques) donne
+    // une session de travail.
+    final conn = ref.read(connectionProvider);
+    if (conn.isPaired &&
+        (conn.status == ServerStatus.offline || conn.forceOffline)) {
+      final profileId = _profileId;
+      final hasSnapshot = await _storage.getCredentialsFor(profileId) != null;
+      if (!hasSnapshot) {
+        state = state.copyWith(
+          isLoading: false,
+          error: 'Serveur injoignable. Vérifiez que le serveur desktop est '
+              'démarré, puis réessayez — la connexion sera rétablie '
+              'automatiquement.',
+        );
+        return false;
+      }
+    }
     state = state.copyWith(isLoading: true, clearError: true);
     try {
       final resp = await _dio.post(

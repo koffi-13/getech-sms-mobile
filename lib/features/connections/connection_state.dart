@@ -180,10 +180,17 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
     final prefs = await SharedPreferences.getInstance();
     final lastSync = prefs.getString(profileScopedKey('last_sync_at', pid));
     final lastCount = prefs.getInt(profileScopedKey('last_sync_count', pid));
-    if (lastSync != null || lastCount != null) {
+    // [Fix-RESILIENT-PAIRING-REVIVAL] La préférence « force_offline »
+    // (posée par l'appairage résilient ou le switch Réglages) était
+    // écrite mais JAMAIS relue : après un redémarrage de l'app, le mode
+    // repassait à false sans que la carte « Serveur injoignable » du
+    // dernier échec soit réellement re-vérifiée. On la restaure ici.
+    final forceOffline = prefs.getBool('force_offline') ?? false;
+    if (lastSync != null || lastCount != null || forceOffline) {
       state = state.copyWith(
         lastSyncAt: lastSync != null ? DateTime.tryParse(lastSync) : null,
         lastSyncCount: lastCount,
+        forceOffline: forceOffline,
       );
     }
   }
@@ -280,6 +287,61 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
     }
   }
 
+  /// cf. [ConnectionNotifier.checkStatus] : version « sonde de reprise ».
+  ///
+  /// [Fix-RESILIENT-PAIRING-REVIVAL] L'appairage résilient pose
+  /// `forceOffline = true` quand le serveur ne répond pas au moment de
+  /// l'appairage (mode hors-ligne provisoire). MAIS ce flag bloquait
+  /// ensuite TOUT re-ping : ni le heartbeat 30 s, ni le retour au
+  /// premier plan ne re-testaient le serveur — la carte « Serveur
+  /// injoignable » restait affichée pour toujours, même après retour du
+  /// réseau/desktop. Ce probe est exactement ce re-test manquant : il
+  /// ping SANS tenir compte de forceOffline et, si le serveur répond,
+  /// relâche le mode forcé pour repasser en ligne.
+  Future<void> probeAndRevive() async {
+    if (!state.isPaired) return;
+    final url = state.serverUrl;
+    if (url == null) return;
+
+    final stopwatch = Stopwatch()..start();
+    try {
+      final dio = Dio(
+        BaseOptions(
+          connectTimeout: const Duration(seconds: 8),
+          receiveTimeout: const Duration(seconds: 10),
+        ),
+      );
+      final fullUrl = buildUrl(url, ApiEndpoints.devicesServerInfo);
+      final response = await dio.get(fullUrl);
+      stopwatch.stop();
+
+      if (response.statusCode == 200) {
+        // Le serveur EST joignable : sortir du mode hors-ligne forcé
+        // (setForceOffline(false) relance checkStatus + le heartbeat
+        // fera le reste). C'est la « reprise de vie » du mode résilient.
+        if (state.forceOffline) {
+          await setForceOffline(false);
+        }
+        final prev = state;
+        final isTransition = prev.status != ServerStatus.online ||
+            prev.errorMessage != null ||
+            prev.latency == null;
+        if (isTransition) {
+          state = prev.copyWith(
+            status: ServerStatus.online,
+            latency: stopwatch.elapsed,
+            clearError: true,
+          );
+        }
+      }
+      // Si le serveur ne répond PAS : on ne change RIEN (le mode forcé
+      // d'origine, choisie par l'utilisateur ou l'appairage résilient,
+      // reste la vérité affichée).
+    } catch (_) {
+      // Serveur toujours injoignable : idem, on ne change rien.
+    }
+  }
+
   /// Message d'erreur humain et actionnable pour les erreurs réseau.
   /// Détecte les timeouts, les refus de connexion et les problèmes DNS.
   String _humanizeTimeoutError(Object e) {
@@ -345,7 +407,16 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (!state.forceOffline) checkStatus();
+      if (!state.forceOffline) {
+        checkStatus();
+      } else {
+        // [Fix-RESILIENT-PAIRING-REVIVAL] Même en mode hors-ligne forcé,
+        // le heartbeat sonde le serveur : si l'utilisateur a relancé le
+        // desktop ou rétabli le Wi-Fi pendant que l'app tournait, l'app
+        // repasse en ligne d'elle-même (au lieu de rester figée sur la
+        // carte « Serveur injoignable » jusqu'à un geste manuel).
+        probeAndRevive();
+      }
     });
   }
 
