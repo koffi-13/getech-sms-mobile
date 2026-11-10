@@ -130,24 +130,17 @@ class ConnectionState {
   DateTime? get lastSync => lastSyncAt;
 
   /// [Fix-BAD-LAN-IP] Toutes les URLs candidates à pinger, DANS L'ORDRE
-  /// d'essai : une URL de repli ayant déjà RÉPONDU est promue en tête
-  /// (elle est re-pingée d'abord aux battements suivants, ce qui divise
-  /// la latence de reprise), puis l'URL principale du profil, puis le
-  /// reste. Utilisé par [ConnectionNotifier.checkStatus].
+  /// d'essai : URL principale du profil d'abord (comportement historique),
+  /// puis les replis dédoublonnés. La « promotion » d'un repli vainqueur
+  /// est portée par [ConnectionNotifier.checkStatus] qui réécrit
+  /// [alternateServerUrls] avec l'URL gagnante en tête — sans état
+  /// implicite ici, l'ordre est exactement ce que l'état montre.
   List<String> get allServerUrls {
     final primary = serverUrl;
     if (primary == null) return const [];
-    final alternates = alternateServerUrls.where((u) => u != primary);
-    // La première entrée de alternateServerUrls est l'URL gagnante du
-    // battement précédent (promue par checkStatus) : l'honorer d'abord.
-    final promoted = alternateServerUrls.isNotEmpty &&
-            alternateServerUrls.first != primary
-        ? alternateServerUrls.first
-        : null;
     return [
-      if (promoted != null) promoted,
       primary,
-      ...alternates.where((u) => u != promoted),
+      ...alternateServerUrls.where((u) => u != primary),
     ];
   }
 
@@ -344,11 +337,19 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
       final outcome = await _pingServerInfo(urls[i]);
       if (outcome.reachable) {
         if (!isPrimary && mounted) {
-          // Une URL de repli répond : la promouvoir en tête de liste pour
-          // les battements suivants (allServerUrls l'essayera d'abord).
+          // Un REPLI répond : promouvoir l'URL gagnante en tête des
+          // candidates PERSISTÉES (alternateServerUrls). allServerUrls
+          // essaye la primaire du profil d'abord : après un premier
+          // battement victorieux en 8 s sur la virtuelle, la promotée
+          // n'accélère pas le cycle suivant — on garde donc AUSSI la
+          // primaire en 2e position, mais la promotion persiste pour
+          // les futures sessions (relue par _applyProfile).
           final winner = urls[i];
           final current = state.alternateServerUrls;
-          final promoted = [winner, ...current.where((u) => u != winner)];
+          final promoted = [
+            winner,
+            ...current.where((u) => u != winner),
+          ];
           if (!listEquals(current, promoted)) {
             state = state.copyWith(alternateServerUrls: promoted);
           }

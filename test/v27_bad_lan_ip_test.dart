@@ -124,23 +124,29 @@ void main() {
       ]);
     });
 
-    test('allServerUrls : repli promu (répond déjà) essayé EN PREMIER', () {
-      // Cas du battement suivant une victoire de repli : la première
-      // entrée de alternateServerUrls est l'URL gagnante promue.
+    test('allServerUrls : replis persistés dans l\'ordre de victoire', () {
+      // Cas du battement suivant une victoire de repli : la vainqueuse
+      // est en TÊTE de alternateServerUrls (promue par checkStatus).
+      // allServerUrls garde la primaire du profil en premier (comportement
+      // historique) suivie des replis dans leur ordre de victoire.
       const state = ConnectionState(
         status: ServerStatus.online,
         serverIp: '172.20.0.1',
         serverPort: 8001,
         pairingToken: 'token',
         alternateServerUrls: [
-          'http://192.168.1.10:8001/api/v1', // gagnante promue
+          'http://192.168.1.10:8001/api/v1', // gagnante promue en tête
           'http://10.0.0.5:8001/api/v1',
         ],
       );
-      expect(state.allServerUrls.first, 'http://192.168.1.10:8001/api/v1');
-      // …mais la principale du profil reste dans la liste.
-      expect(state.allServerUrls, contains('http://172.20.0.1:8001/api/v1'));
-      expect(state.allServerUrls.length, 3);
+      expect(state.allServerUrls.first, 'http://172.20.0.1:8001/api/v1');
+      // …puis les replis, vainqueuse d'abord (utile dès que la primaire
+      // du profil est elle-même réécrite un jour).
+      expect(state.allServerUrls, [
+        'http://172.20.0.1:8001/api/v1',
+        'http://192.168.1.10:8001/api/v1',
+        'http://10.0.0.5:8001/api/v1',
+      ]);
     });
 
     test('allServerUrls vide si non appairé', () {
