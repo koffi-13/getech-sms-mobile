@@ -614,9 +614,16 @@ class _SyncCardState extends ConsumerState<_SyncCard> {
             if (!canSync && !isSyncing) ...[
               const SizedBox(height: 8),
               Text(
+                // [Fix-PAIRING-STUCK-OFFLINE] V26 — en mode « appairage
+                // différé », dire QUE la synchro est désactivée masquerait
+                // le vrai état : l'app attend le serveur et reprendra toute
+                // seule — message distinct du mode hors-ligne forcé.
                 conn.forceOffline
                     ? 'Synchro désactivée en mode hors-ligne.'
-                    : 'Aucun serveur configuré.',
+                    : conn.pairingForcedOffline
+                        ? 'Appairage en attente du serveur — la connexion '
+                            'reprendra automatiquement dès qu\'il répondra.'
+                        : 'Aucun serveur configuré.',
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: cs.onSurfaceVariant,
                 ),
