@@ -137,7 +137,22 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                     // « appairage différé » : le serveur peut être revenu).
                     if (showOfflineHint) ...[
                       _UnreachableBanner(
-                        onManageConnections: () => context.push('/connections'),
+                        // [Fix-UNREACHABLE-BANNER-CAUSE] Un seul message
+                        // générique « Serveur injoignable » pour trois
+                        // situations très différentes : l'utilisateur
+                        // croyait le serveur en panne alors que c'était
+                        // un simple mode forcé activé aux Réglages.
+                        message: conn.status == ServerStatus.unpaired
+                            ? 'Aucun serveur appairé — appairez ce poste '
+                              'depuis le module Connexions du desktop.'
+                            : conn.forceOffline
+                                ? 'Mode hors-ligne forcé activé '
+                                  '(Réglages → Serveur local) — '
+                                  'désactivez-le pour vous reconnecter.'
+                                : 'Serveur injoignable — vérifiez le module '
+                                  'Connexions.',
+                        onManageConnections: () =>
+                            context.push('/connections'),
                       ),
                       const SizedBox(height: 16),
                     ],
@@ -256,8 +271,14 @@ class _LoginPageState extends ConsumerState<LoginPage> {
 }
 
 /// Bandeau "Serveur injoignable" affiché en haut du formulaire.
+/// [Fix-UNREACHABLE-BANNER-CAUSE] Le message précise la cause réelle
+/// (non appairé / mode forcé / injoignable) — cf. site d'appel.
 class _UnreachableBanner extends StatelessWidget {
-  const _UnreachableBanner({required this.onManageConnections});
+  const _UnreachableBanner({
+    required this.message,
+    required this.onManageConnections,
+  });
+  final String message;
   final VoidCallback onManageConnections;
 
   @override
@@ -276,7 +297,7 @@ class _UnreachableBanner extends StatelessWidget {
           const SizedBox(width: 10),
           Expanded(
             child: Text(
-              'Serveur injoignable — vérifiez le module Connexions.',
+              message,
               style: theme.textTheme.bodySmall?.copyWith(
                 color: Colors.orange.shade800,
                 fontWeight: FontWeight.w500,
