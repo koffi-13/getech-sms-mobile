@@ -99,7 +99,9 @@ class ConnectionsController {
       } on PairingException catch (e) {
         // Une erreur métier (token refusé, 404 module absent, 422…)
         // ne dépend PAS de l'adresse : inutile d'essayer les autres.
-        if (e.statusCode != null && e.statusCode! < 500) rethrow;
+        if (e.statusCode != null && e.statusCode! < 500) {
+          rethrow;
+        }
         lastError = e;
         _log.w('Appairage : candidate ${urls[i]} en échec ($e)'
             '${isLast ? '' : ' — essai suivant'}');
@@ -109,7 +111,9 @@ class ConnectionsController {
             '${isLast ? '' : ' — essai suivant'}');
       }
     }
-    if (lastError is PairingException) rethrow;
+    if (lastError is PairingException) {
+      throw lastError;
+    }
     throw PairingException('Échec de l\'appairage : $lastError');
   }
 

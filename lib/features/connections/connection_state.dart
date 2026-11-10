@@ -375,25 +375,6 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
     }
   }
 
-/// Résultat d'un ping `GET /devices/server-info` sur UNE URL candidate.
-class _PingOutcome {
-  const _PingOutcome({
-    required this.reachable,
-    required this.isNetworkFailure,
-    this.error,
-  });
-
-  /// True si le serveur a répondu (2xx ou statut HTTP d'erreur — le
-  /// processus écoute et répond dans les deux cas).
-  final bool reachable;
-
-  /// True quand l'échec est réseau pur (timeout/refus/DNS) : une AUTRE
-  /// candidate peut alors encore fonctionner.
-  final bool isNetworkFailure;
-
-  final Object? error;
-}
-
   /// Ping une URL : 2xx → en ligne ; réponse HTTP d'erreur → serveur
   /// vivant (panne applicative) ; exception réseau → candidate suivante.
   Future<_PingOutcome> _pingServerInfo(String url) async {
@@ -585,6 +566,27 @@ class _PingOutcome {
     super.dispose();
   }
 }
+
+/// Résultat d'un ping `GET /devices/server-info` sur UNE URL candidate.
+class _PingOutcome {
+  const _PingOutcome({
+    required this.reachable,
+    required this.isNetworkFailure,
+    this.error,
+  });
+
+  /// True si le serveur a répondu (2xx ou statut HTTP d'erreur — le
+  /// processus écoute et répond dans les deux cas).
+  final bool reachable;
+
+  /// True quand l'échec est réseau pur (timeout/refus/DNS) : une AUTRE
+  /// candidate peut alors encore fonctionner.
+  final bool isNetworkFailure;
+
+  final Object? error;
+}
+
+
 
 /// Provider de découverte mDNS.
 final mdnsDiscoveryProvider =
