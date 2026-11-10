@@ -80,6 +80,11 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     final serverUnreachable = conn.status == ServerStatus.offline ||
         conn.status == ServerStatus.unpaired ||
         conn.forceOffline;
+    // [Fix-PAIRING-STUCK-OFFLINE] V26 — en mode « appairage différé » le
+    // serveur peut très bien être revenu en ligne (le heartbeat relâche le
+    // mode dès qu'il répond) : ne pas verrouiller le login « hors ligne »
+    // sur ce mode transitoire — la vraie tentative réseau tranche.
+    final showOfflineHint = serverUnreachable && !conn.pairingForcedOffline;
 
     return Scaffold(
       body: SafeArea(
@@ -128,8 +133,9 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                     ),
                     const SizedBox(height: 24),
 
-                    // Bandeau serveur injoignable.
-                    if (serverUnreachable) ...[
+                    // Bandeau serveur injoignable (masqué en mode
+                    // « appairage différé » : le serveur peut être revenu).
+                    if (showOfflineHint) ...[
                       _UnreachableBanner(
                         onManageConnections: () => context.push('/connections'),
                       ),

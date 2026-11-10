@@ -91,6 +91,16 @@ class DashboardPage extends ConsumerWidget {
               ? _TeacherDashboard(isOffline: isOffline)
               : RefreshIndicator(
                   onRefresh: () async {
+                    // [Fix-HOME-STALE] V24 — le pull-to-refresh relance
+                    // D'ABORD la détection d'état du serveur : hors ligne
+                    // (ou heartbeat ayant mal tranché — cf. Fix-ONLINE-
+                    // DETECT), l'ancien code invalidait le provider qui se
+                    // rebuildeait sur le MÊME cache sans aucune requête ni
+                    // message — le spinner clignotait et rien ne changeait.
+                    // On redemande un heartbeat (rapide) avant d'invalider.
+                    await ref
+                        .read(connectionProvider.notifier)
+                        .checkStatus();
                     ref.invalidate(dashboardStatsProvider);
                     // Attendre la prochaine valeur pour garder le spinner affiché.
                     await ref.read(dashboardStatsProvider.future);

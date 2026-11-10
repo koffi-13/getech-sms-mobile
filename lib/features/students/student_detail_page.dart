@@ -3,6 +3,9 @@
 /// + édition de la photo (galerie/caméra → upload multipart).
 library;
 
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -13,6 +16,7 @@ import '../../core/auth/auth_state.dart';
 import '../../core/config/constants.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/dio_client.dart';
+import '../../core/sync/outbox.dart';
 import '../../core/utils/formatters.dart';
 import '../../core/utils/permissions.dart';
 import '../../shared/models/student_dto.dart';
@@ -126,9 +130,18 @@ class _DetailBody extends ConsumerStatefulWidget {
 class _DetailBodyState extends ConsumerState<_DetailBody> {
   StudentDto get student => widget.student;
 
-  /// Modifier la photo de l'élève : galerie ou caméra (image_picker) puis
-  /// upload multipart vers POST /students/{id}/photo (endpoint serveur
-  /// existant, 5 Mo max). Invalide le cache local et rafraîchit l'avatar.
+  /// Modifier la photo de l'élève : galerie ou caméra (image_picker).
+  ///
+  /// [Fix-PHOTO-OFFLINE] La capture fonctionne désormais HORS LIGNE :
+  /// 1. les octets sont lus et écrits dans le cache disque local
+  ///    (affichage immédiat via StudentPhotoCache.saveLocal) ;
+  /// 2. si le serveur est joignable : upload multipart immédiat vers
+  ///    POST /students/{id}/photo (5 Mo max) ;
+  /// 3. sinon : mise en file outbox (table `student_photo`, octets en
+  ///    base64 dans le payload) — le sync engine la rejouera à la
+  ///    reconnexion (cf. _pushStudentPhoto).
+  /// Avant : hors connexion la prise de photo était REFUSÉE (« impossible
+  /// hors connexion ») et rien n'était conservé.
   Future<void> _changePhoto() async {
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
@@ -157,44 +170,91 @@ class _DetailBodyState extends ConsumerState<_DetailBody> {
     );
     if (xfile == null || !mounted) return;
 
-    final conn = ref.read(connectionProvider);
-    if (conn.serverUrl == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text(
-          'Modification de photo impossible hors connexion au serveur.',
-        ),
-      ));
-      return;
-    }
+    final bytes = await File(xfile.path).readAsBytes();
+    if (bytes.isEmpty) return;
+    final nameParts = xfile.name.split('.');
+    final ext = nameParts.length > 1
+        ? nameParts.last.toLowerCase()
+        : 'jpg';
 
-    final dio = ref.read(dioProvider);
-    try {
-      final form = FormData.fromMap({
-        'file': await MultipartFile.fromFile(
-          xfile.path,
-          filename: xfile.name,
+    // 1. Affichage local immédiat — y compris hors ligne.
+    final cache = ref.read(studentPhotoCacheProvider);
+    await cache.saveLocal(student.id, bytes);
+    resetStudentPhotoCache(ref);
+
+    final conn = ref.read(connectionProvider);
+    if (conn.canReachServer && conn.serverUrl != null) {
+      // 2. Upload immédiat.
+      final dio = ref.read(dioProvider);
+      try {
+        final form = FormData.fromMap({
+          'file': MultipartFile.fromBytes(
+            bytes,
+            filename: xfile.name,
+          ),
+        });
+        await dio.post(
+          buildUrl(conn.serverUrl!, '/students/${student.id}/photo'),
+          data: form,
+        );
+        // Succès : purge le cache disque + les mémos négatifs (nouvelle
+        // instance de cache → l'avatar se re-télécharge immédiatement).
+        await cache.deleteCached(student.id);
+        resetStudentPhotoCache(ref);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Photo mise à jour.')),
+        );
+      } catch (e) {
+        // Échec en ligne → file d'attente (réessai auto à la synchro).
+        await _queuePhotoUpload(bytes, ext);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Photo enregistrée — envoi au serveur en attente '
+              '(${e.toString()}).',
+            ),
+          ),
+        );
+      }
+    } else {
+      // 3. Hors ligne → file d'attente outbox.
+      await _queuePhotoUpload(bytes, ext);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Photo enregistrée hors ligne — elle sera envoyée au serveur '
+            'à la reconnexion.',
+          ),
         ),
-      });
-      await dio.post(
-        buildUrl(conn.serverUrl!, '/students/${student.id}/photo'),
-        data: form,
-      );
-      // Succès : purge le cache disque + les mémos négatifs (nouvelle
-      // instance de cache → l'avatar se re-télécharge immédiatement).
-      final cache = ref.read(studentPhotoCacheProvider);
-      await cache.deleteCached(student.id);
-      resetStudentPhotoCache(ref);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Photo mise à jour.')),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Échec de l\'upload : ${e.toString()}')),
       );
     }
   }
+
+  /// [Fix-PHOTO-OFFLINE] Met la photo en file d'attente (outbox, table
+  /// `student_photo`) pour rejeu à la prochaine synchro.
+  Future<void> _queuePhotoUpload(List<int> bytes, String ext) async {
+    try {
+      await ref.read(outboxProvider).enqueue(
+            table: 'student_photo',
+            operation: 'POST',
+            recordId: student.id,
+            payload: {
+              'student_id': student.id,
+              'photo_base64': base64Encode(bytes),
+              'extension': ext,
+            },
+          );
+    } catch (e) {
+      // Échec de la mise en file : la photo reste affichée localement
+      // (cache disque déjà écrit) ; elle sera re-poussée si l'utilisateur
+      // relance la modification.
+      debugPrint('Photo hors-ligne non mise en file : $e');
+    }
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -254,14 +314,26 @@ class _HeaderCard extends StatelessWidget {
                   initials: student.displayInitials,
                   radius: 44,
                 ),
+                // [Fix-PHOTO-BUTTON] Avant : FloatingActionButton.small (40px)
+                // posé à cheval sur un avatar de 88px — il couvrait une
+                // grande partie de la photo. Petit bouton compact (28px)
+                // en bas-droite, lisible et discret.
                 Positioned(
                   right: 0,
                   bottom: 0,
-                  child: FloatingActionButton.small(
-                    heroTag: 'photo_edit_${student.id}',
-                    onPressed: onEditPhoto,
-                    tooltip: 'Modifier la photo',
-                    child: const Icon(Icons.photo_camera),
+                  child: SizedBox(
+                    width: 28,
+                    height: 28,
+                    child: IconButton.filledTonal(
+                      padding: EdgeInsets.zero,
+                      iconSize: 16,
+                      onPressed: onEditPhoto,
+                      tooltip: 'Modifier la photo',
+                      style: IconButton.styleFrom(
+                        shape: const CircleBorder(),
+                      ),
+                      icon: const Icon(Icons.photo_camera),
+                    ),
                   ),
                 ),
               ],

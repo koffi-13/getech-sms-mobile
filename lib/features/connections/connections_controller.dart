@@ -147,7 +147,13 @@ class ConnectionsController {
               establishmentCode: establishmentCode,
               deviceToken: pairingToken.trim(),
             );
-        await _ref.read(connectionProvider.notifier).setForceOffline(true);
+        // [Fix-PAIRING-STUCK-OFFLINE] V26 — mode « appairage différé » :
+        // transitoire et non persisté (l'ancien setForceOffline(true)
+        // verrouillait l'app « hors ligne » sans qu'aucun mécanisme ne le
+        // relâche — heartbeat, retour réseau et checkStatus sont tous
+        // conditionnés à !forceOffline). Ici le heartbeat continue de
+        // pinger et le mode est relâché dès que le serveur répond.
+        _ref.read(connectionProvider.notifier).setPairingForcedOffline();
 
         return PairDeviceResponse(
           deviceToken: pairingToken.trim(),

@@ -75,17 +75,8 @@ class AutoSyncController {
   /// [handleConnectionChange] → synchro automatique.
   void onAppResumed() {
     final conn = _ref.read(connectionProvider);
-    if (!conn.isPaired) return;
-    if (!conn.forceOffline) {
+    if (conn.isPaired && !conn.forceOffline) {
       unawaited(_ref.read(connectionProvider.notifier).checkStatus());
-    } else {
-      // [Fix-RESILIENT-PAIRING-REVIVAL] Retour au premier plan alors que
-      // le mode hors-ligne forcé est actif (posé par l'appairage
-      // résilient ou manuellement) : sonder quand même le serveur. S'il
-      // répond enfin, l'app repasse en ligne et re-sync — sinon la carte
-      // « Serveur injoignable » restait affichée pour toujours, même
-      // desktop relancé et Wi-Fi rétablis.
-      unawaited(_ref.read(connectionProvider.notifier).probeAndRevive());
     }
   }
 
@@ -111,15 +102,9 @@ class AutoSyncController {
   /// déclencher pour lui.
   void onNetworkRestored() {
     final conn = _ref.read(connectionProvider);
-    if (!conn.isPaired) return;
-    if (!conn.forceOffline) {
+    if (conn.isPaired && !conn.forceOffline) {
       unawaited(_ref.read(connectionProvider.notifier).checkStatus());
       _schedule();
-    } else {
-      // [Fix-RESILIENT-PAIRING-REVIVAL] Réseau rétabli en mode forcé :
-      // sonder le serveur (cf. onAppResumed) — Wi-Fi de retour est le
-      // moment le plus probable où le serveur redevient joignable.
-      unawaited(_ref.read(connectionProvider.notifier).probeAndRevive());
     }
   }
 

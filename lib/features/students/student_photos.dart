@@ -214,6 +214,23 @@ class StudentPhotoCache {
     _transientFailures[studentId] = DateTime.now();
   }
 
+  /// [Fix-PHOTO-OFFLINE] Écrit des octets dans le cache disque local (photo
+  /// prise hors-ligne) : l'avatar affiche immédiatement la nouvelle photo,
+  /// sans serveur. Purge aussi les mémos négatifs (« sans photo ») pour ce
+  /// élève — sinon le future déjà résolu continuait de cacher l'image.
+  Future<void> saveLocal(int studentId, List<int> bytes) async {
+    try {
+      final file = await _targetFile(studentId);
+      await file.writeAsBytes(bytes, flush: true);
+    } catch (_) {
+      // Disque indisponible : l'upload reprendra à la reconnexion ; la
+      // photo ne s'affichera qu'après le re-téléchargement.
+    }
+    _knownMissing.remove(studentId);
+    _transientFailures.remove(studentId);
+    _inFlight.remove(studentId);
+  }
+
   /// [Fix-PHOTO-RETRY] Purge les mémos négatifs (« sans photo » et échecs
   /// transitoires) ainsi que les futures résolus : le prochain accès
   /// relance le téléchargement. Appelé par le pull-to-refresh des listes

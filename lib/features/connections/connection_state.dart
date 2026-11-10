@@ -56,6 +56,14 @@ class ConnectionState {
   final int? lastSyncCount;
   final String? errorMessage;
   final bool forceOffline;
+
+  /// [Fix-PAIRING-STUCK-OFFLINE] V26 — Mode « appairage différé » (appairage
+  /// résilient) : le serveur était injoignable (ou a rejeté le token sur un
+  /// décalage d'horloge) au moment de l'appairage. Contrairement à
+  /// [forceOffline] (choix EXPLICITE de l'utilisateur, persisté), ce drapeau
+  /// transitoire n'empêche PAS le heartbeat de re-pinger le serveur — dès que
+  /// le serveur répond, il est relâché et l'état bascule « en ligne ».
+  final bool pairingForcedOffline;
   final bool tolerateClockSkew;
   final String? discoveredServerName;
 
@@ -73,6 +81,7 @@ class ConnectionState {
     this.lastSyncCount,
     this.errorMessage,
     this.forceOffline = false,
+    this.pairingForcedOffline = false,
     this.tolerateClockSkew = true,
     this.discoveredServerName,
   });
@@ -80,7 +89,12 @@ class ConnectionState {
   bool get isPaired =>
       pairingToken != null && (serverIp != null || serverUrlOverride != null);
   bool get isOnline => status == ServerStatus.online && !forceOffline;
-  bool get canReachServer => isOnline && status != ServerStatus.offline;
+  // [Fix-ONLINE-DETECT] V24 — était `isOnline && status != offline` :
+  // redondant (isOnline implique déjà online) mais surtout FRAGILE — tout
+  // statut intermédiaire (checking après bascule multi-serveurs) coupait
+  // l'accès aux données en ligne alors que le serveur répondait. Un appel
+  // réseau réel reste l'arbitre final (timeout → ApiException).
+  bool get canReachServer => isOnline;
 
   /// Vrai tant que le premier heartbeat n'a pas tranché (au démarrage à
   /// froid) : les pages ne doivent PAS bloquer sur cet état — les requêtes
@@ -120,6 +134,8 @@ class ConnectionState {
     String? errorMessage,
     bool? forceOffline,
     bool? tolerateClockSkew,
+    bool? pairingForcedOffline,
+    bool clearPairingForced = false,
     String? discoveredServerName,
     bool clearError = false,
   }) {
@@ -138,6 +154,8 @@ class ConnectionState {
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
       forceOffline: forceOffline ?? this.forceOffline,
       tolerateClockSkew: tolerateClockSkew ?? this.tolerateClockSkew,
+      pairingForcedOffline:
+          clearPairingForced ? false : (pairingForcedOffline ?? this.pairingForcedOffline),
       discoveredServerName: discoveredServerName ?? this.discoveredServerName,
     );
   }
@@ -178,6 +196,20 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
     final conn = state;
     final pid = conn.profileId;
     final prefs = await SharedPreferences.getInstance();
+    // [Fix-FORCE-OFFLINE-PERSIST] V26 — restaure le mode hors-ligne EXPLICITE
+    // de l'utilisateur (clé canonique). L'ancienne clé 'force_offline' (sans
+    // préfixe) n'était jamais relue au démarrage : le choix utilisateur se
+    // perdait à chaque redémarrage. On la purge aussi — elle était écrite
+    // autant par l'appairage résilient que par le commutateur, et ressusciter
+    // un « true » obsolète réintroduirait le verrou « bloquée hors-ligne »
+    // corrigé par [Fix-PAIRING-STUCK-OFFLINE].
+    final userForcedOffline = prefs.getBool(AppConfig.prefForceOffline) ?? false;
+    if (prefs.containsKey('force_offline')) {
+      await prefs.remove('force_offline');
+    }
+    if (userForcedOffline) {
+      state = state.copyWith(forceOffline: true);
+    }
     final lastSync = prefs.getString(profileScopedKey('last_sync_at', pid));
     final lastCount = prefs.getInt(profileScopedKey('last_sync_count', pid));
     // [Fix-RESILIENT-PAIRING-REVIVAL] La préférence « force_offline »
@@ -253,31 +285,23 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
 
       final response = await dio.get(fullUrl);
       stopwatch.stop();
-
-      if (response.statusCode == 200) {
-        final prev = state;
-        // [Fix-HEARTBEAT-REBUILD] Le heartbeat tourne toutes les 30 s : ne
-        // ré-émettre QUE si l'état significatif change (transition de statut
-        // ou disparition d'une erreur). Avant, chaque battement produisait un
-        // nouvel objet (latence différente) → invalidation de TOUS les
-        // providers qui watchent la connexion → chargements brusques qui
-        // réinitialisaient les saisies en cours (notes notamment).
-        final isTransition = prev.status != ServerStatus.online ||
-            prev.errorMessage != null ||
-            prev.latency == null;
-        if (isTransition) {
-          state = prev.copyWith(
-            status: ServerStatus.online,
-            latency: stopwatch.elapsed,
-            clearError: true,
-          );
-        }
-      } else {
-        if (state.status != ServerStatus.offline) {
-          state = state.copyWith(status: ServerStatus.offline);
-        }
-      }
+      _markServerReachable(stopwatch.elapsed);
     } catch (e) {
+      // [Fix-ONLINE-DETECT] V24 (réellement effectif) — une réponse HTTP
+      // avec un statut d'erreur (401/403/404/5xx…) lève une DioException
+      // badResponse AVANT d'atteindre le code ci-dessus : le correctif
+      // historique « toute réponse HTTP = en ligne » (`statusCode != null`)
+      // était donc INOPÉRANT et tout statut non-2xx continuait de marquer
+      // le serveur « hors ligne » alors qu'il répondait. On rattrape ici :
+      // dès que le serveur a RÉPONDU (quel que soit le code), le processus
+      // écoute et répond → en ligne. Seules les vraies pannes réseau
+      // (timeout, connexion refusée, DNS…) maintiennent « hors ligne ».
+      final serverResponded = e is DioException && e.response != null;
+      if (serverResponded) {
+        stopwatch.stop();
+        _markServerReachable(stopwatch.elapsed);
+        return;
+      }
       if (state.status != ServerStatus.offline) {
         state = state.copyWith(
           status: ServerStatus.offline,
@@ -287,59 +311,50 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
     }
   }
 
-  /// cf. [ConnectionNotifier.checkStatus] : version « sonde de reprise ».
+  /// Consigne « serveur en ligne ». Ne ré-émet l'état que sur transition
+  /// significative — [Fix-HEARTBEAT-REBUILD] : le heartbeat tourne toutes
+  /// les 30 s ; ré-émètre un nouvel objet à chaque battement (latence
+  /// différente) invalidait TOUS les providers qui watchent la connexion
+  /// et réinitialisait les saisies en cours (notes notamment).
+  void _markServerReachable(Duration latency) {
+    final prev = state;
+    final isTransition = prev.status != ServerStatus.online ||
+        prev.errorMessage != null ||
+        prev.latency == null ||
+        prev.pairingForcedOffline;
+    if (!isTransition) return;
+    state = prev.copyWith(
+      status: ServerStatus.online,
+      latency: latency,
+      clearPairingForced: true,
+      clearError: true,
+    );
+  }
+
+  /// [Fix-PAIRING-STUCK-OFFLINE] V26 — Active le mode « appairage différé »
+  /// après un appairage résilient (serveur injoignable, ou token rejeté sur
+  /// un décalage d'horloge) : l'app reste utilisable hors ligne, mais SANS
+  /// verrouiller l'état. Transitoire et non persisté : le heartbeat continue
+  /// de pinger, et dès que le serveur répond, ce mode est relâché
+  /// automatiquement et l'état bascule « en ligne » (l'utilisateur devra
+  /// alors re-appairer pour obtenir un vrai jeton d'appareil).
   ///
-  /// [Fix-RESILIENT-PAIRING-REVIVAL] L'appairage résilient pose
-  /// `forceOffline = true` quand le serveur ne répond pas au moment de
-  /// l'appairage (mode hors-ligne provisoire). MAIS ce flag bloquait
-  /// ensuite TOUT re-ping : ni le heartbeat 30 s, ni le retour au
-  /// premier plan ne re-testaient le serveur — la carte « Serveur
-  /// injoignable » restait affichée pour toujours, même après retour du
-  /// réseau/desktop. Ce probe est exactement ce re-test manquant : il
-  /// ping SANS tenir compte de forceOffline et, si le serveur répond,
-  /// relâche le mode forcé pour repasser en ligne.
-  Future<void> probeAndRevive() async {
-    if (!state.isPaired) return;
-    final url = state.serverUrl;
-    if (url == null) return;
-
-    final stopwatch = Stopwatch()..start();
-    try {
-      final dio = Dio(
-        BaseOptions(
-          connectTimeout: const Duration(seconds: 8),
-          receiveTimeout: const Duration(seconds: 10),
-        ),
-      );
-      final fullUrl = buildUrl(url, ApiEndpoints.devicesServerInfo);
-      final response = await dio.get(fullUrl);
-      stopwatch.stop();
-
-      if (response.statusCode == 200) {
-        // Le serveur EST joignable : sortir du mode hors-ligne forcé
-        // (setForceOffline(false) relance checkStatus + le heartbeat
-        // fera le reste). C'est la « reprise de vie » du mode résilient.
-        if (state.forceOffline) {
-          await setForceOffline(false);
-        }
-        final prev = state;
-        final isTransition = prev.status != ServerStatus.online ||
-            prev.errorMessage != null ||
-            prev.latency == null;
-        if (isTransition) {
-          state = prev.copyWith(
-            status: ServerStatus.online,
-            latency: stopwatch.elapsed,
-            clearError: true,
+  /// Avant : l'appairage résilient appelait `setForceOffline(true)` —
+  /// drapeau persisté qu'aucun mécanisme ne relâchait (heartbeat, retour au
+  /// premier plan, retour réseau et checkStatus sont tous conditionnés à
+  /// `!forceOffline`) → « l'application restait bloquée hors ligne en étant
+  /// en ligne », jusqu'à ce que l'utilisateur trouve le commutateur caché.
+  void setPairingForcedOffline() {
+    final online = state.status == ServerStatus.online;
+    state = online
+        ? state.copyWith(pairingForcedOffline: true)
+        : state.copyWith(
+            status: ServerStatus.offline,
+            pairingForcedOffline: true,
+            errorMessage: 'Serveur injoignable lors de l\'appairage — '
+                'l\'application reste utilisable hors ligne et réessaie '
+                'automatiquement.',
           );
-        }
-      }
-      // Si le serveur ne répond PAS : on ne change RIEN (le mode forcé
-      // d'origine, choisie par l'utilisateur ou l'appairage résilient,
-      // reste la vérité affichée).
-    } catch (_) {
-      // Serveur toujours injoignable : idem, on ne change rien.
-    }
   }
 
   /// Message d'erreur humain et actionnable pour les erreurs réseau.
@@ -373,12 +388,20 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
     await setForceOffline(next);
   }
 
-  /// Force ou relâche le mode hors-ligne (utilisé par l'appairage résilient
-  /// et la page Connexions).
+  /// Force ou relâche le mode hors-ligne EXPLICITE de l'utilisateur (page
+  /// Connexions / Réglages). Persisté sous la clé canonique — et relâche
+  /// toujours l'éventuel mode « appairage différé ».
   Future<void> setForceOffline(bool value) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('force_offline', value);
-    state = state.copyWith(forceOffline: value);
+    // [Fix-FORCE-OFFLINE-PERSIST] V26 — clé canonique : l'ancienne clé
+    // 'force_offline' n'était jamais relue au démarrage (choix perdu) et
+    // polluait aussi la persistance de l'appairage résilient.
+    await prefs.setBool(AppConfig.prefForceOffline, value);
+    state = state.copyWith(
+      forceOffline: value,
+      clearPairingForced: true,
+      clearError: true,
+    );
     if (!value) checkStatus();
   }
 
@@ -407,16 +430,11 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (!state.forceOffline) {
-        checkStatus();
-      } else {
-        // [Fix-RESILIENT-PAIRING-REVIVAL] Même en mode hors-ligne forcé,
-        // le heartbeat sonde le serveur : si l'utilisateur a relancé le
-        // desktop ou rétabli le Wi-Fi pendant que l'app tournait, l'app
-        // repasse en ligne d'elle-même (au lieu de rester figée sur la
-        // carte « Serveur injoignable » jusqu'à un geste manuel).
-        probeAndRevive();
-      }
+      // [Fix-PAIRING-STUCK-OFFLINE] V26 — seul le choix EXPLICITE de
+      // l'utilisateur (forceOffline) suspend le ping : en mode
+      // « appairage différé », le heartbeat continue — dès que le
+      // serveur répond, l'état bascule « en ligne » (checkStatus).
+      if (!state.forceOffline) checkStatus();
     });
   }
 

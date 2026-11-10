@@ -1209,11 +1209,12 @@ Future<int> _classroomRosterCount(
   final countExpr = db.students.id.count();
   final q = db.selectOnly(db.students)
     ..addColumns([countExpr])
-    ..join(
-      db.studentClassAssignments,
-      d.JoinType.inner,
-      on: db.studentClassAssignments.studentId.equalsExp(db.students.id),
-    )
+    ..join([
+      d.innerJoin(
+        db.studentClassAssignments,
+        db.studentClassAssignments.studentId.equalsExp(db.students.id),
+      )
+    ])
     ..where(db.studentClassAssignments.classroomId.equals(classroomId))
     ..where(db.studentClassAssignments.isDeleted.equals(false))
     ..where(db.students.isDeleted.equals(false));
