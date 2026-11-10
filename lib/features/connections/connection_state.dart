@@ -5,6 +5,7 @@ import 'dart:async';
 
 import 'package:bonsoir/bonsoir.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -67,6 +68,14 @@ class ConnectionState {
   final bool tolerateClockSkew;
   final String? discoveredServerName;
 
+  /// [Fix-BAD-LAN-IP] URLs de REPLI du serveur (les autres IPs LAN du poste,
+  /// reçues du QR d'appairage `ips[]` ou du server-info `api_urls`). La
+  /// principale (serverUrl) peut désigner un adaptateur virtuel du desktop
+  /// (vEthernet Hyper-V/WSL, VPN, pont Docker) : le heartbeat la ping en
+  /// timeout à chaque battement et la carte resterait « hors ligne » à vie
+  /// — les candidates sont essayées à chaque cycle.
+  final List<String> alternateServerUrls;
+
   const ConnectionState({
     this.status = ServerStatus.unpaired,
     this.profileId,
@@ -84,6 +93,7 @@ class ConnectionState {
     this.pairingForcedOffline = false,
     this.tolerateClockSkew = true,
     this.discoveredServerName,
+    this.alternateServerUrls = const [],
   });
 
   bool get isPaired =>
@@ -119,6 +129,28 @@ class ConnectionState {
   String get baseUrl => serverUrl ?? '';
   DateTime? get lastSync => lastSyncAt;
 
+  /// [Fix-BAD-LAN-IP] Toutes les URLs candidates à pinger, DANS L'ORDRE
+  /// d'essai : une URL de repli ayant déjà RÉPONDU est promue en tête
+  /// (elle est re-pingée d'abord aux battements suivants, ce qui divise
+  /// la latence de reprise), puis l'URL principale du profil, puis le
+  /// reste. Utilisé par [ConnectionNotifier.checkStatus].
+  List<String> get allServerUrls {
+    final primary = serverUrl;
+    if (primary == null) return const [];
+    final alternates = alternateServerUrls.where((u) => u != primary);
+    // La première entrée de alternateServerUrls est l'URL gagnante du
+    // battement précédent (promue par checkStatus) : l'honorer d'abord.
+    final promoted = alternateServerUrls.isNotEmpty &&
+            alternateServerUrls.first != primary
+        ? alternateServerUrls.first
+        : null;
+    return [
+      if (promoted != null) promoted,
+      primary,
+      ...alternates.where((u) => u != promoted),
+    ];
+  }
+
   ConnectionState copyWith({
     ServerStatus? status,
     String? profileId,
@@ -137,6 +169,8 @@ class ConnectionState {
     bool? pairingForcedOffline,
     bool clearPairingForced = false,
     String? discoveredServerName,
+    List<String>? alternateServerUrls,
+    bool clearAlternates = false,
     bool clearError = false,
   }) {
     return ConnectionState(
@@ -157,6 +191,9 @@ class ConnectionState {
       pairingForcedOffline:
           clearPairingForced ? false : (pairingForcedOffline ?? this.pairingForcedOffline),
       discoveredServerName: discoveredServerName ?? this.discoveredServerName,
+      alternateServerUrls: clearAlternates
+          ? const []
+          : (alternateServerUrls ?? this.alternateServerUrls),
     );
   }
 
@@ -265,11 +302,101 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
     state = ConnectionState.initial;
   }
 
+  /// [Fix-BAD-LAN-IP] Définit les URLs de repli du serveur actif (autres
+  /// IPs LAN du poste desktop, reçues du QR `ips[]` ou du server-info
+  /// `api_urls`). Le heartbeat les essaie quand l'URL principale timeout :
+  /// sans elles, un desktop dont la route par défaut passe par un
+  /// adaptateur virtuel (vEthernet Hyper-V/WSL, VPN) laisse la carte
+  /// « hors ligne » à vie alors que l'API répond sur une autre IP.
+  void setAlternateServerUrls(List<String> urls) {
+    final primary = state.serverUrl;
+    final cleaned = urls
+        .map((u) => u.contains('/api/v1') ? u : '$u/api/v1')
+        .where((u) => u != primary)
+        .toSet()
+        .toList();
+    if (listEquals(_lastAlternateUrls, cleaned) && 
+        listEquals(state.alternateServerUrls, cleaned)) {
+      return;
+    }
+    _lastAlternateUrls = cleaned;
+    state = state.copyWith(alternateServerUrls: cleaned);
+  }
+
+  List<String> _lastAlternateUrls = const [];
+
   Future<void> checkStatus() async {
     if (!state.isPaired || state.forceOffline) return;
-    final url = state.serverUrl;
-    if (url == null) return;
+    final urls = state.allServerUrls;
+    if (urls.isEmpty) return;
 
+    // [Fix-BAD-LAN-IP] Ping la principale, puis les URLs de repli (autres
+    // IPs LAN du poste, reçues du QR `ips[]` / server-info `api_urls`)
+    // UNIQUEMENT si elle échoue en réseau pur : si la principale désigne
+    // un adaptateur virtuel du desktop (vEthernet Hyper-V/WSL, VPN), elle
+    // timeout à chaque battement — sans repli, la carte resterait
+    // « hors ligne » à vie alors que le serveur répond sur une autre IP.
+    // Une candidate qui RÉPOND fait basculer l'état en ligne ; de plus
+    // l'URL gagnante est mémorisée pour les cycles suivants (prioritaire).
+    Object? lastNetworkError;
+    for (var i = 0; i < urls.length; i++) {
+      final isPrimary = i == 0;
+      final outcome = await _pingServerInfo(urls[i]);
+      if (outcome.reachable) {
+        if (!isPrimary && mounted) {
+          // Une URL de repli répond : la promouvoir en tête de liste pour
+          // les battements suivants (allServerUrls l'essayera d'abord).
+          final winner = urls[i];
+          final current = state.alternateServerUrls;
+          final promoted = [winner, ...current.where((u) => u != winner)];
+          if (!listEquals(current, promoted)) {
+            state = state.copyWith(alternateServerUrls: promoted);
+          }
+        }
+        return;
+      }
+      if (!outcome.isNetworkFailure) {
+        // Le serveur a répondu avec un statut d'erreur HTTP (ex. 5xx) :
+        // panne côté serveur, pas d'adresse — inutile d'essayer les autres.
+        if (mounted && state.status != ServerStatus.offline) {
+          state = state.copyWith(status: ServerStatus.offline);
+        }
+        return;
+      }
+      lastNetworkError = outcome.error;
+    }
+    if (!mounted) return;
+    if (state.status != ServerStatus.offline) {
+      state = state.copyWith(
+        status: ServerStatus.offline,
+        errorMessage: _humanizeTimeoutError(lastNetworkError ??
+            StateError('toutes les URLs candidates ont échoué')),
+      );
+    }
+  }
+
+/// Résultat d'un ping `GET /devices/server-info` sur UNE URL candidate.
+class _PingOutcome {
+  const _PingOutcome({
+    required this.reachable,
+    required this.isNetworkFailure,
+    this.error,
+  });
+
+  /// True si le serveur a répondu (2xx ou statut HTTP d'erreur — le
+  /// processus écoute et répond dans les deux cas).
+  final bool reachable;
+
+  /// True quand l'échec est réseau pur (timeout/refus/DNS) : une AUTRE
+  /// candidate peut alors encore fonctionner.
+  final bool isNetworkFailure;
+
+  final Object? error;
+}
+
+  /// Ping une URL : 2xx → en ligne ; réponse HTTP d'erreur → serveur
+  /// vivant (panne applicative) ; exception réseau → candidate suivante.
+  Future<_PingOutcome> _pingServerInfo(String url) async {
     final stopwatch = Stopwatch()..start();
     try {
       // Dio "nu" sans interceptor d'auth, pour le ping /devices/server-info.
@@ -282,7 +409,6 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
         ),
       );
       final fullUrl = buildUrl(url, ApiEndpoints.devicesServerInfo);
-
       final response = await dio.get(fullUrl);
       stopwatch.stop();
       // [Fix-LATE-STATE-WRITE] Le ping est async et peut être lancé en
@@ -290,9 +416,12 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
       // si le notifier a été libéré pendant l'attente, écrire `state` après
       // `dispose` lève « Bad state: used after dispose » — en test cela
       // fait échouer la suite APRES son terme ; en production cela
-      // remonterait une exception dans la zone racine. Garde `mounted`.
-      if (!mounted) return;
+      // remonterait la même exception dans la zone racine. Garde `mounted`.
+      if (!mounted) {
+        return const _PingOutcome(reachable: true, isNetworkFailure: false);
+      }
       _markServerReachable(stopwatch.elapsed);
+      return const _PingOutcome(reachable: true, isNetworkFailure: false);
     } catch (e) {
       // [Fix-ONLINE-DETECT] V24 (réellement effectif) — une réponse HTTP
       // avec un statut d'erreur (401/403/404/5xx…) lève une DioException
@@ -307,15 +436,19 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
       if (serverResponded) {
         stopwatch.stop();
         if (mounted) _markServerReachable(stopwatch.elapsed);
-        return;
+        return const _PingOutcome(reachable: true, isNetworkFailure: false);
       }
-      if (!mounted) return;
-      if (state.status != ServerStatus.offline) {
-        state = state.copyWith(
-          status: ServerStatus.offline,
-          errorMessage: _humanizeTimeoutError(e),
-        );
-      }
+      final isNetwork = e is DioException &&
+          (e.type == DioExceptionType.connectionTimeout ||
+              e.type == DioExceptionType.receiveTimeout ||
+              e.type == DioExceptionType.sendTimeout ||
+              e.type == DioExceptionType.connectionError ||
+              e.type == DioExceptionType.unknown);
+      return _PingOutcome(
+        reachable: false,
+        isNetworkFailure: isNetwork,
+        error: e,
+      );
     }
   }
 

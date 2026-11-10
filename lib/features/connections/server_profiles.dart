@@ -470,6 +470,18 @@ class MultiServerController {
     // Base Drift du profil (les providers dépendants se reconstruisent).
     _ref.read(activeDbFileNameProvider.notifier).state = profile.dbFile;
     await _ref.read(connectionProvider.notifier).applyProfile(profile);
+    // [Fix-BAD-LAN-IP] URLs de repli persistées pour CE profil (autres IPs
+    // LAN du poste desktop, reçues du QR `ips[]`) : le heartbeat les pinge
+    // si l'URL principale timeout (adaptateur virtuel Hyper-V/WSL/VPN).
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final alt = prefs.getStringList('profile_${profile.id}_alt_urls') ??
+          const <String>[];
+      _ref.read(connectionProvider.notifier).setAlternateServerUrls(alt);
+    } catch (_) {
+      // Non bloquant : sans replis, le comportement reste l'historique
+      // (ping de la seule URL principale).
+    }
   }
 
   /// Bascule vers un autre serveur :

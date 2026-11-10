@@ -10,6 +10,7 @@ import 'dart:io' show Platform;
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart' as log_pkg;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../core/auth/secure_storage.dart';
@@ -50,16 +51,66 @@ class ConnectionsController {
   Dio get _dio => _ref.read(dioProvider);
   SecureStorage get _storage => _ref.read(secureStorageProvider);
 
+  /// [Fix-BAD-LAN-IP] Candidates de l'appairage en cours (toutes les URLs
+  /// du QR) : persistées comme replis du profil au moment du succès.
+  List<String>? _pairingCandidateUrls;
+
+  /// Replis en attente de persistance post-completePairing.
+  List<String>? _pendingAltUrls;
+
   /// Appairage à partir d'un payload QR code (`{ip, port, establishment_code, pairing_token}`).
   ///
   /// Construit l'URL serveur `http://<ip>:<port>/api/v1` et délègue à [_doPair].
   Future<PairDeviceResponse> pairWithPayload(PairingPayload payload, {bool tolerateClockSkew = true}) {
-    return _doPair(
-      serverUrl: payload.serverUrl,
+    // [Fix-BAD-LAN-IP] Le QR transporte désormais TOUTES les IPs LAN du
+    // poste (ips[]) : la route par défaut du desktop désigne souvent un
+    // adaptateur virtuel (vEthernet Hyper-V/WSL, VPN, pont Docker)
+    // injoignable depuis le téléphone — au lieu de s'enliser 8 s en timeout
+    // sur la première IP, on essaie chaque candidate AVANT le repli
+    // résilient. Une candidate qui répond donne un appairage réel.
+    final urls = payload.serverUrls;
+    _pairingCandidateUrls = urls;
+    return _pairOverCandidates(
+      urls: urls,
       establishmentCode: payload.establishmentCode,
       pairingToken: payload.pairingToken,
       tolerateClockSkew: tolerateClockSkew,
     );
+  }
+
+  /// Essaie chaque URL candidate ; ne bascule en repli résilient qu'après
+  /// épuisement de la liste.
+  Future<PairDeviceResponse> _pairOverCandidates({
+    required List<String> urls,
+    required String establishmentCode,
+    required String pairingToken,
+    bool tolerateClockSkew = true,
+  }) async {
+    Object? lastError;
+    for (var i = 0; i < urls.length; i++) {
+      final isLast = i == urls.length - 1;
+      try {
+        return await _doPair(
+          serverUrl: urls[i],
+          establishmentCode: establishmentCode,
+          pairingToken: pairingToken,
+          tolerateClockSkew: tolerateClockSkew,
+        );
+      } on PairingException catch (e) {
+        // Une erreur métier (token refusé, 404 module absent, 422…)
+        // ne dépend PAS de l'adresse : inutile d'essayer les autres.
+        if (e.statusCode != null && e.statusCode! < 500) rethrow;
+        lastError = e;
+        _log.w('Appairage : candidate ${urls[i]} en échec ($e)'
+            '${isLast ? '' : ' — essai suivant'}');
+      } catch (e) {
+        lastError = e;
+        _log.w('Appairage : candidate ${urls[i]} en échec ($e)'
+            '${isLast ? '' : ' — essai suivant'}');
+      }
+    }
+    if (lastError is PairingException) rethrow;
+    throw PairingException('Échec de l\'appairage : $lastError');
   }
 
   /// Appairage manuel : [serverUrl] doit déjà contenir le préfixe
@@ -106,6 +157,23 @@ class ConnectionsController {
       final data = resp.data is Map ? resp.data as Map<String, dynamic> : <String, dynamic>{};
       final pairResp = PairDeviceResponse.fromJson(data);
 
+      // [Fix-BAD-LAN-IP] Persiste les URLs de repli reçues du QR (autres
+      // IPs LAN du poste) pour le profil actif : le heartbeat les pinguera
+      // si l'URL principale timeout (adaptateur virtuel du desktop).
+      // ⚠ AVANT completePairing : au retour, le profil est déjà appliqué
+      // et les replis doivent être relus par _applyProfile.
+      try {
+        final candidateUrls = <String>[serverUrl];
+        for (final u in _pairingCandidateUrls ?? const <String>[]) {
+          if (u.isNotEmpty && u != serverUrl) candidateUrls.add(u);
+        }
+        final prefs = await SharedPreferences.getInstance();
+        // Le profil n'existe pas encore : la clé est dérivée du serverUrl
+        // (id de profil = hash stable de l'URL, cf. upsertFromPairing).
+        // On écrit donc APRÈS completePairing via l'id actif.
+        _pendingAltUrls = candidateUrls;
+      } catch (_) {/* non bloquant */}
+
       // [Multi-serveurs] L'appairage réussi est enregistré dans le registre
       // (nouveau profil ou re-appairage du même serveur) et devient actif.
       await _ref
@@ -116,6 +184,23 @@ class ConnectionsController {
             deviceToken: pairResp.deviceToken,
             deviceId: pairResp.deviceId.toString(),
           );
+
+      // [Fix-BAD-LAN-IP] Maintenant le profil est actif : persister les
+      // replis sous sa clé ET les injecter dans l'état de connexion.
+      try {
+        final activeId = _ref.read(activeProfileIdProvider);
+        if (activeId != null && _pendingAltUrls != null) {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setStringList(
+            'profile_${activeId}_alt_urls',
+            _pendingAltUrls!,
+          );
+          _ref
+              .read(connectionProvider.notifier)
+              .setAlternateServerUrls(_pendingAltUrls!);
+        }
+      } catch (_) {/* non bloquant */}
+      _pendingAltUrls = null;
 
       // Invalide les caches dépendant de l'appairage.
       _ref.invalidate(serverInfoProvider);

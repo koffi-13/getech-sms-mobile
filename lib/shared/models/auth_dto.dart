@@ -318,11 +318,16 @@ class ServerInfoDto {
   final String serverVersion;
   final String apiUrl;
 
+  /// [Fix-BAD-LAN-IP] URLs API candidates (toutes les IPs LAN du poste).
+  /// Vide pour un serveur plus ancien qui n'expose que `api_url`.
+  final List<String> apiUrls;
+
   const ServerInfoDto({
     required this.establishmentCode,
     required this.establishmentName,
     required this.serverVersion,
     required this.apiUrl,
+    this.apiUrls = const [],
   });
 
   factory ServerInfoDto.fromJson(Map<String, dynamic> j) => ServerInfoDto(
@@ -330,6 +335,10 @@ class ServerInfoDto {
         establishmentName: j['establishment_name'] as String? ?? '',
         serverVersion: j['server_version'] as String? ?? 'unknown',
         apiUrl: j['api_url'] as String? ?? '',
+        apiUrls: (j['api_urls'] as List?)
+                ?.whereType<String>()
+                .toList(growable: false) ??
+            const [],
       );
 }
 
@@ -340,24 +349,46 @@ class PairingPayload {
   final String establishmentCode;
   final String pairingToken;
 
+  /// [Fix-BAD-LAN-IP] Toutes les IPs LAN du poste envoyées par le QR.
+  /// Vide pour un desktop plus ancien (champ `ip` seul) : la liste vaut
+  /// alors `[ip]`.
+  final List<String> ips;
+
   const PairingPayload({
     required this.ip,
     required this.port,
     required this.establishmentCode,
     required this.pairingToken,
+    this.ips = const [],
   });
 
   String get serverUrl => 'http://$ip:$port/api/v1';
+
+  /// URLs candidates dérivées du QR : première = IP principale (comportement
+  /// historique), suivies des autres IPs LAN du poste.
+  List<String> get serverUrls {
+    final all = <String>[ip];
+    for (final other in ips) {
+      if (other.isNotEmpty && other != ip) all.add(other);
+    }
+    return [for (final a in all) 'http://$a:$port/api/v1'];
+  }
 
   factory PairingPayload.fromJson(Map<String, dynamic> j) => PairingPayload(
         ip: j['ip'] as String,
         port: (j['port'] as num).toInt(),
         establishmentCode: j['establishment_code'] as String,
         pairingToken: j['pairing_token'] as String,
+        ips: (j['ips'] as List?)
+                ?.whereType<String>()
+                .where((v) => v.isNotEmpty)
+                .toList(growable: false) ??
+            const [],
       );
 
   Map<String, dynamic> toJson() => {
         'ip': ip,
+        'ips': ips,
         'port': port,
         'establishment_code': establishmentCode,
         'pairing_token': pairingToken,
