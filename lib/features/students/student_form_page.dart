@@ -673,14 +673,25 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _loading = true);
     try {
-      await ref.read(studentRepositoryProvider).save(_buildDto());
+      // [Fix-EDIT-FAKE-SUCCESS] save() remonte désormais le résultat du
+      // PATCH en ligne : « Élève modifié » seulement si le serveur a
+      // confirmé ; sinon la modification est locale + en file de synchro
+      // (l'ancien « succès » systématique masquait les échecs serveur et
+      // l'utilisateur croyait à une modification perdue).
+      final repo = ref.read(studentRepositoryProvider);
+      final savedOnline = _isEdit
+          ? await repo.save(_buildDto()).then((_) => repo.lastUpdateSynced)
+          : true;
       ref.invalidate(studentControllerProvider);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
               _isEdit
-                  ? 'Élève modifié.'
+                  ? (savedOnline
+                      ? 'Élève modifié.'
+                      : 'Modifié localement — synchronisation en attente '
+                          'du serveur.')
                   : 'Élève enregistré (synchronisation serveur en arrière-plan).',
             ),
           ),

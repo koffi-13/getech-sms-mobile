@@ -80,7 +80,12 @@ class ConnectionState {
   bool get isPaired =>
       pairingToken != null && (serverIp != null || serverUrlOverride != null);
   bool get isOnline => status == ServerStatus.online && !forceOffline;
-  bool get canReachServer => isOnline && status != ServerStatus.offline;
+  // [Fix-ONLINE-DETECT] V24 — était `isOnline && status != offline` :
+  // redondant (isOnline implique déjà online) mais surtout FRAGILE — tout
+  // statut intermédiaire (checking après bascule multi-serveurs) coupait
+  // l'accès aux données en ligne alors que le serveur répondait. Un appel
+  // réseau réel reste l'arbitre final (timeout → ApiException).
+  bool get canReachServer => isOnline;
 
   /// Vrai tant que le premier heartbeat n'a pas tranché (au démarrage à
   /// froid) : les pages ne doivent PAS bloquer sur cet état — les requêtes
@@ -247,7 +252,14 @@ class ConnectionNotifier extends StateNotifier<ConnectionState> {
       final response = await dio.get(fullUrl);
       stopwatch.stop();
 
-      if (response.statusCode == 200) {
+      // [Fix-ONLINE-DETECT] V24 — TOUTE réponse HTTP reçue prouve que le
+      // serveur est EN LIGNE (le processus écoute et répond). Avant, seul
+      // un 200 franc passait : un 401/403/404 (token d'appairage expiré,
+      // route absente selon la version du serveur) marquait le serveur
+      // « hors ligne » alors qu'il fonctionnait — avec plusieurs serveurs
+      // configurés, l'app n'arrivait plus à détecter lequel était en ligne
+      // et refusait les accès aux données en ligne.
+      if (response.statusCode != null) {
         final prev = state;
         // [Fix-HEARTBEAT-REBUILD] Le heartbeat tourne toutes les 30 s : ne
         // ré-émettre QUE si l'état significatif change (transition de statut

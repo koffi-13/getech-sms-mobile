@@ -1138,6 +1138,19 @@ Future<List<AssessmentDto>> _assessmentsFromLocal(
     }
     final rows = await query.get();
 
+    // [Fix-N-0-SAISIES] Dénominateur HORS-LIGNE : nombre d'élèves de la
+    // classe de l'évaluation (assignations actives, élèves non supprimés —
+    // mêmes critères que GradeService.get_students_in_classroom côté
+    // serveur). Avant, totalStudents n'était jamais calculé localement →
+    // « N/0 saisies » systématique hors connexion.
+    final classroomId = await _classroomIdForClassSubject(
+      db,
+      classSubjectId: q.classSubjectId,
+    );
+    final totalStudents = classroomId == null
+        ? 0
+        : await _classroomRosterCount(db, classroomId: classroomId);
+
     // Comptage local des notes saisies par évaluation.
     final countExpr = db.grades.id.count();
     final countRows = await (db.selectOnly(db.grades)
@@ -1162,6 +1175,7 @@ Future<List<AssessmentDto>> _assessmentsFromLocal(
             classSubjectId: a.classSubjectId,
             periodId: a.periodId,
             gradesEnteredCount: counts[a.id] ?? 0,
+            totalStudents: totalStudents,
           ),
         )
         .toList()
@@ -1169,6 +1183,45 @@ Future<List<AssessmentDto>> _assessmentsFromLocal(
   } catch (_) {
     return const [];
   }
+}
+
+/// [Fix-N-0-SAISIES] Classe d'un class_subject d'après la réplique locale.
+Future<int?> _classroomIdForClassSubject(
+  AppDatabase db, {
+  required int classSubjectId,
+}) async {
+  final rows = await (db.selectOnly(db.classSubjects)
+        ..addColumns([db.classSubjects.classroomId])
+        ..where(db.classSubjects.id.equals(classSubjectId)))
+      .get();
+  return rows.isEmpty ? null : rows.first.read(db.classSubjects.classroomId);
+}
+
+/// [Fix-N-0-SAISIES] Effectif actif d'une classe d'après la réplique
+/// locale : assignations non supprimées (le mobile matérialise
+/// `active=False` par isDeleted — cf. case 'student_class_assignments'
+/// du sync_engine) + élèves non supprimés.
+Future<int> _classroomRosterCount(
+  AppDatabase db, {
+  required int classroomId,
+  int? schoolYearId,
+}) async {
+  final countExpr = db.students.id.count();
+  final q = db.selectOnly(db.students)
+    ..addColumns([countExpr])
+    ..join(
+      db.studentClassAssignments,
+      d.JoinType.inner,
+      on: db.studentClassAssignments.studentId.equalsExp(db.students.id),
+    )
+    ..where(db.studentClassAssignments.classroomId.equals(classroomId))
+    ..where(db.studentClassAssignments.isDeleted.equals(false))
+    ..where(db.students.isDeleted.equals(false));
+  if (schoolYearId != null) {
+    q.where(db.studentClassAssignments.schoolYearId.equals(schoolYearId));
+  }
+  final row = await q.getSingleOrNull();
+  return row?.read(countExpr) ?? 0;
 }
 
 List<AssessmentDto> _parseAssessmentList(dynamic data) {

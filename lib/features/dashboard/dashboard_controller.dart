@@ -25,6 +25,7 @@ import '../../core/config/constants.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
+import '../../core/sync/sync_engine.dart' show syncGenerationProvider;
 import '../../shared/models/attendance_dto.dart';
 import '../../shared/models/classroom_dto.dart';
 import '../connections/connection_state.dart';
@@ -51,8 +52,17 @@ class OfflineDashboardException implements Exception {
 /// (ex : développement) après une bascule ou un re-appairage — retour
 /// utilisateur S4 : « je vois les statistiques d'un autre serveur dans
 /// l'Accueil d'un autre ».
+///
+/// [Fix-HOME-STALE] V24 — le provider surveille désormais AUSSI
+/// `syncGenerationProvider` : après chaque synchro (auto sur retour réseau,
+/// reprise d'app, bouton synchroniser), l'Accueil se RECALCULE au lieu de
+/// rester sur les KPIs du dernier affichage. Avant, seules la liste des
+/// matières, les utilisateurs, les notes et les absences se rafraîchaient ;
+/// l'Accueil restait figé jusqu'à un pull manuel.
 final dashboardStatsProvider =
     FutureProvider.autoDispose<DashboardStatsDto>((ref) async {
+  // Incrémente à chaque synchro terminée → relance ce provider.
+  ref.watch(syncGenerationProvider);
   final conn = ref.watch(connectionProvider);
   final prefs = await SharedPreferences.getInstance();
 

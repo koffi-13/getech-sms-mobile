@@ -2,7 +2,9 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:dio/dio.dart' as dio_pkg;
 import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart' as log_pkg;
@@ -583,11 +585,19 @@ class SyncEngine {
               e.operation.toUpperCase() == 'DELETE',
         )
         .toList(growable: false);
+    // [Fix-PHOTO-OFFLINE] Photos d'élèves prises hors-ligne : stockées en
+    // base64 dans le payload (le cache disque peut être purgé par l'OS),
+    // rejouées en multipart vers POST /students/{id}/photo à la
+    // reconnexion, via le même garde-fou anti-retry infini.
+    final studentPhotos = pending
+        .where((e) => e.tableNameColumn == 'student_photo')
+        .toList(growable: false);
     final rest = pending
         .where(
           (e) =>
               e.tableNameColumn != 'grade_submission' &&
-              e.tableNameColumn != 'students',
+              e.tableNameColumn != 'students' &&
+              e.tableNameColumn != 'student_photo',
         )
         .toList(growable: false);
 
@@ -633,6 +643,22 @@ class SyncEngine {
         error: 'Suppression d\'élève non synchropluggable — le serveur '
             'n\'expose pas DELETE /students.',
       );
+    }
+
+    // [Fix-PHOTO-OFFLINE] Rejeu des photos prises hors-ligne.
+    for (final entry in studentPhotos) {
+      try {
+        pushed += await _pushStudentPhoto(entry, outbox);
+      } catch (e) {
+        _log.w('Photo élève #${entry.id} échouée : $e');
+        errors.add('Photo hors-ligne : $e');
+        if (entry.attempts >= 4) {
+          await outbox.markProcessed(
+            entry.id,
+            error: 'Abandon après ${entry.attempts + 1} tentatives : $e',
+          );
+        }
+      }
     }
 
     if (rest.isEmpty) {
@@ -878,6 +904,66 @@ class SyncEngine {
     );
     await outbox.markProcessed(entry.id);
     _log.i('Modification élève #$recordId poussée');
+    return 1;
+  }
+
+  /// [Fix-PHOTO-OFFLINE] Rejoue une photo d'élève prise hors-ligne :
+  /// multipart vers POST /students/{id}/photo (endpoint existant, 5 Mo
+  /// max). Le payload de l'outbox porte les octets en base64 — plus fiable
+  /// que le fichier cache disque, que l'OS peut purger. Après succès, le
+  /// cache photo local est invalidé pour re-télécharger la photo servie.
+  Future<int> _pushStudentPhoto(
+    OutboxEntry entry,
+    Outbox outbox,
+  ) async {
+    final conn = _ref.read(connectionProvider);
+    final dio = _ref.read(dioProvider);
+    final payload = entry.payloadMap;
+    final recordId = entry.recordId;
+
+    if (recordId == null || recordId <= 0) {
+      // Élève créé hors-ligne (id négatif) pas encore réconcilié :
+      // laisse l'entrée en file — elle remontera après le POST principal.
+      if (recordId != null && recordId < 0) {
+        throw const ApiException(
+          'Élève local non encore créé côté serveur — photo réessayée '
+          'à la prochaine synchro',
+        );
+      }
+      await outbox.markProcessed(
+        entry.id,
+        error: 'Photo sans identifiant serveur — ignorée',
+      );
+      return 0;
+    }
+
+    final b64 = payload['photo_base64'] as String?;
+    final ext = (payload['extension'] as String?) ?? 'jpg';
+    if (b64 == null || b64.isEmpty) {
+      await outbox.markProcessed(entry.id, error: 'Photo vide — ignorée');
+      return 0;
+    }
+    if (b64.length > 7_000_000) {
+      // ~5 Mo de binaires une fois décodés — limite serveur FileService.
+      await outbox.markProcessed(
+        entry.id,
+        error: 'Photo trop volumineuse (max 5 Mo) — ignorée',
+      );
+      return 0;
+    }
+
+    final bytes = base64Decode(b64);
+    final form = dio_pkg.FormData.fromMap({
+      'file': dio_pkg.MultipartFile.fromBytes(
+        bytes,
+        filename: 'eleve_$recordId.${ext == 'jpeg' ? 'jpg' : ext}',
+        contentType: dio_pkg.DioMediaType.parse('image/$ext'),
+      ),
+    });
+    final url = buildUrl(conn.serverUrl!, '/students/$recordId/photo');
+    await dio.post(url, data: form);
+    await outbox.markProcessed(entry.id);
+    _log.i('Photo élève #$recordId poussée (${bytes.length} octets)');
     return 1;
   }
 
@@ -1859,6 +1945,13 @@ class SyncEngine {
               );
               break;
             case 'students':
+              // [Fix-SOFT-DELETED-SYNC] Le registre serveur filtre désormais
+              // les élèves supprimés logiquement (abandon/exclusion), mais
+              // un serveur encore sur l'ancien registre peut continuer à les
+              // envoyer : respecter le champ `deleted` de la ligne au lieu
+              // de le forcer à false — sinon l'élève est ressuscité par id à
+              // chaque synchronisation.
+              final studentDeleted = _rBool(row, 'deleted');
               b.insert(
                 _db.students,
                 StudentsCompanion.insert(
@@ -1883,7 +1976,7 @@ class SyncEngine {
                   establishmentId: Value(_rIntN(row, 'establishment_id')),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
-                  isDeleted: const Value(false),
+                  isDeleted: Value(studentDeleted),
                 ),
                 mode: InsertMode.insertOrReplace,
               );
