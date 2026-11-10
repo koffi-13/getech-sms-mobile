@@ -1859,6 +1859,13 @@ class SyncEngine {
               );
               break;
             case 'students':
+              // [Fix-SOFT-DELETED-SYNC] Le registre serveur filtre désormais
+              // les élèves supprimés logiquement (abandon/exclusion), mais
+              // un serveur encore sur l'ancien registre peut continuer à les
+              // envoyer : respecter le champ `deleted` de la ligne au lieu
+              // de le forcer à false — sinon l'élève est ressuscité par id à
+              // chaque synchronisation.
+              final studentDeleted = _rBool(row, 'deleted');
               b.insert(
                 _db.students,
                 StudentsCompanion.insert(
@@ -1883,7 +1890,7 @@ class SyncEngine {
                   establishmentId: Value(_rIntN(row, 'establishment_id')),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
-                  isDeleted: const Value(false),
+                  isDeleted: Value(studentDeleted),
                 ),
                 mode: InsertMode.insertOrReplace,
               );

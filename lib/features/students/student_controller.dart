@@ -697,10 +697,15 @@ class StudentRepository {
   final Ref _ref;
   StudentRepository(this._ref);
 
+  /// [Fix-EDIT-FAKE-SUCCESS] Résultat du DERNIER `update()` : true si le
+  /// PATCH serveur immédiat a confirmé, false s'il a échoué (mis en file
+  /// outbox) — consulté par le formulaire pour afficher le bon message.
+  bool lastUpdateSynced = false;
+
   /// Détail complet : `GET /students/{id}` en ligne (les satellites sont
   /// inclus si le patch serveur est appliqué), enrichi/fallback par les
   /// données locales (satellites + assignation).
-  Future<StudentDto> getById(int id) async {
+  Future<StudentDto> getById(int id, {bool savedOnline = false}) async {
     final canReach = _ref.read(connectionProvider).canReachServer;
     StudentDto? remote;
     if (canReach) {
@@ -889,6 +894,8 @@ class StudentRepository {
       return create(StudentCreateRequest.fromDto(student));
     } else {
       await update(student.id, StudentUpdateRequest.fromDto(student));
+      // [Fix-EDIT-FAKE-SUCCESS] lastUpdateSynced est mis à jour par
+      // update() : true si le PATCH serveur immédiat a confirmé.
       return getById(student.id);
     }
   }
@@ -1059,6 +1066,9 @@ class StudentRepository {
 
   /// Modifie un élève : `PATCH /students/{id}` (payload complet, y compris
   /// `classroom_id` pour changer de classe). Repli outbox si indisponible.
+  ///
+  /// [Fix-EDIT-FAKE-SUCCESS] Met à jour `lastUpdateSynced` : le formulaire
+  /// n'affiche « Élève modifié » que si le serveur a confirmé.
   Future<void> update(int id, StudentUpdateRequest req) async {
     final db = _ref.read(databaseProvider);
     final canReach = _ref.read(connectionProvider).canReachServer;
@@ -1079,6 +1089,21 @@ class StudentRepository {
         isDirty: d.Value(!canReach),
       ),
     );
+    lastUpdateSynced = await _updateAssignmentAndSync(id, req, canReach);
+  }
+
+  /// Suite commune de `update` (assignation de classe + PATCH serveur) —
+  /// extraite pour permettre à `save()` de connaître le résultat en ligne.
+  ///
+  /// [Fix-EDIT-FAKE-SUCCESS] Retourne false quand le PATCH immédiat a
+  /// échoué (l'appelant peut alors éviter d'afficher un « Élève modifié »
+  /// mensonger) ; la modification reste en file outbox et sera rejouée.
+  Future<bool> _updateAssignmentAndSync(
+    int id,
+    StudentUpdateRequest req,
+    bool canReach,
+  ) async {
+    final db = _ref.read(databaseProvider);
 
     // Mise à jour de l'assignation si la classe change (upsert : delete
     // non-dirty puis insert — l'update seul serait un no-op sans ligne).
@@ -1222,6 +1247,7 @@ class StudentRepository {
           buildUrl(serverUrl, ApiEndpoints.student(id)),
           data: req.toJson(),
         );
+        return true;
       } catch (e) {
         _log.w('update($id) PATCH échoué, mise en file outbox : $e');
         await _queueForSync('PATCH', id, req.toJson());
@@ -1229,6 +1255,7 @@ class StudentRepository {
     } else {
       await _queueForSync('PATCH', id, req.toJson());
     }
+    return false;
   }
 
   Future<void> delete(int id) async {
