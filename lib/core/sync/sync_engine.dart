@@ -943,7 +943,7 @@ class SyncEngine {
       await outbox.markProcessed(entry.id, error: 'Photo vide — ignorée');
       return 0;
     }
-    if (b64.length > 7_000_000) {
+    if (b64.length > 7000000) {
       // ~5 Mo de binaires une fois décodés — limite serveur FileService.
       await outbox.markProcessed(
         entry.id,
