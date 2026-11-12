@@ -31,9 +31,11 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/auth/auth_state.dart';
@@ -114,6 +116,14 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
     _clockTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
     });
+    // [Fix-DRAFT-PERSISTENCE] Restaurer la saisie en cours (sessions,
+    // brouillons, cahier de texte) au retour sur la page : sortir de
+    // l'interface ne doit plus perdre une feuille de présence non
+    // enregistrée (retour terrain 2026-11-12).
+    Future(_restorePendingSession);
+    // Le cahier de texte se persiste à chaque frappe.
+    _lessonContentCtrl.addListener(_persistPendingSession);
+    _lessonHomeworkCtrl.addListener(_persistPendingSession);
   }
 
   @override
@@ -791,20 +801,37 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
     try {
       final controller = ref.read(attendanceControllerProvider);
       final sessions = <CourseSessionDto>[];
+      // [Fix-CONSECUTIVE-SLOTS] Le groupe peut désormais contenir le MÊME
+      // cours sur des créneaux consécutifs (ex. Maths 08:00-09:00 +
+      // 09:00-10:00) : une SEULE session par classe, couvrant tout le
+      // bloc — du début du premier créneau à la fin du dernier.
+      final courseByClassroom = <int, WeeklyScheduleDto>{};
+      String? groupStart;
+      String? groupEnd;
       for (final course in group.courses) {
         final cid = course.classroomId;
         if (cid == null) continue;
+        courseByClassroom.putIfAbsent(cid, () => course);
+        if (groupStart == null || course.startTime.compareTo(groupStart) < 0) {
+          groupStart = course.startTime;
+        }
+        if (groupEnd == null || course.endTime.compareTo(groupEnd) > 0) {
+          groupEnd = course.endTime;
+        }
+      }
+      for (final entry in courseByClassroom.entries) {
+        final course = entry.value;
         sessions.add(
           await controller.startSession(
-            classroomId: cid,
+            classroomId: entry.key,
             weeklyScheduleId: course.id,
             subjectId: course.subjectId,
             teacherId: course.teacherId,
             // [Présence-V10] Flux enseignant : _date = aujourd'hui (jamais
             // modifiable). Flux admin : date choisie (rattrapage possible).
             date: _date,
-            startTime: course.startTime,
-            endTime: course.endTime,
+            startTime: groupStart ?? course.startTime,
+            endTime: groupEnd ?? course.endTime,
           ),
         );
       }
@@ -824,6 +851,9 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
         _cahierUserToggled = false;
         _cahierExpanded = false;
       });
+      // [Fix-DRAFT-PERSISTENCE] La saisie démarre : on l'ancre tout de
+      // suite pour qu'elle survive à une sortie de l'interface.
+      _persistPendingSession();
     } on ApiException catch (e) {
       _showError(e.message);
     } catch (e) {
@@ -1069,6 +1099,10 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                           _absencesDrafts.remove(s.id);
                         }
                       });
+                      // [Fix-DRAFT-PERSISTENCE] Chaque geste est
+                      // sauvegardé : quitte l'interface et reviens, la
+                      // saisie est intacte.
+                      _persistPendingSession();
                     },
                   ),
                 ),
@@ -1212,6 +1246,9 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                     _lessonHomeworkCtrl.clear();
                     _lessonRecordIds = {};
                     _lessonLoaded = false;
+                    // [Fix-DRAFT-PERSISTENCE] Fermeture volontaire : on
+                    // abandonne la saisie (et sa persistance).
+                    _clearPendingSession();
                   }),
           icon: const Icon(Icons.close),
           label: const Text('Fermer la session (sans enregistrer)'),
@@ -1275,6 +1312,8 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
               bySession[session.id] ?? const <StudentAbsenceDto>[],
             );
       }
+      // [Fix-DRAFT-PERSISTENCE] Enregistré = plus rien en attente.
+      await _clearPendingSession();
       if (mounted) {
         final total = _absencesDrafts.length;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1312,6 +1351,8 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
         );
       }
       setState(() => _activeSessions = updated);
+      // [Fix-DRAFT-PERSISTENCE] L'état change, les brouillons restent.
+      _persistPendingSession();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Session marquée comme terminée.')),
@@ -1323,6 +1364,205 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
       _showError(AppErrorWidget.humanize(e.toString()));
     } finally {
       if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // [Fix-DRAFT-PERSISTENCE] Persistance de la feuille en cours.
+  // ─────────────────────────────────────────────────────────────────────
+
+  static const _kPendingAttendance = 'attendance_pending_session';
+
+  Future<void> _persistPendingSession() async {
+    if (_activeSessions.isEmpty) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _kPendingAttendance,
+        jsonEncode({
+          'sessions': [
+            for (final s in _activeSessions)
+              {
+                'id': s.id,
+                'weeklyScheduleId': s.weeklyScheduleId,
+                'classroomId': s.classroomId,
+                'classroomName': s.classroomName,
+                'subjectId': s.subjectId,
+                'subjectName': s.subjectName,
+                'teacherId': s.teacherId,
+                'teacherName': s.teacherName,
+                'date': s.date.toIso8601String(),
+                'startTime': s.startTime,
+                'endTime': s.endTime,
+                'state': s.state.code,
+                'lessonRecordId': s.lessonRecordId,
+              },
+          ],
+          'group': [
+            for (final c in _activeGroup?.courses ?? const [])
+              {
+                'id': c.id,
+                'classroomId': c.classroomId,
+                'classroomName': c.classroomName,
+                'subjectId': c.subjectId,
+                'subjectName': c.subjectName,
+                'teacherId': c.teacherId,
+                'teacherName': c.teacherName,
+                'timeSlotId': c.timeSlotId,
+                'dayOfWeek': c.dayOfWeek,
+                'startTime': c.startTime,
+                'endTime': c.endTime,
+                'room': c.room,
+                'weekType': c.weekType == WeekType.b ? 'b' : 'a',
+              },
+          ],
+          'drafts': {
+            for (final e in _absencesDrafts.entries)
+              '${e.key}': {
+                'studentName': e.value.studentName,
+                'matricule': e.value.matricule,
+                'isJustified': e.value.isJustified,
+                'reason': e.value.reason,
+              },
+          },
+          'sessionByStudent': {
+            for (final e in _sessionByStudent.entries) '${e.key}': e.value,
+          },
+          'lessonRecordIds': {
+            for (final e in _lessonRecordIds.entries) '${e.key}': e.value,
+          },
+          'lessonContent': _lessonContentCtrl.text,
+          'lessonHomework': _lessonHomeworkCtrl.text,
+        }),
+      );
+    } catch (_) {
+      // La persistance du brouillon ne doit jamais casser la saisie.
+    }
+  }
+
+  Future<void> _clearPendingSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_kPendingAttendance);
+    } catch (_) {
+      // Même politique : ne jamais gêner la saisie.
+    }
+  }
+
+  Future<void> _restorePendingSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kPendingAttendance);
+      if (raw == null || raw.isEmpty) return;
+      final data = jsonDecode(raw);
+      if (data is! Map) return;
+
+      final rawSessions = data['sessions'];
+      if (rawSessions is! List || rawSessions.isEmpty) return;
+      final sessions = <CourseSessionDto>[];
+      for (final item in rawSessions) {
+        if (item is! Map) continue;
+        sessions.add(CourseSessionDto(
+          id: item['id'] as int,
+          weeklyScheduleId: item['weeklyScheduleId'] as int?,
+          classroomId: item['classroomId'] as int?,
+          classroomName: item['classroomName'] as String?,
+          subjectId: item['subjectId'] as int?,
+          subjectName: item['subjectName'] as String?,
+          teacherId: item['teacherId'] as int?,
+          teacherName: item['teacherName'] as String?,
+          date: DateTime.tryParse(item['date'] as String? ?? '') ??
+              DateTime.now(),
+          startTime: item['startTime'] as String?,
+          endTime: item['endTime'] as String?,
+          state: CourseSessionState.fromCode(item['state'] as String?) ??
+              CourseSessionState.pending,
+          lessonRecordId: item['lessonRecordId'] as int?,
+        ));
+      }
+
+      final groupCourses = <WeeklyScheduleDto>[];
+      final rawGroup = data['group'];
+      if (rawGroup is List) {
+        for (final item in rawGroup) {
+          if (item is! Map) continue;
+          groupCourses.add(WeeklyScheduleDto(
+            id: item['id'] as int,
+            classroomId: item['classroomId'] as int?,
+            classroomName: item['classroomName'] as String?,
+            subjectId: item['subjectId'] as int?,
+            subjectName: item['subjectName'] as String?,
+            teacherId: item['teacherId'] as int?,
+            teacherName: item['teacherName'] as String?,
+            timeSlotId: item['timeSlotId'] as int? ?? 0,
+            dayOfWeek: item['dayOfWeek'] as int? ?? 1,
+            startTime: item['startTime'] as String? ?? '',
+            endTime: item['endTime'] as String? ?? '',
+            room: item['room'] as String?,
+            weekType:
+                item['weekType'] == 'b' ? WeekType.b : WeekType.a,
+          ));
+        }
+      }
+
+      final drafts = <int, StudentAbsenceDto>{};
+      final rawDrafts = data['drafts'];
+      if (rawDrafts is Map) {
+        for (final e in rawDrafts.entries) {
+          final sid = int.tryParse('${e.key}');
+          final d = e.value;
+          if (sid == null || d is! Map) continue;
+          drafts[sid] = StudentAbsenceDto(
+            id: 0,
+            courseSessionId: sessions.first.id,
+            studentId: sid,
+            studentName: d['studentName'] as String?,
+            matricule: d['matricule'] as String?,
+            isJustified: (d['isJustified'] as bool?) ?? false,
+            reason: d['reason'] as String?,
+          );
+        }
+      }
+
+      final byStudent = <int, int>{};
+      final rawByStudent = data['sessionByStudent'];
+      if (rawByStudent is Map) {
+        for (final e in rawByStudent.entries) {
+          final sid = int.tryParse('${e.key}');
+          final sessionId = e.value is int ? e.value as int : null;
+          if (sid != null && sessionId != null) byStudent[sid] = sessionId;
+        }
+      }
+
+      final lessonIds = <int, int>{};
+      final rawLessonIds = data['lessonRecordIds'];
+      if (rawLessonIds is Map) {
+        for (final e in rawLessonIds.entries) {
+          final key = int.tryParse('${e.key}');
+          final value = e.value is int ? e.value as int : null;
+          if (key != null && value != null) lessonIds[key] = value;
+        }
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _activeSessions = sessions;
+        _activeGroup = groupCourses.isEmpty
+            ? null
+            : smart.CourseGroup(groupCourses);
+        _absencesDrafts
+          ..clear()
+          ..addAll(drafts);
+        _sessionByStudent = byStudent;
+        _lessonRecordIds = lessonIds;
+        _lessonContentCtrl.text = data['lessonContent'] as String? ?? '';
+        _lessonHomeworkCtrl.text = data['lessonHomework'] as String? ?? '';
+        // Ne pas laisser l'init paresseuse du cahier écraser le texte
+        // restauré.
+        _lessonLoaded = true;
+      });
+    } catch (_) {
+      // Brouillon illisible : on repart d'une saisie propre.
     }
   }
 

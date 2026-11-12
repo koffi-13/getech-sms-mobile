@@ -156,7 +156,19 @@ List<CourseGroup> groupOverlappingCourses(List<WeeklyScheduleDto> dayCourses) {
     for (var i = 0; i < groups.length; i++) {
       // Trié par début : chevauche le groupe s'il commence avant la fin
       // (maximale) du groupe.
-      if (start != null && start < groupEnds[i]) {
+      final overlaps = start != null && start < groupEnds[i];
+      // [Fix-CONSECUTIVE-SLOTS] Un MÊME cours (même matière + même
+      // enseignant) sur des créneaux CONSÉCUTIFS — la fin du groupe
+      // rejoint le début du cours, récréation de ≤10 min tolérée — est
+      // fusionné dans le groupe : une seule saisie « 08:00 – 10:00 »
+      // (retour terrain 2026-11-12). Les cours DIFFÉRENTS qui se
+      // suivent restent distincts.
+      final consecutive = start != null &&
+          groups[i].courses.every((g) =>
+              g.subjectId == c.subjectId && g.teacherId == c.teacherId) &&
+          start - groupEnds[i] >= 0 &&
+          start - groupEnds[i] <= 10;
+      if (overlaps || consecutive) {
         groups[i].courses.add(c);
         if (end != null && end > groupEnds[i]) groupEnds[i] = end;
         placed = true;

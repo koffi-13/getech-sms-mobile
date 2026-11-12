@@ -1525,12 +1525,46 @@ class SyncEngine {
     });
   }
 
+  /// [Fix-PULL-DIRTY] Retire les lignes dont l'élève local est isDirty
+  /// (édition en attente de push) : l'insertOrReplace du pull écrasait
+  /// l'édition locale ET repoussait isDirty=false avant que le push ne
+  /// parte — modification « enregistrée en local puis perdue » (retour
+  /// terrain 2026-11-12). La ligne reviendra au pull suivant, une fois
+  /// l'outbox vidée par le push.
+  Future<List<Map<String, dynamic>>> _dropDirtyStudents(
+    List<Map<String, dynamic>> rows,
+  ) async {
+    try {
+      final ids = rows.map(_rId).where((id) => id > 0).toSet();
+      if (ids.isEmpty) return rows;
+      final dirtyIds = await (_db.select(_db.students)
+            ..where((t) => t.id.isIn(ids) & t.isDirty.equals(true)))
+          .map((row) => row.id)
+          .get();
+      if (dirtyIds.isEmpty) return rows;
+      _log.i('[Fix-PULL-DIRTY] ${dirtyIds.length} élève(s) local(aux) '
+          'modifié(s) préservé(s) du pull (attente de push)');
+      final dirty = dirtyIds.toSet();
+      return rows.where((r) => !dirty.contains(_rId(r))).toList();
+    } catch (e) {
+      _log.w('Filtre isDirty (students) impossible : $e');
+      return rows;
+    }
+  }
+
   Future<void> _applyTableChanges(
     String table,
     List<Map<String, dynamic>> rows,
     DateTime syncedAt,
   ) async {
     if (rows.isEmpty) return;
+
+    // [Fix-PULL-DIRTY] Les élèves locaux modifiés non encore poussés ne
+    // sont PAS écrasés par le pull (voir _dropDirtyStudents).
+    if (table == 'students') {
+      rows = await _dropDirtyStudents(rows);
+      if (rows.isEmpty) return;
+    }
 
     // [Grade-Validation] Les notes suivent un chemin dédié : préservation
     // des marques (queued/rejected + valeur proposée) et protection des
