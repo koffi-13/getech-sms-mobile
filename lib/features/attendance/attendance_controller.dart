@@ -364,46 +364,6 @@ final absenceHistoryProvider = FutureProvider.autoDispose
   }
 });
 
-/// [Fix-STUDENTS-LIST-TRUNCATED] Le serveur pagine `GET /students`
-/// (défaut 50, max 200 par page) : l'ancien appel sans paramètre ne
-/// renvoyait que la 1re page — une classe de 57 élèves affichait 50
-/// lignes dans la feuille de présence (retour terrain 2026-11-12 : « la
-/// liste de présence n'affiche pas tous les élèves pour des listes
-/// longues »). On demande explicitement des pages de 200 et on boucle
-/// jusqu'à épuisement (garde-fou 30 pages = 6000 élèves).
-Future<List<StudentDto>> _fetchAllStudents(
-  Dio dio,
-  String serverUrl, {
-  int? classroomId,
-}) async {
-  final out = <StudentDto>[];
-  const perPage = 200;
-  var page = 1;
-  while (page <= 30) {
-    final resp = await dio.get(
-      buildUrl(serverUrl, ApiEndpoints.students),
-      queryParameters: {
-        'page': page,
-        'per_page': perPage,
-        if (classroomId != null) 'classroom_id': classroomId,
-      },
-    );
-    final batch = _parseStudentList(resp.data);
-    out.addAll(batch);
-    final total = _parseStudentTotal(resp.data);
-    if (batch.length < perPage || (total > 0 && out.length >= total)) break;
-    page++;
-  }
-  return out;
-}
-
-int _parseStudentTotal(dynamic data) {
-  if (data is Map && data['total'] is num) {
-    return (data['total'] as num).toInt();
-  }
-  return 0;
-}
-
 /// [Fix-OFFLINE] Historique d'absences depuis le cache Drift local
 /// (tables `student_absences` + `course_sessions` + `subjects`, remplies
 /// par la synchro) — sert l'historique quand le serveur ne répond pas.
