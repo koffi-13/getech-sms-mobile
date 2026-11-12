@@ -280,20 +280,39 @@ class SyncEngine {
       return SyncResult(timestamp: DateTime.now());
     }
 
-    final changes = <String, List<Map<String, dynamic>>>{};
+    // [Fix-OUTBOX-LINES] Le serveur attend {"lines":[{line_id,table,op,
+    // data}]} — l'ancien corps {"changes":{table:[payloads]}} recevait 422
+    // à CHAQUE appel (validation `lines` manquant) : l'outbox ne s'est
+    // jamais vidée, chaque écriture hors-ligne était réessayée puis
+    // écrasée par le pull (« jamais envoyée au serveur », retour terrain
+    // 2026-11-12). L'id d'enregistrement est FUSIONNÉ dans `data` car le
+    // payload d'un PATCH ne le porte pas.
+    final lines = <Map<String, dynamic>>[];
     for (final entry in pending) {
-      changes.putIfAbsent(entry.tableNameColumn, () => []).add(entry.payloadMap);
+      if (entry.recordId == null) continue;
+      lines.add({
+        'line_id': '${entry.tableNameColumn}:${entry.recordId}',
+        'table': entry.tableNameColumn,
+        'op': entry.operation.toUpperCase() == 'DELETE'
+            ? 'delete'
+            : 'upsert',
+        'data': {'id': entry.recordId, ...entry.payloadMap},
+      });
     }
+    // Créations sans id corrélable : le protocole v1 ne peut pas les
+    // associer — erreur explicite plutôt que de bloquer toute la file.
+    final orphans = pending.where((e) => e.recordId == null).toList();
 
     final dio = _ref.read(dioProvider);
     final url = buildUrl(conn.serverUrl!, ApiEndpoints.syncPush);
+    final tables = <String>{for (final l in lines) l['table'] as String};
 
     try {
-      _log.i('Push vers $url : ${pending.length} entrées '
-          '(${changes.keys.length} tables)');
+      _log.i('Push vers $url : ${lines.length} ligne(s), '
+          '${tables.length} table(s) (${tables.join(', ')})');
       final resp = await dio.postJson<Map<String, dynamic>>(
         url,
-        data: SyncPushRequest(changes: changes).toJson(),
+        data: {'lines': lines},
       );
       final data = resp.data;
       if (data == null) {
@@ -303,51 +322,74 @@ class SyncEngine {
         );
       }
 
-      final pushResp = SyncPushResponse.fromJson(data);
-      final appliedCount =
-          pushResp.applied.values.fold(0, (sum, n) => sum + n);
-      _log.i('Push terminé : $appliedCount appliqués, '
-          '${pushResp.conflicts.length} conflits');
-
-      for (final entry in pending) {
-        final conflictKey = entry.recordId != null
-            ? '${entry.tableNameColumn}:${entry.recordId}'
-            : null;
-        final isConflict = conflictKey != null &&
-            pushResp.conflicts.contains(conflictKey);
-
-        if (isConflict) {
-          await outbox.markProcessed(
-            entry.id,
-            error: 'Conflit (server-wins) — ignoré par le serveur',
-          );
-        } else {
-          await outbox.markProcessed(entry.id);
-          if (entry.recordId != null) {
-            final isDelete =
-                entry.operation.toUpperCase() == 'DELETE';
-            await _updateRowSyncState(
-              entry.tableNameColumn,
-              entry.recordId!,
-              pushResp.serverTime,
-              deleted: isDelete,
-            );
+      // [Fix-OUTBOX-LINES] Lecture du VRAI contrat serveur :
+      // {server_time, accepted, results:[{line_id,table,status,detail}]}
+      // (+ champs de compat applied/conflicts). Chaque entrée d'outbox est
+      // tranchée par son line_id ; un verdict non-applied marque l'entrée
+      // traitée AVEC l'erreur serveur — plus de re-tentative infinie.
+      final serverTime =
+          DateTime.tryParse(data['server_time'] as String? ?? '') ??
+              DateTime.now().toUtc();
+      final resultsByLineId = <String, Map<String, dynamic>>{};
+      for (final r in (data['results'] as List? ?? const [])) {
+        if (r is Map) {
+          final key = r['line_id']?.toString();
+          if (key != null) {
+            resultsByLineId[key] = Map<String, dynamic>.from(r);
           }
         }
+      }
+      final applied = Map<String, int>.from(
+        (data['applied'] as Map?)?.map(
+          (k, v) => MapEntry(k.toString(), (v as num).toInt()),
+        ) ??
+            const {},
+      );
+      final appliedCount = applied.values.fold(0, (sum, n) => sum + n);
+      _log.i('Push terminé : $appliedCount appliqué(s), '
+          '${resultsByLineId.length} verdict(s)');
+
+      var rejected = 0;
+      for (final entry in pending) {
+        if (entry.recordId == null) continue;
+        final verdict =
+            resultsByLineId['${entry.tableNameColumn}:${entry.recordId}'];
+        final status = verdict?['status'] as String?;
+        if (status == null) continue; // non jugée → reste en file
+        if (status == 'applied') {
+          await outbox.markProcessed(entry.id);
+          final isDelete = entry.operation.toUpperCase() == 'DELETE';
+          await _updateRowSyncState(
+            entry.tableNameColumn,
+            entry.recordId!,
+            serverTime,
+            deleted: isDelete,
+          );
+        } else {
+          rejected++;
+          await outbox.markProcessed(
+            entry.id,
+            error: '$status : '
+                '${verdict?['detail'] ?? 'rejetée par le serveur'}',
+          );
+        }
+      }
+      for (final orphan in orphans) {
+        await outbox.markProcessed(
+          orphan.id,
+          error: 'Création sans id corrélable (protocole v1) — '
+              'rejouez l\'opération en ligne',
+        );
       }
 
       await outbox.clearProcessed();
 
-      final errors = pushResp.conflicts.isEmpty
+      final errors = rejected == 0
           ? const <String>[]
-          : [
-              '${pushResp.conflicts.length} conflit(s) résolu(s) '
-              '(server-wins) — re-pull requis',
-            ];
-
+          : ['$rejected écriture(s) rejetée(s) par le serveur (voir outbox)'];
       return SyncResult(
         pushed: appliedCount,
-        timestamp: pushResp.serverTime,
+        timestamp: serverTime,
         errors: errors,
       );
     } on ApiException catch (e) {
@@ -365,6 +407,18 @@ class SyncEngine {
     DateTime syncedAt,
   ) async {
     if (rows.isEmpty) return;
+
+    // [Fix-PULL-DIRTY] Une ligne locale modifiée (isDirty : édition en
+    // attente dans l'outbox) ne doit PAS être écrasée par le pull :
+    // l'insertOrReplace réécrivait les valeurs serveur ET repoussait
+    // isDirty=false avant que le push ne parte — l'édition était perdue
+    // (« enregistrée en local puis modifications perdues », retour
+    // terrain 2026-11-12). La ligne reviendra au pull suivant, une fois
+    // l'outbox vidée par le push.
+    if (table == 'students') {
+      rows = await _dropDirtyStudents(rows);
+      if (rows.isEmpty) return;
+    }
 
     try {
       await _db.batch((b) {
@@ -869,6 +923,28 @@ class SyncEngine {
     } catch (e) {
       _log.e('Erreur batch upsert table "$table" : $e');
       rethrow;
+    }
+  }
+
+  /// Retire les lignes dont l'élève local est isDirty (en attente de push).
+  Future<List<Map<String, dynamic>>> _dropDirtyStudents(
+    List<Map<String, dynamic>> rows,
+  ) async {
+    try {
+      final ids = rows.map(_rId).where((id) => id > 0).toSet();
+      if (ids.isEmpty) return rows;
+      final dirtyIds = await (_db.select(_db.students)
+            ..where((t) => t.id.isIn(ids) & t.isDirty.equals(true)))
+          .map((row) => row.id)
+          .get();
+      if (dirtyIds.isEmpty) return rows;
+      _log.i('[Fix-PULL-DIRTY] ${dirtyIds.length} élève(s) local(aux) '
+          'modifié(s) préservé(s) du pull (attente de push)');
+      final dirty = dirtyIds.toSet();
+      return rows.where((r) => !dirty.contains(_rId(r))).toList();
+    } catch (e) {
+      _log.w('Filtre isDirty (students) impossible : $e');
+      return rows;
     }
   }
 

@@ -129,18 +129,16 @@ final attendanceControllerProvider =
 // Providers de lecture.
 // ===========================================================================
 
-/// Liste des élèves d'une classe : `GET /students?classroom_id=`.
+/// Liste des élèves d'une classe : `GET /students?classroom_id=`
+/// paginé jusqu'à épuisement.
 final classStudentsProvider = FutureProvider.autoDispose
     .family<List<StudentDto>, int>((ref, classroomId) async {
   final conn = ref.watch(connectionProvider);
   if (!conn.isPaired || conn.serverUrl == null) return const [];
   final dio = ref.watch(dioProvider);
   try {
-    final resp = await dio.get(
-      buildUrl(conn.serverUrl!, ApiEndpoints.students),
-      queryParameters: {'classroom_id': classroomId},
-    );
-    return _parseStudentList(resp.data);
+    return await _fetchAllStudents(dio, conn.serverUrl!,
+        classroomId: classroomId);
   } on DioException catch (e) {
     final api = (e.error is ApiException)
         ? e.error as ApiException
@@ -151,17 +149,14 @@ final classStudentsProvider = FutureProvider.autoDispose
 });
 
 /// Liste de tous les élèves (pour le sélecteur d'historique d'absences) :
-/// `GET /students`.
+/// `GET /students` paginé jusqu'à épuisement.
 final allStudentsProvider =
     FutureProvider.autoDispose<List<StudentDto>>((ref) async {
   final conn = ref.watch(connectionProvider);
   if (!conn.isPaired || conn.serverUrl == null) return const [];
   final dio = ref.watch(dioProvider);
   try {
-    final resp = await dio.get(
-      buildUrl(conn.serverUrl!, ApiEndpoints.students),
-    );
-    return _parseStudentList(resp.data);
+    return await _fetchAllStudents(dio, conn.serverUrl!);
   } on DioException catch (e) {
     final api = (e.error is ApiException)
         ? e.error as ApiException
@@ -170,6 +165,46 @@ final allStudentsProvider =
     rethrow;
   }
 });
+
+/// [Fix-STUDENTS-LIST-TRUNCATED] Le serveur pagine `GET /students`
+/// (défaut 50, max 200 par page) : l'ancien appel sans paramètre ne
+/// renvoyait que la 1re page — une classe de 57 élèves affichait 50
+/// lignes dans la feuille de présence (retour terrain 2026-11-12 : « la
+/// liste de présence n'affiche pas tous les élèves pour des listes
+/// longues »). On demande explicitement des pages de 200 et on boucle
+/// jusqu'à épuisement (garde-fou 30 pages = 6000 élèves).
+Future<List<StudentDto>> _fetchAllStudents(
+  Dio dio,
+  String serverUrl, {
+  int? classroomId,
+}) async {
+  final out = <StudentDto>[];
+  const perPage = 200;
+  var page = 1;
+  while (page <= 30) {
+    final resp = await dio.get(
+      buildUrl(serverUrl, ApiEndpoints.students),
+      queryParameters: {
+        'page': page,
+        'per_page': perPage,
+        if (classroomId != null) 'classroom_id': classroomId,
+      },
+    );
+    final batch = _parseStudentList(resp.data);
+    out.addAll(batch);
+    final total = _parseStudentTotal(resp.data);
+    if (batch.length < perPage || (total > 0 && out.length >= total)) break;
+    page++;
+  }
+  return out;
+}
+
+int _parseStudentTotal(dynamic data) {
+  if (data is Map && data['total'] is num) {
+    return (data['total'] as num).toInt();
+  }
+  return 0;
+}
 
 List<StudentDto> _parseStudentList(dynamic data) {
   if (data is List) {
