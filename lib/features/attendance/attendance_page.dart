@@ -733,7 +733,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
             id: 0,
             courseSessionId: session.id,
             studentId: sid,
-            studentName: d['studentName'] as String?,
+            studentName: d['studentName'] as String? ?? '',
             matricule: d['matricule'] as String?,
             isJustified: (d['isJustified'] as bool?) ?? false,
             reason: d['reason'] as String?,
