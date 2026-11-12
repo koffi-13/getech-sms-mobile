@@ -44,18 +44,24 @@ class DashboardStatsDto {
             0.0,
         totalUsers: (j['total_users'] as num?)?.toInt() ?? 0,
         recentPayments: (j['recent_payments'] as List?)
-                ?.map((e) => DashboardRecentPaymentDto.fromJson(
-                    e as Map<String, dynamic>))
+                ?.map(
+                  (e) => DashboardRecentPaymentDto.fromJson(
+                    e as Map<String, dynamic>,
+                  ),
+                )
                 .toList() ??
             const [],
         recentStudents: (j['recent_students'] as List?)
-                ?.map((e) => DashboardRecentStudentDto.fromJson(
-                    e as Map<String, dynamic>))
+                ?.map(
+                  (e) => DashboardRecentStudentDto.fromJson(
+                    e as Map<String, dynamic>,
+                  ),
+                )
                 .toList() ??
             const [],
       );
     } catch (e) {
-      // Si le format change ou est invalide, on renvoie un objet vide 
+      // Si le format change ou est invalide, on renvoie un objet vide
       // pour éviter de crasher le dashboard.
       return const DashboardStatsDto();
     }
@@ -199,63 +205,227 @@ class OverduePaymentDto {
 // --- Synchro ---
 
 /// Réponse du pull incrémental : `GET /sync/pull?since=<timestamp>`.
+///
+/// [Fix-SYNC-PULL-SHAPE] Le serveur (api/routers/sync.py `PullResponse`)
+/// renvoie RÉELLEMENT :
+/// ```json
+/// {
+///   "server_time": "...",
+///   "max_offline_days": 30,
+///   "tables": {
+///     "students": {"rows": [...], "ids": [1,2,3], "has_more": false},
+///     ...
+///   }
+/// }
+/// ```
+/// L'ancien parseur lisait `changes` / `deleted` — deux champs INEXISTANTS
+/// côté serveur : `changes` était TOUJOURS vide, donc AUCUNE table n'était
+/// jamais répliquée par /sync/pull (le cache Drift ne se remplissait que
+/// par les écritures cache-aside des contrôleurs) — cause directe du
+/// « Aucun élève à noter pour cette évaluation » hors-ligne (chaîne
+/// assessment → class_subject → assignments → students vide en base).
+///
+/// Le nouveau parseur :
+/// - accepte les DEUX formes (`tables` du serveur réel + `changes` legacy) ;
+/// - expose `hasMoreByTable` (pagination `limit_per_table`) ;
+/// - expose `activeIdsByTable` (mode `reconcile=true` : ids actifs serveur,
+///   pour détecter les suppressions côté client).
 class SyncPullResponse {
   final DateTime serverTime;
   final Map<String, List<Map<String, dynamic>>> changes;
   final List<String> deleted; // IDs supprimés côté serveur (soft-delete)
 
+  /// [Fix-SYNC-PULL-SHAPE] `has_more` par table — vrai tant qu'une table
+  /// dépasse `limit_per_table` lignes : le client DOIT paginer.
+  final Map<String, bool> hasMoreByTable;
+
+  /// [Fix-SYNC-PULL-SHAPE] Ids ACTIFS côté serveur (mode reconcile) —
+  /// null quand la table était encore en cours de pagination. Sert à
+  /// marquer localement les lignes disparues (tombstones).
+  final Map<String, List<int>?> activeIdsByTable;
+
   const SyncPullResponse({
     required this.serverTime,
     this.changes = const {},
     this.deleted = const [],
+    this.hasMoreByTable = const {},
+    this.activeIdsByTable = const {},
   });
 
   int get totalChanges =>
       changes.values.fold(0, (sum, list) => sum + list.length);
 
-  factory SyncPullResponse.fromJson(Map<String, dynamic> j) => SyncPullResponse(
-        serverTime: DateFormatter.parse(j['server_time'] as String?) ??
-            DateTime.now().toUtc(),
-        changes: (j['changes'] as Map?)?.map((k, v) => MapEntry(
-              k.toString(),
-              (v as List)
-                  .map((e) => Map<String, dynamic>.from(e as Map))
-                  .toList(),
-            )) ??
-            const {},
-        deleted: List<String>.from(j['deleted'] as List? ?? const []),
-      );
+  /// Au moins une table a encore des pages à récupérer.
+  bool get anyHasMore => hasMoreByTable.values.any((v) => v);
+
+  factory SyncPullResponse.fromJson(Map<String, dynamic> j) {
+    final changes = <String, List<Map<String, dynamic>>>{};
+    final hasMore = <String, bool>{};
+    final activeIds = <String, List<int>?>{};
+
+    // Forme RÉELLE du serveur : `tables: {name: {rows, ids, has_more}}`.
+    final tables = j['tables'];
+    if (tables is Map) {
+      tables.forEach((k, v) {
+        final name = k.toString();
+        if (v is Map) {
+          final rows = v['rows'];
+          changes[name] = (rows is List)
+              ? rows
+                  .whereType<Map>()
+                  .map((e) => Map<String, dynamic>.from(e))
+                  .toList()
+              : const <Map<String, dynamic>>[];
+          hasMore[name] = v['has_more'] == true;
+          // [Fix-SYNC-PULL-SHAPE] `ids` n'est exploitable (réconciliation
+          // des suppressions) QUE si la table est COMPLÈTE : le serveur ne
+          // l'envoie d'ailleurs que quand `has_more` est faux. Par
+          // défense, on ignore `ids` si la table est encore en pagination
+          // (une liste partielle marquerait des lignes saines comme
+          // supprimées).
+          final ids = v['has_more'] == true ? null : v['ids'];
+          activeIds[name] = ids is List
+              ? ids
+                  .map((e) => e is num ? e.toInt() : int.tryParse('$e'))
+                  .whereType<int>()
+                  .toList()
+              : null;
+        }
+      });
+    }
+
+    // Forme legacy (jamais vue en production, gardée par prudence).
+    final legacyChanges = j['changes'];
+    if (legacyChanges is Map && tables is! Map) {
+      legacyChanges.forEach((k, v) {
+        changes[k.toString()] = (v as List)
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+      });
+    }
+
+    return SyncPullResponse(
+      serverTime: DateFormatter.parse(j['server_time'] as String?) ??
+          DateTime.now().toUtc(),
+      changes: changes,
+      deleted: List<String>.from(j['deleted'] as List? ?? const []),
+      hasMoreByTable: hasMore,
+      activeIdsByTable: activeIds,
+    );
+  }
 }
 
 /// Requête de push : `POST /sync/push`.
+/// Contrat RÉEL de `POST /sync/push` (api/routers/sync.py, PushRequest) :
+/// `{device_token?, lines: [{line_id?, op, table, data}]}`.
+///
+/// [Fix-SYNC-PUSH] L'ancien format `{changes: {table: [rows]}}` n'a jamais
+/// correspondu au serveur (422 « field required: lines ») — les écritures
+/// hors-ligne ne se synchronisaient donc jamais.
+///
+/// [Fix-SYNC-IDEMPOTENCE] Le `data` de chaque ligne peut en plus inclure
+/// `idempotency_key` et `device_uuid` pour permettre au serveur de détecter
+/// les doublons en cas de retry réseau (coupure, timeout). Le serveur reste
+/// rétrocompatible : si ces champs sont absents, il applique le LWW
+/// classique (server-wins).
 class SyncPushRequest {
-  final Map<String, List<Map<String, dynamic>>> changes;
+  final List<Map<String, dynamic>> lines;
+  final String? deviceToken;
 
-  const SyncPushRequest({required this.changes});
+  const SyncPushRequest({required this.lines, this.deviceToken});
 
-  Map<String, dynamic> toJson() => {'changes': changes};
+  Map<String, dynamic> toJson() => {
+        if (deviceToken != null) 'device_token': deviceToken,
+        'lines': lines,
+      };
+
+  /// [Fix-SYNC-IDEMPOTENCE] Construit une requête de push avec les clés
+  /// d'idempotence injectées dans le `data` de chaque ligne.
+  ///
+  /// [deviceUuid] : UUID v4 de l'appareil courant (généré au pairing).
+  /// Pour chaque ligne dont le `data` (Map) n'a pas déjà une
+  /// `idempotency_key`, on en génère une nouvelle (UUID v4) et on
+  /// l'associe au device_uuid.
+  factory SyncPushRequest.withIdempotency({
+    required List<Map<String, dynamic>> lines,
+    String? deviceToken,
+    required String deviceUuid,
+    required String Function() generateIdempotencyKey,
+  }) {
+    final enriched = lines.map((line) {
+      final copy = Map<String, dynamic>.from(line);
+      final data = copy['data'];
+      if (data is Map) {
+        final dataCopy = Map<String, dynamic>.from(data);
+        // Injecter device_uuid si absent
+        dataCopy.putIfAbsent('device_uuid', () => deviceUuid);
+        // Injecter idempotency_key si absent (UUID v4 généré)
+        dataCopy.putIfAbsent('idempotency_key', generateIdempotencyKey);
+        copy['data'] = dataCopy;
+      }
+      return copy;
+    }).toList();
+    return SyncPushRequest(lines: enriched, deviceToken: deviceToken);
+  }
 }
 
-/// Réponse du push (résultat par table + conflits éventuels).
+/// Résultat par ligne (PushLineResult côté serveur).
+class SyncPushLineResultDto {
+  final String? lineId;
+  final String table;
+  final String status; // applied | conflict_server_wins | invalid |
+  // unknown_table | error | queued_for_validation
+  final int? rowId;
+  final String? detail;
+
+  const SyncPushLineResultDto({
+    this.lineId,
+    required this.table,
+    required this.status,
+    this.rowId,
+    this.detail,
+  });
+
+  factory SyncPushLineResultDto.fromJson(Map<String, dynamic> j) =>
+      SyncPushLineResultDto(
+        lineId: j['line_id'] as String?,
+        table: j['table'] as String? ?? '',
+        status: j['status'] as String? ?? 'error',
+        rowId: (j['row_id'] as num?)?.toInt(),
+        detail: j['detail'] as String?,
+      );
+}
+
+/// Réponse du push (PushResponse côté serveur).
 class SyncPushResponse {
   final DateTime serverTime;
-  final Map<String, int> applied; // table -> count
-  final List<String> conflicts; // server-wins : IDs ignorés
+  final int accepted;
+  final List<SyncPushLineResultDto> results;
 
   const SyncPushResponse({
     required this.serverTime,
-    this.applied = const {},
-    this.conflicts = const [],
+    this.accepted = 0,
+    this.results = const [],
   });
 
   factory SyncPushResponse.fromJson(Map<String, dynamic> j) => SyncPushResponse(
         serverTime: DateFormatter.parse(j['server_time'] as String?) ??
             DateTime.now().toUtc(),
-        applied: Map<String, int>.from(
-          (j['applied'] as Map?)?.map(
-                  (k, v) => MapEntry(k.toString(), (v as num).toInt())) ??
-              const {},
-        ),
-        conflicts: List<String>.from(j['conflicts'] as List? ?? const []),
+        accepted: (j['accepted'] as num?)?.toInt() ?? 0,
+        results: ((j['results'] as List?) ?? const [])
+            .whereType<Map>()
+            .map(
+              (e) =>
+                  SyncPushLineResultDto.fromJson(Map<String, dynamic>.from(e)),
+            )
+            .toList(),
       );
+
+  SyncPushLineResultDto? resultFor(String? lineId) {
+    if (lineId == null) return null;
+    for (final r in results) {
+      if (r.lineId == lineId) return r;
+    }
+    return null;
+  }
 }

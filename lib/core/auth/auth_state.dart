@@ -4,12 +4,26 @@
 /// Dio le lit via `ref.read(authProvider).token` à chaque requête.
 library;
 
-import 'package:dio/dio.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'dart:async';
+import 'dart:convert';
 
-import '../../shared/models/auth_dto.dart' show LoginRequest, LoginResponse, MeResponse, ChangePasswordRequest, UserDto, EstablishmentDto, RoleBrief;
+import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../shared/models/auth_dto.dart'
+    show
+        LoginRequest,
+        LoginResponse,
+        MeResponse,
+        ChangePasswordRequest,
+        UserDto,
+        EstablishmentDto,
+        RoleBrief;
 import '../../features/connections/connection_state.dart';
 import '../config/app_config.dart';
+import '../config/constants.dart';
 import '../network/api_endpoints.dart';
 import '../network/api_exceptions.dart';
 import '../network/dio_client.dart';
@@ -35,8 +49,30 @@ class AuthState {
     this.error,
   });
 
-  bool get isAuthenticated => token != null && token!.isNotEmpty && user != null;
+  bool get isAuthenticated =>
+      token != null && token!.isNotEmpty && user != null;
   bool get isSuperuser => permissions.contains('*');
+
+  bool get hasDeclaredTeacherRole =>
+      roles.any(
+        (r) =>
+            r == RoleCodes.teacher ||
+            r == RoleCodes.admin ||
+            r == RoleCodes.headmaster,
+      ) ||
+      user?.role?.toUpperCase() == 'TEACHER';
+
+  bool get isTeacherOnly => hasDeclaredTeacherRole && !isAdminOrHeadmaster;
+
+  bool get isAdminOrHeadmaster =>
+      isSuperuser ||
+      roles.any(
+        (r) => r == RoleCodes.admin || r == RoleCodes.headmaster,
+      ) ||
+      permissions.contains('ADMIN') ||
+      permissions.contains('HEADMASTER') ||
+      user?.role?.toUpperCase() == 'ADMIN' ||
+      user?.role?.toUpperCase() == 'HEADMASTER';
 
   AuthState copyWith({
     UserDto? user,
@@ -62,8 +98,9 @@ class AuthState {
 }
 
 /// Provider d'authentification.
-final authProvider =
-    NotifierProvider<AuthNotifier, AuthState>(AuthNotifier.new);
+final authProvider = NotifierProvider<AuthNotifier, AuthState>(
+  AuthNotifier.new,
+);
 
 class AuthNotifier extends Notifier<AuthState> {
   @override
@@ -75,12 +112,90 @@ class AuthNotifier extends Notifier<AuthState> {
   Dio get _dio => ref.read(dioProvider);
   SecureStorage get _storage => ref.read(secureStorageProvider);
 
+  String get _profileId => ref.read(connectionProvider).profileId ?? 'default';
   String? get _serverUrl => ref.read(connectionProvider).serverUrl;
 
+  Future<void> _persistSessionSnapshot(
+    LoginResponse login, {
+    required String username,
+    required String password,
+  }) async {
+    final profileId = _profileId;
+    final payload = {
+      'user': login.user.toJson(),
+      'permissions': login.permissions,
+      'roles': login.roles.map((r) => r.code).toList(),
+      'establishmentId': login.establishment?.id,
+    };
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('session_snapshot_$profileId', jsonEncode(payload));
+    // [Fix-SERVER-DATA-LEAK] V17 — écriture PAR PROFIL uniquement. Les
+    // clés globales legacy (`getech.jwt`, `getech.credentials`) ne sont
+    // PLUS alimentées : elles servaient à restaurer le token d'un AUTRE
+    // serveur après une bascule (« l'application tente toujours de se
+    // diriger vers l'ancien » — retour S4).
+    await _storage.saveJwtFor(profileId, login.accessToken);
+    await _storage.saveCredentialsFor(profileId, username, password);
+    // Nettoyage best-effort des clés legacy globales (si présentes d'une
+    // version antérieure) pour qu'aucune donnée d'un autre serveur ne
+    // puisse être restaurée.
+    try {
+      await _storage.deleteLegacyGlobalKeys();
+    } catch (_) {}
+  }
+
+  Future<AuthState?> _restoreSessionFromSnapshot() async {
+    final profileId = _profileId;
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('session_snapshot_$profileId');
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final map = Map<String, dynamic>.from(jsonDecode(raw) as Map);
+      final user = UserDto.fromJson(
+        Map<String, dynamic>.from(map['user'] as Map? ?? const {}),
+      );
+      final roles =
+          (map['roles'] as List? ?? const []).map((e) => e.toString()).toList();
+      final permissions = (map['permissions'] as List? ?? const [])
+          .map((e) => e.toString())
+          .toList();
+      final establishmentId = (map['establishmentId'] as num?)?.toInt();
+      // [Fix-SERVER-DATA-LEAK] V17 — JWT du PROFIL uniquement (jamais la
+      // clé globale legacy, qui peut appartenir à un autre serveur).
+      final token = await _storage.getJwtFor(profileId);
+      if (token == null || token.isEmpty) return null;
+      return AuthState(
+        token: token,
+        user: user,
+        permissions: permissions,
+        roles: roles,
+        establishmentId: establishmentId,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Restaure la session JWT depuis le stockage sécurisé au démarrage.
+  ///
+  /// [Fix-SERVER-DATA-LEAK] V17 — ne lit PLUS la clé JWT globale legacy
+  /// (`getech.jwt`) : elle peut contenir le token d'un AUTRE serveur (ex :
+  /// production) envoyé ensuite au serveur actif (ex : développement) →
+  /// « User not found » / 500 incohérents après un re-appairage. On lit
+  /// UNIQUEMENT la clé du profil actif ; la clé globale n'est plus écrite
+  /// ([_persistSessionSnapshot]) et est purgée à la déconnexion.
   Future<void> _restoreSession() async {
-    final token = await _storage.getJwt();
-    if (token == null || token.isEmpty) return;
+    final profileToken = await _storage.getJwtFor(_profileId);
+    final token = (profileToken != null && profileToken.isNotEmpty)
+        ? profileToken
+        : await _restoreSessionFromSnapshot().then((s) => s?.token);
+    if (token == null || token.isEmpty) {
+      final snapshot = await _restoreSessionFromSnapshot();
+      if (snapshot != null) {
+        state = snapshot;
+      }
+      return;
+    }
     state = state.copyWith(token: token);
     // Vérifie la validité du token via /auth/me.
     await fetchMe();
@@ -93,9 +208,19 @@ class AuthNotifier extends Notifier<AuthState> {
     required String establishmentCode,
   }) async {
     if (_serverUrl == null) {
-      state = state.copyWith(error: 'Aucun serveur configuré. Appairez d\'abord un terminal.');
+      state = state.copyWith(
+        error: 'Aucun serveur configuré. Appairez d\'abord un terminal.',
+      );
       return false;
     }
+    // [Fix-LOGIN-FAST-FAIL-REVERT] Plus d'« échec immédiat » fondé sur le
+    // statut de connexion : ce statut est ASYNCHRONE et potentiellement
+    // périmé (premier ping tombé pendant le démarrage lent du serveur,
+    // micro-coupure Wi-Fi, re-appairage tout juste effacé le snapshot de
+    // session). Le refus d'office affichait « Serveur injoignable » alors
+    // que le serveur répondait très bien — la requête RÉELLE est le seul
+    // juge de paix : on la tente toujours (8 s max, cf. Fix-LOGIN-20S),
+    // avec repli hors-ligne si un snapshot existe (ci-dessous).
     state = state.copyWith(isLoading: true, clearError: true);
     try {
       final resp = await _dio.post(
@@ -107,8 +232,11 @@ class AuthNotifier extends Notifier<AuthState> {
         ).toJson(),
       );
       final login = LoginResponse.fromJson(resp.data as Map<String, dynamic>);
-      await _storage.saveJwt(login.accessToken);
-      await _storage.saveCredentials(username, password);
+      await _persistSessionSnapshot(
+        login,
+        username: username,
+        password: password,
+      );
       state = state.copyWith(
         token: login.accessToken,
         user: login.user,
@@ -117,13 +245,62 @@ class AuthNotifier extends Notifier<AuthState> {
         establishmentId: login.establishment?.id,
         isLoading: false,
       );
+      // [Fix-LOGIN-REFRESH-STATE] Le login vient de RÉUSSIR : le serveur
+      // répond. Si l'état de connexion affiche encore « injoignable »
+      // (statut périmé d'un ping tombé avant le réveil du serveur), le
+      // dashboard se serait ouvert avec un bandeau « mode hors-ligne »
+      // mensonger en attendant le prochain battement (jusqu'à 30 s).
+      // Re-ping immédiat → la carte reflète la réalité tout de suite.
+      unawaited(ref.read(connectionProvider.notifier).checkStatus());
       return true;
     } on DioException catch (e) {
+      final profileId = _profileId;
+      // [Fix-SERVER-DATA-LEAK] V17 — credentials du PROFIL actif
+      // uniquement (jamais la clé globale legacy d'un autre serveur).
+      final stored = await _storage.getCredentialsFor(profileId);
+      final snapshot = await _restoreSessionFromSnapshot();
+      final isNetworkProblem = e.type == DioExceptionType.connectionError ||
+          e.type == DioExceptionType.connectionTimeout ||
+          e.type == DioExceptionType.receiveTimeout ||
+          e.type == DioExceptionType.sendTimeout ||
+          e.response == null;
+      if (isNetworkProblem && snapshot != null && stored != null) {
+        final credsMatch =
+            stored.username == username && stored.password == password;
+        if (credsMatch) {
+          state = state.copyWith(
+            token: snapshot.token,
+            user: snapshot.user,
+            permissions: snapshot.permissions,
+            roles: snapshot.roles,
+            establishmentId: snapshot.establishmentId,
+            isLoading: false,
+            error: null,
+          );
+          return true;
+        }
+      }
+      // [Fix-AUTH] Logger l'erreur complète pour diagnostic.
+      debugPrint(
+        '[AUTH] Login DioException: type=${e.type}, message=${e.message}, '
+        'error=${e.error}, statusCode=${e.response?.statusCode}, '
+        'response=${e.response?.data}',
+      );
       // Message d'erreur actionnable pour les problèmes réseau courants.
-      final msg = _humanizeDioError(e, _serverUrl!);
+      final msg = _humanizeDioError(e, _serverUrl ?? '');
       state = state.copyWith(isLoading: false, error: msg);
+      // [Fix-LOGIN-REFRESH-STATE] Échec réseau : re-ping immédiat pour
+      // trancher l'état RÉEL du serveur (le heartbeat ne repasse que
+      // toutes les 30 s). Si le serveur répond enfin — c'est souvent le
+      // cas au login car l'utilisateur vient de le relancer — la carte
+      // « Serveur injoignable » disparaît immédiatement au lieu de
+      // rester affichée jusqu'au prochain battement.
+      if (isNetworkProblem) {
+        unawaited(ref.read(connectionProvider.notifier).checkStatus());
+      }
       return false;
     } catch (e) {
+      debugPrint('[AUTH] Login unexpected error: $e');
       state = state.copyWith(isLoading: false, error: e.toString());
       return false;
     }
@@ -156,8 +333,14 @@ class AuthNotifier extends Notifier<AuthState> {
         final code = e.response?.statusCode;
         if (code == 401) return 'Nom d\'utilisateur ou mot de passe incorrect.';
         if (code == 403) return 'Accès refusé. Permissions insuffisantes.';
-        if (code == 404) return 'Endpoint introuvable (404). L\'API du serveur '
-            'desktop ne correspond peut-être pas à la version attendue.';
+        if (code == 404) {
+          return 'Endpoint introuvable (404). L\'API du serveur '
+              'desktop ne correspond peut-être pas à la version attendue.';
+        }
+        if (code == 422) {
+          final apiError = dioErrorToApiException(e);
+          return 'Requête de connexion invalide : ${apiError.message}';
+        }
         return 'Erreur serveur ($code).';
       case DioExceptionType.badCertificate:
         return 'Problème de certificat TLS.';
@@ -165,7 +348,19 @@ class AuthNotifier extends Notifier<AuthState> {
         return 'Requête annulée.';
       case DioExceptionType.unknown:
       default:
-        return 'Erreur réseau inconnue : ${e.message}';
+        // [Fix-AUTH] Inclure e.error (l'exception sous-jacente) car e.message
+        // est souvent null pour les erreurs socket (connection refused, reset,
+        // server crash). Sans cela, l'utilisateur voit "null" sans info utile.
+        final underlying = e.error?.toString() ?? e.message ?? 'Aucun détail';
+        // Si l'erreur sous-jacente est une ApiException, extraire son message.
+        if (e.error is ApiException) {
+          return (e.error as ApiException).message;
+        }
+        // Tronquer les erreurs trop longues (stack traces de socket).
+        final short = underlying.length > 200
+            ? '${underlying.substring(0, 200)}...'
+            : underlying;
+        return 'Erreur réseau : $short';
     }
   }
 
@@ -175,7 +370,8 @@ class AuthNotifier extends Notifier<AuthState> {
     try {
       final resp = await _dio.get(buildUrl(_serverUrl!, ApiEndpoints.authMe));
       final me = MeResponse.fromJson(
-          Map<String, dynamic>.from(resp.data as Map));
+        Map<String, dynamic>.from(resp.data as Map),
+      );
       state = state.copyWith(
         user: me.user,
         permissions: me.permissions,
@@ -210,15 +406,25 @@ class AuthNotifier extends Notifier<AuthState> {
       );
       return true;
     } on DioException catch (e) {
-      final api = (e.error is ApiException) ? e.error as ApiException : dioErrorToApiException(e);
+      final api = (e.error is ApiException)
+          ? e.error as ApiException
+          : dioErrorToApiException(e);
       state = state.copyWith(error: api.message);
       return false;
     }
   }
 
   /// Déconnexion locale (efface le JWT).
+  ///
+  /// [Fix-SERVER-DATA-LEAK] V17 — efface le JWT DU PROFIL (et non plus
+  /// uniquement la clé globale) + purge les clés globales legacy pour
+  /// qu'aucune session d'un autre serveur ne soit restaurée ensuite.
   Future<void> logoutLocal() async {
-    await _storage.deleteJwt();
+    try {
+      final profileId = _profileId;
+      await _storage.deleteJwtFor(profileId);
+      await _storage.deleteLegacyGlobalKeys();
+    } catch (_) {}
     state = const AuthState();
   }
 
@@ -235,9 +441,24 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   /// Appelé par l'interceptor Dio en cas de 401.
-  void handleUnauthorized() {
-    if (state.token != null) {
-      logoutLocal();
+  Future<void> handleUnauthorized() async {
+    if (state.token == null) return;
+
+    // [Fix-SERVER-DATA-LEAK] V17 — credentials du PROFIL actif uniquement :
+    // le refresh doit aller au serveur du profil courant, jamais vers
+    // l'ancien serveur avec des identifiants d'un autre.
+    final profileId = _profileId;
+    final saved = await _storage.getCredentialsFor(profileId);
+    final estabCode = ref.read(connectionProvider).establishmentCode ?? '';
+    if (saved != null && estabCode.isNotEmpty) {
+      final ok = await login(
+        username: saved.username,
+        password: saved.password,
+        establishmentCode: estabCode,
+      );
+      if (ok) return;
     }
+
+    await logoutLocal();
   }
 }

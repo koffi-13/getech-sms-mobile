@@ -9,10 +9,12 @@ import '../config/app_config.dart';
 /// Service de stockage sécurisé (Android Keystore / iOS Keychain).
 class SecureStorage {
   SecureStorage({FlutterSecureStorage? storage})
-      : _storage = storage ?? const FlutterSecureStorage(
-          aOptions: AndroidOptions(encryptedSharedPreferences: true),
-          iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
-        );
+      : _storage = storage ??
+            const FlutterSecureStorage(
+              aOptions: AndroidOptions(encryptedSharedPreferences: true),
+              iOptions:
+                  IOSOptions(accessibility: KeychainAccessibility.first_unlock),
+            );
 
   final FlutterSecureStorage _storage;
 
@@ -21,6 +23,51 @@ class SecureStorage {
   Future<void> write(String key, String value) =>
       _storage.write(key: key, value: value);
   Future<void> delete(String key) => _storage.delete(key: key);
+
+  // --- Clés PAR PROFIL DE SERVEUR (multi-serveurs) ---
+
+  /// Clé suffixée par l'id de profil : `getech.jwt.srv_123-abc`.
+  String profileKey(String base, String profileId) => '$base.$profileId';
+
+  Future<String?> getJwtFor(String profileId) =>
+      _storage.read(key: profileKey(AppConfig.keyJwt, profileId));
+  Future<void> saveJwtFor(String profileId, String token) => _storage.write(
+        key: profileKey(AppConfig.keyJwt, profileId),
+        value: token,
+      );
+  Future<void> deleteJwtFor(String profileId) =>
+      _storage.delete(key: profileKey(AppConfig.keyJwt, profileId));
+
+  Future<String?> getDeviceTokenFor(String profileId) =>
+      _storage.read(key: profileKey(AppConfig.keyDeviceToken, profileId));
+  Future<void> saveDeviceTokenFor(String profileId, String token) =>
+      _storage.write(
+        key: profileKey(AppConfig.keyDeviceToken, profileId),
+        value: token,
+      );
+
+  Future<({String username, String password})?> getCredentialsFor(
+    String profileId,
+  ) async {
+    final raw = await _storage.read(
+      key: profileKey(AppConfig.keyCredentials, profileId),
+    );
+    if (raw == null || !raw.contains(':::')) return null;
+    final parts = raw.split(':::');
+    return (username: parts[0], password: parts[1]);
+  }
+
+  Future<void> saveCredentialsFor(
+    String profileId,
+    String username,
+    String password,
+  ) =>
+      _storage.write(
+        key: profileKey(AppConfig.keyCredentials, profileId),
+        value: '$username:::$password',
+      );
+
+  // --- Accès legacy (mono-serveur : migration uniquement) ---
 
   Future<String?> getJwt() => _storage.read(key: AppConfig.keyJwt);
   Future<void> saveJwt(String token) =>
@@ -43,7 +90,8 @@ class SecureStorage {
 
   Future<String?> getPairingToken() => getDeviceToken();
   Future<void> savePairingToken(String token) => saveDeviceToken(token);
-  Future<void> deletePairingToken() => _storage.delete(key: AppConfig.keyDeviceToken);
+  Future<void> deletePairingToken() =>
+      _storage.delete(key: AppConfig.keyDeviceToken);
 
   Future<String?> getDeviceId() => _storage.read(key: AppConfig.keyDeviceId);
   Future<void> saveDeviceId(String id) =>
@@ -55,8 +103,10 @@ class SecureStorage {
     return DateTime.tryParse(s);
   }
 
-  Future<void> saveLastSync(DateTime dt) =>
-      _storage.write(key: AppConfig.keyLastSync, value: dt.toUtc().toIso8601String());
+  Future<void> saveLastSync(DateTime dt) => _storage.write(
+        key: AppConfig.keyLastSync,
+        value: dt.toUtc().toIso8601String(),
+      );
 
   /// Efface toutes les données d'authentification (déconnexion / désappairage).
   Future<void> clearAuth() async {
@@ -70,6 +120,10 @@ class SecureStorage {
   }
 
   /// Stocke les credentials (pour reconnexion automatique, optionnel).
+  ///
+  /// [Fix-SERVER-DATA-LEAK] V17 — plus utilisé en écriture (voir
+  /// [saveCredentialsFor] par profil) ; conservé pour la migration et les
+  /// tests uniquement.
   Future<void> saveCredentials(String username, String password) =>
       _storage.write(
         key: AppConfig.keyCredentials,
@@ -81,5 +135,17 @@ class SecureStorage {
     if (raw == null || !raw.contains(':::')) return null;
     final parts = raw.split(':::');
     return (username: parts[0], password: parts[1]);
+  }
+
+  /// [Fix-SERVER-DATA-LEAK] V17 — nom de la clé credentials globale
+  /// (lecture/suppression uniquement, plus jamais écrite en production).
+  String get credentialsKey => AppConfig.keyCredentials;
+
+  /// [Fix-SERVER-DATA-LEAK] V17 — supprime les clés GLOBALES legacy
+  /// (JWT + credentials) : elles peuvent contenir le token d'un AUTRE
+  /// serveur et étaient restaurées à tort après une bascule de profil.
+  Future<void> deleteLegacyGlobalKeys() async {
+    await _storage.delete(key: AppConfig.keyJwt);
+    await _storage.delete(key: AppConfig.keyCredentials);
   }
 }

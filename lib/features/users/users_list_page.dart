@@ -27,6 +27,7 @@ class UsersListPage extends ConsumerStatefulWidget {
 class _UsersListPageState extends ConsumerState<UsersListPage> {
   /// Texte affiché dans la barre de recherche (mis à jour immédiatement).
   String _searchText = '';
+
   /// Requête réellement transmise au provider (mise à jour après debounce).
   String _searchQuery = '';
   DateTime? _lastSearchAt;
@@ -162,9 +163,11 @@ class _OfflineBanner extends ConsumerWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         child: Row(
           children: [
-            Icon(Icons.cloud_off,
-                size: 18,
-                color: Theme.of(context).colorScheme.onSecondaryContainer),
+            Icon(
+              Icons.cloud_off,
+              size: 18,
+              color: Theme.of(context).colorScheme.onSecondaryContainer,
+            ),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -257,10 +260,10 @@ class _UserTile extends ConsumerWidget {
                       ),
                       overflow: TextOverflow.ellipsis,
                     ),
-                    if (user.email != null && user.email!.isNotEmpty) ...[
+                    if (user.email.isNotEmpty) ...[
                       const SizedBox(height: 2),
                       Text(
-                        user.email!,
+                        user.email,
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,
                         ),
@@ -296,7 +299,10 @@ class _UserTile extends ConsumerWidget {
                 ),
               ),
               const SizedBox(width: 4),
-              Icon(Icons.chevron_right, color: theme.colorScheme.onSurfaceVariant),
+              Icon(
+                Icons.chevron_right,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ],
           ),
         ),
@@ -413,11 +419,11 @@ class _UserDetailSheet extends ConsumerWidget {
               label: 'Identifiant',
               value: user.username,
             ),
-            if (user.email != null && user.email!.isNotEmpty)
+            if (user.email.isNotEmpty)
               _DetailRow(
                 icon: Icons.mail_outline,
                 label: 'Email',
-                value: user.email!,
+                value: user.email,
               ),
             if (user.phone != null && user.phone!.isNotEmpty)
               _DetailRow(

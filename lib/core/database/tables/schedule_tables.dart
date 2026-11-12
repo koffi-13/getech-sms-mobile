@@ -60,6 +60,11 @@ class StudentAbsences extends Table {
   DateTimeColumn get syncedAt => dateTime().nullable()();
   BoolColumn get isDirty => boolean().withDefault(const Constant(false))();
   BoolColumn get isDeleted => boolean().withDefault(const Constant(false))();
+
+  // [Fix-SYNC-IDEMPOTENCE] Champs pour la synchronisation offline-first.
+  TextColumn get idempotencyKey => text().nullable()();
+  TextColumn get deviceUuid => text().nullable()();
+  IntColumn get syncVersion => integer().withDefault(const Constant(0))();
 }
 
 /// Cahier de texte (contenu du cours + devoirs).

@@ -71,9 +71,11 @@ class _SubjectFormPageState extends ConsumerState<SubjectFormPage> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(isEdit
-                ? 'Matière mise à jour avec succès.'
-                : 'Matière créée avec succès.'),
+            content: Text(
+              isEdit
+                  ? 'Matière mise à jour avec succès.'
+                  : 'Matière créée avec succès.',
+            ),
           ),
         );
         context.pop();
@@ -198,7 +200,8 @@ class _SubjectFormPageState extends ConsumerState<SubjectFormPage> {
                     Text(
                       'Le code est optionnel mais recommandé pour identifier rapidement la matière (recherche, bulletins).',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                            color:
+                                Theme.of(context).colorScheme.onSurfaceVariant,
                           ),
                     ),
                   ],

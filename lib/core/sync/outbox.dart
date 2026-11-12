@@ -63,11 +63,18 @@ class Outbox {
   }
 
   /// Retourne la liste des entrées non traitées, triées par date de création
-  /// décroissante (plus récentes en premier).
+  /// CROISSANTE (plus anciennes en premier).
+  ///
+  /// [Fix-OUTBOX-ORDER] Avant : DESC — le rejeu rejouait la MODIF (plus
+  /// récente) AVANT la CRÉATION (plus ancienne) d'un élève créé hors-ligne
+  /// puis modifié : le PATCH devenait POST, créait l'élève côté serveur,
+  /// puis le POST original créait une SECONDE ligne (matricule vide →
+  /// auto-généré différent) → élève dupliqué. L'ordre chronologique
+  /// garantit CREATE puis UPDATE.
   Future<List<OutboxEntry>> pending() async {
     final query = _db.select(_db.outboxEntries)
       ..where((t) => t.processed.equals(false))
-      ..orderBy([(t) => OrderingTerm.desc(t.createdAt)]);
+      ..orderBy([(t) => OrderingTerm.asc(t.createdAt)]);
     return query.get();
   }
 
@@ -107,9 +114,12 @@ class Outbox {
   }
 }
 
-/// Provider Riverpod de l'outbox (singleton lié à la base de données).
+/// Provider Riverpod de l'outbox.
+///
+/// WATCH la base : lors d'une bascule de serveur, l'outbox est recréé sur
+/// la base du nouveau profil.
 final outboxProvider = Provider<Outbox>((ref) {
-  return Outbox(ref.read(databaseProvider));
+  return Outbox(ref.watch(databaseProvider));
 });
 
 /// Provider exposant les entrées en attente de l'outbox.

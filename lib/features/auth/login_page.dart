@@ -46,8 +46,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
   void _ensurePrefilledCode() {
     if (_establishmentCodeCtrl.text.isNotEmpty) return;
     final conn = ref.read(connectionProvider);
-    if (conn.establishmentCode != null &&
-        conn.establishmentCode!.isNotEmpty) {
+    if (conn.establishmentCode != null && conn.establishmentCode!.isNotEmpty) {
       _establishmentCodeCtrl.text = conn.establishmentCode!;
     }
   }
@@ -78,10 +77,14 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     final conn = ref.watch(connectionProvider);
     final theme = Theme.of(context);
 
-    final serverUnreachable =
-        conn.status == ServerStatus.offline ||
-            conn.status == ServerStatus.unpaired ||
-            conn.forceOffline;
+    final serverUnreachable = conn.status == ServerStatus.offline ||
+        conn.status == ServerStatus.unpaired ||
+        conn.forceOffline;
+    // [Fix-PAIRING-STUCK-OFFLINE] V26 — en mode « appairage différé » le
+    // serveur peut très bien être revenu en ligne (le heartbeat relâche le
+    // mode dès qu'il répond) : ne pas verrouiller le login « hors ligne »
+    // sur ce mode transitoire — la vraie tentative réseau tranche.
+    final showOfflineHint = serverUnreachable && !conn.pairingForcedOffline;
 
     return Scaffold(
       body: SafeArea(
@@ -130,10 +133,26 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                     ),
                     const SizedBox(height: 24),
 
-                    // Bandeau serveur injoignable.
-                    if (serverUnreachable) ...[
+                    // Bandeau serveur injoignable (masqué en mode
+                    // « appairage différé » : le serveur peut être revenu).
+                    if (showOfflineHint) ...[
                       _UnreachableBanner(
-                        onManageConnections: () => context.push('/connections'),
+                        // [Fix-UNREACHABLE-BANNER-CAUSE] Un seul message
+                        // générique « Serveur injoignable » pour trois
+                        // situations très différentes : l'utilisateur
+                        // croyait le serveur en panne alors que c'était
+                        // un simple mode forcé activé aux Réglages.
+                        message: conn.status == ServerStatus.unpaired
+                            ? 'Aucun serveur appairé — appairez ce poste '
+                              'depuis le module Connexions du desktop.'
+                            : conn.forceOffline
+                                ? 'Mode hors-ligne forcé activé '
+                                  '(Réglages → Serveur local) — '
+                                  'désactivez-le pour vous reconnecter.'
+                                : 'Serveur injoignable — vérifiez le module '
+                                  'Connexions.',
+                        onManageConnections: () =>
+                            context.push('/connections'),
                       ),
                       const SizedBox(height: 16),
                     ],
@@ -173,8 +192,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                               textInputAction: TextInputAction.next,
                               decoration: InputDecoration(
                                 labelText: 'Mot de passe',
-                                prefixIcon:
-                                    const Icon(Icons.lock_outline),
+                                prefixIcon: const Icon(Icons.lock_outline),
                                 border: const OutlineInputBorder(),
                                 suffixIcon: IconButton(
                                   tooltip: _obscurePassword
@@ -185,8 +203,9 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                                         ? Icons.visibility_outlined
                                         : Icons.visibility_off_outlined,
                                   ),
-                                  onPressed: () => setState(() =>
-                                      _obscurePassword = !_obscurePassword),
+                                  onPressed: () => setState(
+                                    () => _obscurePassword = !_obscurePassword,
+                                  ),
                                 ),
                               ),
                               validator: (v) => (v == null || v.isEmpty)
@@ -196,8 +215,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                             const SizedBox(height: 14),
                             TextFormField(
                               controller: _establishmentCodeCtrl,
-                              textCapitalization:
-                                  TextCapitalization.characters,
+                              textCapitalization: TextCapitalization.characters,
                               textInputAction: TextInputAction.done,
                               decoration: const InputDecoration(
                                 labelText: 'Code établissement',
@@ -253,8 +271,14 @@ class _LoginPageState extends ConsumerState<LoginPage> {
 }
 
 /// Bandeau "Serveur injoignable" affiché en haut du formulaire.
+/// [Fix-UNREACHABLE-BANNER-CAUSE] Le message précise la cause réelle
+/// (non appairé / mode forcé / injoignable) — cf. site d'appel.
 class _UnreachableBanner extends StatelessWidget {
-  const _UnreachableBanner({required this.onManageConnections});
+  const _UnreachableBanner({
+    required this.message,
+    required this.onManageConnections,
+  });
+  final String message;
   final VoidCallback onManageConnections;
 
   @override
@@ -273,14 +297,17 @@ class _UnreachableBanner extends StatelessWidget {
           const SizedBox(width: 10),
           Expanded(
             child: Text(
-              'Serveur injoignable — vérifiez le module Connexions.',
+              message,
               style: theme.textTheme.bodySmall?.copyWith(
                 color: Colors.orange.shade800,
                 fontWeight: FontWeight.w500,
               ),
             ),
           ),
-          TextButton(onPressed: onManageConnections, child: const Text('Ouvrir')),
+          TextButton(
+            onPressed: onManageConnections,
+            child: const Text('Ouvrir'),
+          ),
         ],
       ),
     );

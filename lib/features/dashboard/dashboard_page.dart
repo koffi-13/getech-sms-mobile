@@ -14,65 +14,168 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/auth/auth_state.dart';
+import '../../core/auth/teacher_scope.dart';
 import '../../core/config/constants.dart';
+import '../../core/notifications/notification_service.dart';
+import '../../core/notifications/notification_store.dart';
 import '../../core/sync/sync_engine.dart';
 import '../../core/utils/formatters.dart';
+import '../../core/utils/permissions.dart';
 import '../connections/connection_state.dart';
+import '../../shared/models/attendance_dto.dart' show WeeklyScheduleDto;
 import '../../shared/models/sync_dto.dart';
 import '../../shared/widgets/widgets.dart';
 import 'dashboard_controller.dart';
 
-/// Page racine après connexion : vue d'ensemble de l'établissement.
+/// Page racine après connexion : vue d'ensemble.
+///
+/// - **Enseignant** : statistiques de SES classes uniquement (effectifs,
+///   matières, cours du jour) — aucune donnée financière ni globale.
+/// - **Autres profils** : KPIs de l'établissement ; les tuiles financières
+///   (Paiements, Solde dû) ne sont affichées qu'avec la permission
+///   PAYMENT_READ, et la tuile Utilisateurs avec USER_READ.
 class DashboardPage extends ConsumerWidget {
   const DashboardPage({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final conn = ref.watch(connectionProvider);
+    final auth = ref.watch(authProvider);
+    final scopeAsync = ref.watch(teacherScopeProvider);
     final statsAsync = ref.watch(dashboardStatsProvider);
     final isOffline = !conn.canReachServer;
+
+    // L'accueil d'un enseignant est totalement différent : statistiques de
+    // ses classes uniquement, sans appel à /dashboard/stats (qui n'est pas
+    // scopé par rôle et exposerait des données financières).
+    //
+    // [Fix-TEACHER-DASHBOARD] Durcissement de la détection : tant que le
+    // scope n'a pas tranché (chargement/erreur) ET qu'aucun rôle TEACHER
+    // n'est déclaré, on affiche un état d'attente — JAMAIS la vue générique
+    // (qui contient paiements récents + élèves récemment inscrits).
+    final declared = auth.hasDeclaredTeacherRole;
+    final scopeIsTeacher = scopeAsync.maybeWhen(
+      data: (s) => s.isTeacher,
+      orElse: () => false,
+    );
+    final isTeacher = !auth.isAdminOrHeadmaster && (declared || scopeIsTeacher);
+    final scopePending =
+        !auth.isAdminOrHeadmaster && !declared && !scopeAsync.hasValue;
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Tableau de bord'),
-        actions: [
+        actions: const [
+          // [Notif-V8] Cloche du Centre de notifications (badge non-lus).
+          _NotificationBell(),
           _SyncButton(),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: () async {
-          ref.invalidate(dashboardStatsProvider);
-          // Attendre la prochaine valeur pour garder le spinner affiché.
-          await ref.read(dashboardStatsProvider.future);
-        },
-        child: statsAsync.when(
-          data: (stats) => _DashboardContent(
-            stats: stats,
-            isOffline: isOffline,
-          ),
-          loading: () => const AppLoading(label: 'Chargement des statistiques…'),
-          error: (err, _) {
-            // Distingue le mode hors-ligne des autres erreurs.
-            final offline = isOffline || err is OfflineDashboardException;
-            return ListView(
-              physics: const AlwaysScrollableScrollPhysics(),
-              children: [
-                if (offline)
-                  AppErrorWidget(
-                    message:
-                        'Mode hors-ligne — données non disponibles. Vérifiez votre connexion au serveur.',
-                    onRetry: () => ref.invalidate(dashboardStatsProvider),
-                  )
-                else
-                  AppErrorWidget(
-                    message: err.toString(),
-                    onRetry: () => ref.invalidate(dashboardStatsProvider),
+      body: scopePending
+          ? (scopeAsync.hasError
+              ? ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  children: [
+                    AppErrorWidget(
+                      message:
+                          'Impossible de déterminer votre profil enseignant.',
+                      onRetry: () => ref.invalidate(teacherScopeProvider),
+                    ),
+                  ],
+                )
+              : const AppLoading(
+                  label: 'Détection de votre profil…',
+                ))
+          : isTeacher
+              ? _TeacherDashboard(isOffline: isOffline)
+              : RefreshIndicator(
+                  onRefresh: () async {
+                    // [Fix-HOME-STALE] V24 — le pull-to-refresh relance
+                    // D'ABORD la détection d'état du serveur : hors ligne
+                    // (ou heartbeat ayant mal tranché — cf. Fix-ONLINE-
+                    // DETECT), l'ancien code invalidait le provider qui se
+                    // rebuildeait sur le MÊME cache sans aucune requête ni
+                    // message — le spinner clignotait et rien ne changeait.
+                    // On redemande un heartbeat (rapide) avant d'invalider.
+                    await ref
+                        .read(connectionProvider.notifier)
+                        .checkStatus();
+                    ref.invalidate(dashboardStatsProvider);
+                    // Attendre la prochaine valeur pour garder le spinner affiché.
+                    await ref.read(dashboardStatsProvider.future);
+                  },
+                  child: statsAsync.when(
+                    data: (stats) => _DashboardContent(
+                      stats: stats,
+                      isOffline: isOffline,
+                      perms: auth.permissions,
+                    ),
+                    loading: () =>
+                        const AppLoading(label: 'Chargement des statistiques…'),
+                    error: (err, _) {
+                      // Distingue le mode hors-ligne des autres erreurs.
+                      final offline =
+                          isOffline || err is OfflineDashboardException;
+                      return ListView(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        children: [
+                          if (offline)
+                            AppErrorWidget(
+                              message:
+                                  'Mode hors-ligne — données non disponibles. Vérifiez votre connexion au serveur.',
+                              onRetry: () =>
+                                  ref.invalidate(dashboardStatsProvider),
+                            )
+                          else
+                            AppErrorWidget(
+                              message: err.toString(),
+                              onRetry: () =>
+                                  ref.invalidate(dashboardStatsProvider),
+                            ),
+                        ],
+                      );
+                    },
                   ),
-              ],
-            );
-          },
-        ),
+                ),
+    );
+  }
+}
+
+/// [Fix-FONT-SCALE-OVERFLOW] V17 — Hauteur (px) d'une tuile KPI pour la
+/// taille de police EFFECTIVE de l'utilisateur.
+///
+/// Avant : `childAspectRatio: 1.25` fixe → en grande police système
+/// (paramètres d'accessibilité), la valeur + le libellé de la tuile
+/// dépassaient la hauteur calculée → bandes jaunes « OVERFLOWED » sur
+/// tout l'Accueil (retour S4 : « overflows surtout avec une taille de
+/// police grande »). La hauteur suit désormais le facteur de police,
+/// plafonnée pour rester raisonnable.
+double kpiTileExtent(BuildContext context) {
+  final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
+  return (110 * scale).clamp(96.0, 190.0);
+}
+
+/// [Notif-V8] Cloche du Centre de notifications : badge du nombre de
+/// notifications non lues, ouvre /notifications.
+class _NotificationBell extends ConsumerWidget {
+  const _NotificationBell();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final unread =
+        ref.watch(notificationCenterProvider.select((s) => s.unreadCount));
+    return IconButton(
+      icon: Badge(
+        isLabelVisible: unread > 0,
+        label: Text(unread > 99 ? '99+' : '$unread'),
+        backgroundColor: theme.colorScheme.error,
+        textColor: theme.colorScheme.onError,
+        child: const Icon(Icons.notifications_outlined),
       ),
+      tooltip: 'Centre de notifications',
+      onPressed: () => context.push('/notifications'),
     );
   }
 }
@@ -81,7 +184,6 @@ class DashboardPage extends ConsumerWidget {
 /// rafraîchit les KPIs.
 class _SyncButton extends ConsumerStatefulWidget {
   const _SyncButton();
-
   @override
   ConsumerState<_SyncButton> createState() => _SyncButtonState();
 }
@@ -96,6 +198,14 @@ class _SyncButtonState extends ConsumerState<_SyncButton> {
     SyncResult? result;
     try {
       result = await ref.read(syncEngineProvider).syncNow();
+      // [Notifications] Suit la validation/rejet des modifications de
+      // notes + informe du résultat de la synchro (utile, non répétitif).
+      if (result.isSuccess) {
+        await ref
+            .read(notificationServiceProvider)
+            .maybeCheckGradeModifications();
+      }
+      await ref.read(notificationServiceProvider).notifySyncResult(result);
     } catch (_) {
       result = null;
     } finally {
@@ -134,18 +244,27 @@ class _SyncButtonState extends ConsumerState<_SyncButton> {
 }
 
 /// Contenu complet du tableau de bord (KPIs + sections récentes).
+///
+/// [Fix-TEACHER-DASHBOARD] Les sections « Paiements récents » et « Élèves
+/// récemment inscrits » sont désormais filtrées par permission (elles ne
+/// sont plus rendues inconditionnellement) : PAYMENT_READ pour les
+/// paiements, STUDENT_READ pour les inscriptions.
 class _DashboardContent extends StatelessWidget {
   const _DashboardContent({
     required this.stats,
     required this.isOffline,
+    required this.perms,
   });
 
   final DashboardStatsDto stats;
   final bool isOffline;
+  final List<String> perms;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final canSeePayments = hasPermission(perms, RbacPermissions.paymentRead);
+    final canSeeStudents = hasPermission(perms, RbacPermissions.studentRead);
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
@@ -156,10 +275,14 @@ class _DashboardContent extends StatelessWidget {
             child: _OfflineBanner(),
           ),
         _KpiGrid(stats: stats),
-        const SizedBox(height: 16),
-        _RecentPaymentsCard(payments: stats.recentPayments),
-        const SizedBox(height: 16),
-        _RecentStudentsCard(students: stats.recentStudents),
+        if (canSeePayments) ...[
+          const SizedBox(height: 16),
+          _RecentPaymentsCard(payments: stats.recentPayments),
+        ],
+        if (canSeeStudents) ...[
+          const SizedBox(height: 16),
+          _RecentStudentsCard(students: stats.recentStudents),
+        ],
         const SizedBox(height: 8),
         Text(
           'Devise : $defaultCurrency',
@@ -168,6 +291,339 @@ class _DashboardContent extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Accueil ENSEIGNANT
+// ---------------------------------------------------------------------------
+
+/// Tableau de bord enseignant : statistiques de ses classes uniquement —
+/// effectifs, matières, cours du jour et prochains créneaux. Aucune donnée
+/// financière, aucun compteur global des autres utilisateurs.
+class _TeacherDashboard extends ConsumerWidget {
+  const _TeacherDashboard({required this.isOffline});
+  final bool isOffline;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(teacherDashboardProvider);
+    return RefreshIndicator(
+      onRefresh: () async {
+        ref.invalidate(teacherDashboardProvider);
+        await ref.read(teacherDashboardProvider.future);
+      },
+      child: async.when(
+        data: (data) => _TeacherDashboardContent(
+          data: data,
+          isOffline: isOffline,
+        ),
+        loading: () => ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 120),
+            AppLoading(label: 'Chargement de vos classes…'),
+          ],
+        ),
+        error: (e, _) => ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: [
+            AppErrorWidget(
+              message: e.toString(),
+              onRetry: () => ref.invalidate(teacherDashboardProvider),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TeacherDashboardContent extends StatelessWidget {
+  const _TeacherDashboardContent({
+    required this.data,
+    required this.isOffline,
+  });
+
+  final TeacherDashboardData data;
+  final bool isOffline;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final todayCourses = data.todayCourses;
+    // [Fix-DASHBOARD-TODAY] Quand la journée est libre, on affiche les
+    // PROCHAINS créneaux à venir (aujourd'hui inclus) — la section reste
+    // utile et l'enseignant voit tout de suite quand reprend son service.
+    final isSunday = DateTime.now().weekday > 6;
+    final upcoming = todayCourses.isEmpty
+        ? data.scope.upcomingCourses(
+            DateTime.now(),
+            currentWeek: data.currentWeek,
+            limit: 3,
+          )
+        : const <WeeklyScheduleDto>[];
+
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+      children: [
+        if (isOffline)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: _OfflineBanner(),
+          ),
+
+        // --- KPIs du périmètre enseignant ---
+        // [Fix-FONT-SCALE-OVERFLOW] V17 — hauteur de ligne calculée
+        // d'après la taille de police effective (au lieu d'un ratio
+        // fixe 1.25 qui débordait dès que l'utilisateur agrandit la
+        // police système).
+        GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 2,
+            crossAxisSpacing: 12,
+            mainAxisSpacing: 12,
+            mainAxisExtent: kpiTileExtent(context),
+          ),
+          itemCount: 4,
+          itemBuilder: (context, i) => [
+            KpiCard(
+              label: 'Mes classes',
+              value: '${data.classCount}',
+              icon: Icons.school,
+              color: theme.colorScheme.primary,
+              onTap: () => context.push('/schedule'),
+            ),
+            KpiCard(
+              label: 'Mes élèves',
+              value: '${data.studentCount}',
+              icon: Icons.people,
+              color: Colors.teal,
+              onTap: () => context.push('/students'),
+            ),
+            KpiCard(
+              label: 'Mes matières',
+              value: '${data.subjectCount}',
+              icon: Icons.book_outlined,
+              color: Colors.indigo,
+            ),
+            KpiCard(
+              label: 'Cours aujourd\'hui',
+              value: '${todayCourses.length}',
+              icon: Icons.schedule,
+              color: Colors.deepOrange,
+              onTap: () => context.push('/schedule'),
+            ),
+          ][i],
+        ),
+        const SizedBox(height: 16),
+
+        // --- Cours du jour ---
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SectionHeader(
+                  title: 'Mes cours aujourd\'hui',
+                  icon: Icons.today_outlined,
+                  subtitle: todayCourses.isEmpty
+                      ? (isSunday
+                          ? 'Pas de cours le dimanche'
+                          : 'Aucun cours programmé aujourd\'hui')
+                      : '${todayCourses.length} cours',
+                ),
+                const SizedBox(height: 4),
+                if (todayCourses.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Column(
+                      children: [
+                        EmptyState(
+                          title: isSunday
+                              ? 'Dimanche — journée de repos'
+                              : 'Journée libre',
+                          message: isSunday
+                              ? 'Aucun cours n\'est programmé le dimanche.'
+                              : 'Aucun cours planifié pour aujourd\'hui.',
+                          icon: Icons.event_available,
+                        ),
+                        // [Fix-DASHBOARD-TODAY] Prochains créneaux à venir
+                        // (y compris aujourd\'hui après maintenant).
+                        if (upcoming.isNotEmpty) ...[
+                          const Divider(),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              'Prochains cours',
+                              style: theme.textTheme.titleSmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                          ...upcoming.map(
+                            (c) => _UpcomingCourseTile(
+                              course: c,
+                              currentWeek: data.currentWeek,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  )
+                else
+                  ...todayCourses.map(
+                    (c) => ListTile(
+                      dense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 4),
+                      leading: CircleAvatar(
+                        backgroundColor: theme.colorScheme.primaryContainer,
+                        child: const Icon(Icons.schedule, size: 20),
+                      ),
+                      title: Text(
+                        c.subjectName ?? 'Cours',
+                        style: theme.textTheme.bodyMedium
+                            ?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                      subtitle: Text(
+                        [
+                          '${c.startTime} – ${c.endTime}',
+                          if (c.classroomName != null) c.classroomName!,
+                          if (c.room != null && c.room!.isNotEmpty)
+                            'Salle ${c.room}',
+                        ].join(' • '),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+
+        // --- Mes classes ---
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SectionHeader(
+                  title: 'Mes classes',
+                  icon: Icons.school_outlined,
+                  subtitle:
+                      '${data.classCount} classe(s) — enseignement et titulariat',
+                ),
+                const SizedBox(height: 4),
+                if (data.classrooms.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 8),
+                    child: EmptyState(
+                      title: 'Aucune classe liée',
+                      message:
+                          'Vous n\'êtes ni titulaire ni enseignant dans une classe.',
+                      icon: Icons.school_outlined,
+                    ),
+                  )
+                else
+                  ...data.classrooms.map((c) {
+                    final isHead =
+                        data.scope.headClassrooms.any((h) => h.id == c.id);
+                    return ListTile(
+                      dense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 4),
+                      leading: CircleAvatar(
+                        backgroundColor: isHead
+                            ? Colors.amber.withValues(alpha: 0.2)
+                            : theme.colorScheme.primaryContainer,
+                        child: Icon(
+                          isHead ? Icons.star : Icons.school,
+                          size: 18,
+                          color: isHead ? Colors.amber.shade800 : null,
+                        ),
+                      ),
+                      title: Text(
+                        c.name,
+                        style: theme.textTheme.bodyMedium
+                            ?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                      subtitle: Text(
+                        [
+                          '${c.studentCount} élève${c.studentCount > 1 ? 's' : ''}',
+                          if (c.capacity > 0) 'capacité ${c.capacity}',
+                          if (isHead) 'Titulaire',
+                        ].join(' • '),
+                      ),
+                      onTap: () => context.push('/classrooms/${c.id}'),
+                    );
+                  }),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Tuile « prochain cours » (jour + créneau) de la section de repli
+/// [Fix-DASHBOARD-TODAY] : affichée quand la journée est libre.
+class _UpcomingCourseTile extends StatelessWidget {
+  const _UpcomingCourseTile({required this.course, this.currentWeek});
+
+  final WeeklyScheduleDto course;
+  final WeekType? currentWeek;
+
+  static const _days = ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam'];
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final today = DateTime.now();
+    final isToday = course.dayOfWeek == today.weekday;
+    final dayLabel = isToday
+        ? "Aujourd'hui"
+        : (course.dayOfWeek >= 1 && course.dayOfWeek <= 6
+            ? _days[course.dayOfWeek - 1]
+            : '');
+    final weekLabel = course.isAllWeeks
+        ? ''
+        : ' (semaine ${course.weekType == WeekType.a ? 'A' : 'B'})';
+    return ListTile(
+      dense: true,
+      contentPadding: const EdgeInsets.symmetric(vertical: 2),
+      leading: CircleAvatar(
+        radius: 16,
+        backgroundColor: theme.colorScheme.secondaryContainer,
+        child: Text(
+          dayLabel.isNotEmpty ? dayLabel[0] : '?',
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            color: theme.colorScheme.onSecondaryContainer,
+          ),
+        ),
+      ),
+      title: Text(
+        course.subjectName ?? 'Cours',
+        style: theme.textTheme.bodyMedium,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text(
+        [
+          '$dayLabel$weekLabel',
+          '${course.startTime} – ${course.endTime}',
+          if (course.classroomName != null) course.classroomName!,
+        ].join(' • '),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
     );
   }
 }
@@ -203,47 +659,53 @@ class _OfflineBanner extends StatelessWidget {
   }
 }
 
-/// Grille 2 colonnes de KPI cards (6 tuiles).
-class _KpiGrid extends StatelessWidget {
+/// Grille 2 colonnes de KPI cards — tuiles filtrées par permission :
+/// Paiements/Solde dû uniquement avec PAYMENT_READ, Utilisateurs avec
+/// USER_READ (l'accueil n'est plus identique pour tous les profils).
+class _KpiGrid extends ConsumerWidget {
   const _KpiGrid({required this.stats});
   final DashboardStatsDto stats;
 
   @override
-  Widget build(BuildContext context) {
-    return GridView.count(
-      crossAxisCount: 2,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      crossAxisSpacing: 12,
-      mainAxisSpacing: 12,
-      childAspectRatio: 1.25,
-      children: [
-        KpiCard(
-          label: 'Effectif élèves',
-          value: '${stats.totalStudents}',
-          icon: Icons.people,
-          color: Theme.of(context).colorScheme.primary,
-          onTap: () => context.push('/students'),
-        ),
-        KpiCard(
-          label: 'Classes',
-          value: '${stats.totalClassrooms}',
-          icon: Icons.school,
-          color: Colors.teal,
-          onTap: () => context.push('/classrooms'),
-        ),
-        KpiCard(
-          label: 'Enseignants',
-          value: '${stats.totalTeachers}',
-          icon: Icons.badge,
-          color: Colors.indigo,
-        ),
+  Widget build(BuildContext context, WidgetRef ref) {
+    final auth = ref.watch(authProvider);
+    final canSeePayments =
+        hasPermission(auth.permissions, RbacPermissions.paymentRead);
+    final canSeeUsers =
+        hasPermission(auth.permissions, RbacPermissions.userRead);
+
+    // [Fix-FONT-SCALE-OVERFLOW] V17 — hauteur de ligne calculée d'après
+    // la taille de police effective (au lieu du ratio fixe seul, qui
+    // débordait dès que l'utilisateur agrandissait la police système).
+    final tiles = <Widget>[
+      KpiCard(
+        label: 'Effectif élèves',
+        value: '${stats.totalStudents}',
+        icon: Icons.people,
+        color: Theme.of(context).colorScheme.primary,
+        onTap: () => context.push('/students'),
+      ),
+      KpiCard(
+        label: 'Classes',
+        value: '${stats.totalClassrooms}',
+        icon: Icons.school,
+        color: Colors.teal,
+        onTap: () => context.push('/classrooms'),
+      ),
+      KpiCard(
+        label: 'Enseignants',
+        value: '${stats.totalTeachers}',
+        icon: Icons.badge,
+        color: Colors.indigo,
+      ),
+      if (canSeeUsers)
         KpiCard(
           label: 'Utilisateurs',
           value: '${stats.totalUsers}',
           icon: Icons.manage_accounts,
           color: Colors.deepPurple,
         ),
+      if (canSeePayments) ...[
         KpiCard(
           label: 'Paiements',
           value: '${stats.totalPayments}',
@@ -257,6 +719,19 @@ class _KpiGrid extends StatelessWidget {
           color: Colors.red.shade700,
         ),
       ],
+    ];
+
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
+        mainAxisExtent: kpiTileExtent(context),
+      ),
+      itemCount: tiles.length,
+      itemBuilder: (context, i) => tiles[i],
     );
   }
 }
@@ -268,7 +743,6 @@ class _RecentPaymentsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -316,17 +790,23 @@ class _PaymentTile extends StatelessWidget {
       ),
       title: Row(
         children: [
-          Expanded(
+          // [Fix-FONT-SCALE-OVERFLOW] V17 — le montant et le badge se
+          // partagent la ligne sans déborder en grande police.
+          Flexible(
             child: Text(
               MoneyFormatter.format(p.amount, withSymbol: false),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: theme.textTheme.titleSmall?.copyWith(
                 fontWeight: FontWeight.w700,
                 color: Colors.green.shade700,
               ),
             ),
           ),
-          if (status != null)
-            _PaymentStatusBadge(status: status),
+          if (status != null) ...[
+            const SizedBox(width: 8),
+            Flexible(child: _PaymentStatusBadge(status: status)),
+          ],
         ],
       ),
       subtitle: Wrap(
@@ -346,9 +826,7 @@ class _PaymentTile extends StatelessWidget {
               ),
             ),
           Text(
-            p.paymentDate == null
-                ? '—'
-                : DateFormatter.relative(p.paymentDate),
+            p.paymentDate == null ? '—' : DateFormatter.relative(p.paymentDate),
             style: theme.textTheme.bodySmall?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
             ),
@@ -418,35 +896,33 @@ class _RecentStudentsCard extends StatelessWidget {
                 ),
               )
             else
-              ...students.map((s) => ListTile(
-                    dense: true,
-                    contentPadding:
-                        const EdgeInsets.symmetric(vertical: 4),
-                    leading: CircleAvatar(
-                      backgroundColor:
-                          theme.colorScheme.primaryContainer,
-                      child: Text(
-                        s.fullName.isNotEmpty
-                            ? s.fullName[0].toUpperCase()
-                            : '?',
-                        style: theme.textTheme.titleMedium?.copyWith(
-                          color: theme.colorScheme.onPrimaryContainer,
-                        ),
+              ...students.map(
+                (s) => ListTile(
+                  dense: true,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 4),
+                  leading: CircleAvatar(
+                    backgroundColor: theme.colorScheme.primaryContainer,
+                    child: Text(
+                      s.fullName.isNotEmpty ? s.fullName[0].toUpperCase() : '?',
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        color: theme.colorScheme.onPrimaryContainer,
                       ),
                     ),
-                    title: Text(
-                      s.fullName.isEmpty ? '(sans nom)' : s.fullName,
-                      style: theme.textTheme.bodyMedium
-                          ?.copyWith(fontWeight: FontWeight.w500),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    subtitle: Text(
-                      s.matricule.isEmpty ? 'Mat. —' : 'Mat. ${s.matricule}',
-                      style: theme.textTheme.bodySmall,
-                    ),
-                    onTap: () => context.push('/students/${s.id}'),
-                  )),
+                  ),
+                  title: Text(
+                    s.fullName.isEmpty ? '(sans nom)' : s.fullName,
+                    style: theme.textTheme.bodyMedium
+                        ?.copyWith(fontWeight: FontWeight.w500),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  subtitle: Text(
+                    s.matricule.isEmpty ? 'Mat. —' : 'Mat. ${s.matricule}',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  onTap: () => context.push('/students/${s.id}'),
+                ),
+              ),
           ],
         ),
       ),

@@ -131,8 +131,11 @@ class _OfflineBanner extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         child: Row(
           children: [
-            Icon(Icons.cloud_off,
-                size: 18, color: theme.colorScheme.onSecondaryContainer),
+            Icon(
+              Icons.cloud_off,
+              size: 18,
+              color: theme.colorScheme.onSecondaryContainer,
+            ),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -301,7 +304,9 @@ class _SingleEstablishmentCard extends StatelessWidget {
                 const SizedBox(height: 12),
                 Container(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 6),
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
                   decoration: BoxDecoration(
                     color: theme.colorScheme.primary.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(20),
@@ -309,8 +314,11 @@ class _SingleEstablishmentCard extends StatelessWidget {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.check_circle,
-                          color: theme.colorScheme.primary, size: 16),
+                      Icon(
+                        Icons.check_circle,
+                        color: theme.colorScheme.primary,
+                        size: 16,
+                      ),
                       const SizedBox(width: 6),
                       Text(
                         'Établissement courant',

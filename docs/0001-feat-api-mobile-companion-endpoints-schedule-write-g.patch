@@ -1,0 +1,1129 @@
+From 1fafe522dd180e16fb17620930eb1bf05da4e484 Mon Sep 17 00:00:00 2001
+From: Mobile Companion Bot <mobile@getech-sms.local>
+Date: Wed, 7 Oct 2026 11:31:10 +0000
+Subject: [PATCH] =?UTF-8?q?feat(api):=20mobile=20companion=20endpoints=20?=
+ =?UTF-8?q?=E2=80=94=20schedule=20write,=20grades=20admin=20upsert,=20stud?=
+ =?UTF-8?q?ents=20write?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+[Mobile-Companion-Patch] — aligne l'API sur les besoins de l'app mobile
+GeTech-SMS (branche feature/desktop-control-center) :
+
+schedule.py :
+- GET /schedule/time-slots (grille des créneaux, pauses incluses)
+- POST /schedule/entries (création avec résolution TimeSlot/ScheduleSession
+  + détection de conflits classe & enseignant — miroir du desktop)
+- PUT /schedule/entries/{id} (horaire, semaine, salle)
+- DELETE /schedule/entries/{id}
+- [Fix-SCHEDULE-NULL-WEEK] week_type null préservé (= toutes les semaines)
+- Écriture réservée à CLASSROOM_MANAGE (admin/headmaster)
+
+grades.py :
+- POST /grades/assessments/{id}/grades : les admins (superuser/ADMIN/
+  HEADMASTER) peuvent désormais METTRE À JOUR les notes existantes (upsert,
+  miroir de GradeService.upsert_grade du desktop) ; les enseignants restent
+  en insert-only (notes verrouillées)
+- GET /grades/assessment-types (référentiel des types — IDs dynamiques)
+
+students.py :
+- GET /students/{id} enrichi avec les satellites (contact, medical,
+  scholastic, parents, guardians) — format wire aligné sur le mobile
+- POST /students (création + satellites + assignation de classe en une
+  transaction, matricule auto-généré si vide)
+- PATCH /students/{id} (identité, satellites, changement de classe avec
+  clôture des assignations actives)
+---
+ src/getech_sms/api/routers/grades.py   |  61 ++-
+ src/getech_sms/api/routers/schedule.py | 405 +++++++++++++++++++-
+ src/getech_sms/api/routers/students.py | 493 ++++++++++++++++++++++++-
+ 3 files changed, 946 insertions(+), 13 deletions(-)
+
+diff --git a/src/getech_sms/api/routers/grades.py b/src/getech_sms/api/routers/grades.py
+index 6ce84f2..9ceec57 100644
+--- a/src/getech_sms/api/routers/grades.py
++++ b/src/getech_sms/api/routers/grades.py
+@@ -39,6 +39,7 @@ from getech_sms.api.schemas import (
+ )
+ from getech_sms.core.security import current_establishment_id, current_user_id
+ from getech_sms.models.academic.assessment import Assessment
++from getech_sms.models.academic.assessment_type import AssessmentType
+ from getech_sms.models.academic.class_subject import ClassSubject
+ from getech_sms.models.academic.class_teacher_assignment import ClassTeacherAssignment
+ from getech_sms.models.academic.grade import Grade
+@@ -223,6 +224,38 @@ def _to_decimal(value: float | int | str | None) -> Decimal | None:
+ # ─────────────────────────────────────────────────────────────────────────────
+ 
+ 
++# ─────────────────────────────────────────────────────────────────────────────
++# [Mobile-Companion-Patch] Assessment types reference
++# ─────────────────────────────────────────────────────────────────────────────
++
++
++@router.get(
++    "/assessment-types",
++    dependencies=[Depends(require_permission_api("GRADE_READ"))],
++)
++def list_assessment_types(
++    current_user: User = Depends(get_current_user),
++    session: Session = Depends(get_db),
++):
++    """List assessment types (id, name, code, category, default_max_score).
++
++    Used by the mobile app to populate the "type" dropdown when creating an
++    assessment — the IDs are auto-incremented per database, so they cannot be
++    hardcoded client-side.
++    """
++    rows = session.query(AssessmentType).order_by(AssessmentType.name).all()
++    return [
++        {
++            "id": at.id,
++            "name": at.name,
++            "code": at.code,
++            "category": at.category.value if hasattr(at.category, "value") else str(at.category),
++            "default_max_score": at.default_max_score,
++        }
++        for at in rows
++    ]
++
++
+ @router.get(
+     "",
+     response_model=GradeListResponse,
+@@ -829,6 +862,12 @@ def bulk_save_grades(
+     saved_count = 0
+     skipped_count = 0
+ 
++    # [Mobile-Companion-Patch] Admins (superuser / ADMIN / HEADMASTER) can
++    # UPDATE existing grades (upsert — mirrors the desktop's
++    # GradeService.upsert_grade). Teachers remain insert-only: existing
++    # grades are locked for them (skipped_count).
++    is_admin = _user_is_admin_or_headmaster(session, current_user)
++
+     for gd in payload.grades:
+         try:
+             student_id = int(gd.get("student_id"))
+@@ -838,15 +877,27 @@ def bulk_save_grades(
+                 detail=f"grades[].student_id must be an integer: {gd!r}",
+             ) from exc
+ 
+-        if student_id in existing_ids:
+-            # Locked — do not update (admin path not implemented here).
+-            skipped_count += 1
+-            continue
+-
+         value = _to_decimal(gd.get("value"))
+         is_absent = bool(gd.get("is_absent", False))
+         comment = gd.get("comment") or gd.get("comments")
+ 
++        if student_id in existing_ids:
++            if not is_admin:
++                # Locked for teachers.
++                skipped_count += 1
++                continue
++            grade = existing.get(student_id)
++            grade.value = value
++            grade.is_absent = is_absent
++            grade.comments = comment
++            try:
++                session.flush()
++            except ValueError as exc:
++                session.rollback()
++                raise HTTPException(status_code=400, detail=str(exc)) from exc
++            saved_count += 1
++            continue
++
+         grade = Grade(
+             assessment_id=assessment_id,
+             student_id=student_id,
+diff --git a/src/getech_sms/api/routers/schedule.py b/src/getech_sms/api/routers/schedule.py
+index ef3cc68..38f816a 100644
+--- a/src/getech_sms/api/routers/schedule.py
++++ b/src/getech_sms/api/routers/schedule.py
+@@ -1,15 +1,25 @@
+ # src/getech_sms/api/routers/schedule.py
+ """Schedule endpoints.
+ 
+-GET /schedule          — weekly schedule for a classroom or teacher (STUDENT_READ)
+-GET /schedule/my       — current teacher's schedule (GRADE_READ)
++GET /schedule               — weekly schedule for a classroom or teacher (STUDENT_READ)
++GET /schedule/my            — current teacher's schedule (GRADE_READ)
++GET /schedule/time-slots    — time slots grid of the establishment (STUDENT_READ)
++POST /schedule/entries      — create a course entry (CLASSROOM_MANAGE, admin)
++PUT /schedule/entries/{id}  — update a course entry (CLASSROOM_MANAGE, admin)
++DELETE /schedule/entries/{id} — delete a course entry (CLASSROOM_MANAGE, admin)
+ 
+ Returns weekly schedule entries (subject, teacher, time slot, room) for
+ a given classroom_id or teacher_id.
++
++[Fix-SCHEDULE-NULL-WEEK] week_type is now serialized as null when the entry
++applies to ALL weeks (was: "A" — lossy). Clients that only know "A"/"B"
++keep working unchanged.
+ """
+ from __future__ import annotations
+ 
+-from fastapi import APIRouter, Depends, Query
++from datetime import datetime, time as dtime
++from fastapi import APIRouter, Depends, HTTPException, Query
++from pydantic import BaseModel, Field
+ from sqlalchemy.orm import Session, joinedload, selectinload
+ 
+ from getech_sms.api.deps import get_current_user, get_db, require_permission_api
+@@ -19,6 +29,8 @@ from getech_sms.models.academic.schedule_session import ScheduleSession
+ from getech_sms.models.academic.subject import Subject
+ from getech_sms.models.academic.time_slot import TimeSlot
+ from getech_sms.models.auth.user import User
++from getech_sms.models.core.school_year import SchoolYear
++from getech_sms.services.academic.schedule_service import ScheduleService
+ 
+ router = APIRouter(prefix="/schedule", tags=["schedule"])
+ 
+@@ -117,7 +129,8 @@ def get_schedule(
+             "start_time": time_slot.start_time.strftime("%H:%M") if time_slot.start_time else "",
+             "end_time": time_slot.end_time.strftime("%H:%M") if time_slot.end_time else "",
+             "room": sched_session.room,
+-            "week_type": "B" if getattr(entry, "week_type", None) == "B" else "A",
++            # [Fix-SCHEDULE-NULL-WEEK] preserve None = "all weeks"
++            "week_type": getattr(entry, "week_type", None),
+         })
+ 
+     return result
+@@ -142,3 +155,387 @@ def get_my_schedule(
+         week_type=None,
+         session=session,
+     )
++
++
++# ─────────────────────────────────────────────────────────────────────────────
++# [Mobile-Companion-Patch] Time slots grid
++# ─────────────────────────────────────────────────────────────────────────────
++
++
++def _serialize_slot(slot: TimeSlot) -> dict:
++    return {
++        "id": slot.id,
++        "day_of_week": slot.day_of_week,
++        "slot_order": slot.slot_order,
++        "start_time": slot.start_time.strftime("%H:%M") if slot.start_time else "",
++        "end_time": slot.end_time.strftime("%H:%M") if slot.end_time else "",
++        "label": slot.label,
++        "is_break": bool(slot.is_break),
++        "is_active": bool(slot.is_active),
++    }
++
++
++@router.get(
++    "/time-slots",
++    dependencies=[Depends(require_permission_api("STUDENT_READ"))],
++)
++def get_time_slots(
++    include_breaks: bool = Query(True, description="Include break slots"),
++    session: Session = Depends(get_db),
++):
++    """Time slots grid of the current establishment (used by the mobile app
++    to draw the schedule grid)."""
++    from getech_sms.core.security import current_establishment_id
++
++    est_id = current_establishment_id()
++    if est_id is None:
++        return []
++    slots = ScheduleService.get_time_slots(
++        session, est_id, include_breaks=include_breaks
++    )
++    return [_serialize_slot(s) for s in slots]
++
++
++# ─────────────────────────────────────────────────────────────────────────────
++# [Mobile-Companion-Patch] Write endpoints (admin only — CLASSROOM_MANAGE)
++# ─────────────────────────────────────────────────────────────────────────────
++
++
++class ScheduleEntryCreateRequest(BaseModel):
++    """Payload for POST /schedule/entries.
++
++    The server resolves (or creates) the TimeSlot from day_of_week +
++    start_time/end_time, and reuses/creates the ScheduleSession for the
++    class subject + current school year, with conflict detection
++    (classroom + teacher) mirroring the desktop UI.
++    """
++
++    classroom_id: int
++    class_subject_id: int
++    day_of_week: int = Field(ge=1, le=6)
++    start_time: str = Field(..., description="HH:MM")
++    end_time: str = Field(..., description="HH:MM")
++    week_type: str | None = Field(None, description="A, B or null (all weeks)")
++    room: str | None = None
++
++
++class ScheduleEntryUpdateRequest(BaseModel):
++    """Payload for PUT /schedule/entries/{id}."""
++
++    time_slot_id: int | None = None
++    day_of_week: int | None = Field(None, ge=1, le=6)
++    start_time: str | None = None
++    end_time: str | None = None
++    week_type: str | None = None
++    room: str | None = None
++
++
++def _parse_hhmm(value: str) -> dtime:
++    try:
++        return datetime.strptime(value.strip(), "%H:%M").time()
++    except (ValueError, AttributeError) as exc:
++        raise HTTPException(
++            status_code=400,
++            detail=f"Invalid time {value!r} — expected HH:MM",
++        ) from exc
++
++
++def _resolve_school_year_id(session: Session, establishment_id: int) -> int:
++    sy = (
++        session.query(SchoolYear)
++        .filter(SchoolYear.establishment_id == establishment_id)
++        .order_by(SchoolYear.id.desc())
++        .first()
++    )
++    if sy is None:
++        raise HTTPException(
++            status_code=404,
++            detail="No school year found for the current establishment",
++        )
++    return sy.id
++
++
++def _resolve_time_slot(
++    session: Session,
++    establishment_id: int,
++    day_of_week: int,
++    start: dtime,
++    end: dtime,
++) -> TimeSlot:
++    """Find an existing non-break TimeSlot matching the exact hours, or
++    create one at the end of the day's slot order."""
++    if start >= end:
++        raise HTTPException(
++            status_code=400, detail="start_time must be before end_time"
++        )
++
++    candidates = (
++        session.query(TimeSlot)
++        .filter(
++            TimeSlot.establishment_id == establishment_id,
++            TimeSlot.day_of_week == day_of_week,
++            TimeSlot.start_time == start,
++            TimeSlot.end_time == end,
++            TimeSlot.is_break == False,  # noqa: E712
++        )
++        .all()
++    )
++    for slot in candidates:
++        return slot
++
++    max_order = (
++        session.query(TimeSlot.slot_order)
++        .filter(
++            TimeSlot.establishment_id == establishment_id,
++            TimeSlot.day_of_week == day_of_week,
++        )
++        .order_by(TimeSlot.slot_order.desc())
++        .first()
++    )
++    next_order = (max_order[0] + 1) if max_order else 1
++    return ScheduleService.create_time_slot(
++        session,
++        establishment_id=establishment_id,
++        day_of_week=day_of_week,
++        slot_order=next_order,
++        start_time=start,
++        end_time=end,
++    )
++
++
++def _entry_payload(entry: ScheduleEntry) -> dict:
++    """Serialize one entry in the same format as GET /schedule."""
++    time_slot = entry.time_slot
++    sched_session = entry.session
++    class_subj = sched_session.class_subject if sched_session else None
++    subject = class_subj.subject if class_subj else None
++    teacher = class_subj.assigned_teacher if class_subj else None
++    classroom = class_subj.classroom if class_subj else None
++    return {
++        "id": entry.id,
++        "classroom_id": classroom.id if classroom else None,
++        "classroom_name": classroom.name if classroom else None,
++        "subject_id": class_subj.subject_id if class_subj else None,
++        "subject_name": subject.name if subject else None,
++        "subject_code": subject.code if subject else None,
++        "teacher_id": teacher.id if teacher else None,
++        "teacher_name": (
++            f"{teacher.prenoms or ''} {teacher.nom or ''}".strip()
++            if teacher
++            else None
++        ),
++        "time_slot_id": time_slot.id if time_slot else None,
++        "day_of_week": time_slot.day_of_week if time_slot else None,
++        "start_time": (
++            time_slot.start_time.strftime("%H:%M") if time_slot and time_slot.start_time else ""
++        ),
++        "end_time": (
++            time_slot.end_time.strftime("%H:%M") if time_slot and time_slot.end_time else ""
++        ),
++        "room": sched_session.room if sched_session else None,
++        "week_type": getattr(entry, "week_type", None),
++    }
++
++
++@router.post(
++    "/entries",
++    dependencies=[Depends(require_permission_api("CLASSROOM_MANAGE"))],
++)
++def create_schedule_entry_endpoint(
++    payload: ScheduleEntryCreateRequest,
++    current_user: User = Depends(get_current_user),
++    session: Session = Depends(get_db),
++):
++    """Create a schedule entry (admin only).
++
++    Reuses/creates the ScheduleSession for the class subject + current
++    school year, resolves the TimeSlot from the hours, and runs the
++    classroom + teacher conflict detection (same rules as the desktop).
++    """
++    from getech_sms.core.security import current_establishment_id
++
++    est_id = current_establishment_id()
++    if est_id is None:
++        raise HTTPException(status_code=400, detail="No establishment context")
++
++    cs = session.get(ClassSubject, payload.class_subject_id)
++    if cs is None:
++        raise HTTPException(status_code=404, detail="Class subject not found")
++    if cs.classroom_id != payload.classroom_id:
++        raise HTTPException(
++            status_code=400,
++            detail="class_subject_id does not belong to classroom_id",
++        )
++
++    week = payload.week_type
++    if week not in (None, "A", "B"):
++        raise HTTPException(
++            status_code=400, detail="week_type must be A, B or null"
++        )
++
++    start = _parse_hhmm(payload.start_time)
++    end = _parse_hhmm(payload.end_time)
++
++    school_year_id = _resolve_school_year_id(session, est_id)
++    time_slot = _resolve_time_slot(
++        session, est_id, payload.day_of_week, start, end
++    )
++
++    # Reuse the session for this class subject + year (update room if given).
++    sched_session = (
++        session.query(ScheduleSession)
++        .filter(
++            ScheduleSession.class_subject_id == cs.id,
++            ScheduleSession.school_year_id == school_year_id,
++            ScheduleSession.is_active == True,  # noqa: E712
++        )
++        .first()
++    )
++    if sched_session is None:
++        sched_session = ScheduleService.create_schedule_session(
++            session,
++            class_subject_id=cs.id,
++            school_year_id=school_year_id,
++            room=payload.room,
++        )
++    elif payload.room and payload.room != sched_session.room:
++        sched_session.room = payload.room
++
++    try:
++        entry = ScheduleService.create_schedule_entry(
++            session,
++            session_id=sched_session.id,
++            time_slot_id=time_slot.id,
++            week_type=week,
++        )
++    except ValueError as exc:
++        session.rollback()
++        raise HTTPException(status_code=409, detail=str(exc)) from exc
++
++    session.commit()
++    session.refresh(entry)
++    return _entry_payload(entry)
++
++
++@router.put(
++    "/entries/{entry_id}",
++    dependencies=[Depends(require_permission_api("CLASSROOM_MANAGE"))],
++)
++def update_schedule_entry_endpoint(
++    entry_id: int,
++    payload: ScheduleEntryUpdateRequest,
++    current_user: User = Depends(get_current_user),
++    session: Session = Depends(get_db),
++):
++    """Update a schedule entry (admin only): time slot, week type or room."""
++    from getech_sms.core.security import current_establishment_id
++
++    est_id = current_establishment_id()
++    entry = session.get(ScheduleEntry, entry_id)
++    if entry is None or not entry.is_active:
++        raise HTTPException(status_code=404, detail="Schedule entry not found")
++
++    sched_session = entry.session
++    if sched_session is None:
++        raise HTTPException(status_code=404, detail="Schedule session not found")
++
++    # Week type.
++    if payload.week_type is not None:
++        if payload.week_type not in ("A", "B"):
++            raise HTTPException(
++                status_code=400, detail="week_type must be A or B"
++            )
++        entry.week_type = payload.week_type
++
++    # Room.
++    if payload.room is not None:
++        sched_session.room = payload.room
++
++    # Time slot / day / hours.
++    day = payload.day_of_week or (entry.time_slot.day_of_week if entry.time_slot else None)
++    if payload.start_time or payload.end_time or payload.day_of_week or payload.time_slot_id:
++        if payload.time_slot_id is not None:
++            new_slot = session.get(TimeSlot, payload.time_slot_id)
++            if new_slot is None:
++                raise HTTPException(status_code=404, detail="Time slot not found")
++        else:
++            if est_id is None:
++                raise HTTPException(status_code=400, detail="No establishment context")
++            if day is None:
++                raise HTTPException(status_code=400, detail="day_of_week required")
++            current_slot = entry.time_slot
++            start = (
++                _parse_hhmm(payload.start_time)
++                if payload.start_time
++                else (current_slot.start_time if current_slot else None)
++            )
++            end = (
++                _parse_hhmm(payload.end_time)
++                if payload.end_time
++                else (current_slot.end_time if current_slot else None)
++            )
++            if start is None or end is None:
++                raise HTTPException(
++                    status_code=400, detail="start_time and end_time required"
++                )
++            new_slot = _resolve_time_slot(session, est_id, day, start, end)
++
++        # Conflict check (excluding this entry) — mirrors the desktop.
++        try:
++            conflicts = ScheduleService.detect_conflicts(
++                session,
++                classroom_id=sched_session.class_subject.classroom_id,
++                time_slot_id=new_slot.id,
++                week_type=entry.week_type,
++                school_year_id=sched_session.school_year_id,
++                exclude_entry_id=entry.id,
++            )
++            if conflicts:
++                raise ValueError(
++                    f"Conflit d'emploi du temps : le créneau est déjà occupé "
++                    f"par « {conflicts[0]['subject_name']} »."
++                )
++            assigned_teacher_id = (
++                sched_session.class_subject.assigned_teacher_id
++            )
++            if assigned_teacher_id is not None:
++                teacher_conflicts = ScheduleService.detect_teacher_conflicts(
++                    session,
++                    teacher_id=assigned_teacher_id,
++                    time_slot_id=new_slot.id,
++                    week_type=entry.week_type,
++                    school_year_id=sched_session.school_year_id,
++                    exclude_entry_id=entry.id,
++                )
++                if teacher_conflicts:
++                    raise ValueError(
++                        "Conflit d'emploi du temps : l'enseignant a déjà un "
++                        "cours sur ce créneau."
++                    )
++        except ValueError as exc:
++            session.rollback()
++            raise HTTPException(status_code=409, detail=str(exc)) from exc
++
++        entry.time_slot_id = new_slot.id
++
++    session.commit()
++    session.refresh(entry)
++    return _entry_payload(entry)
++
++
++@router.delete(
++    "/entries/{entry_id}",
++    dependencies=[Depends(require_permission_api("CLASSROOM_MANAGE"))],
++)
++def delete_schedule_entry_endpoint(
++    entry_id: int,
++    current_user: User = Depends(get_current_user),
++    session: Session = Depends(get_db),
++):
++    """Delete a schedule entry (admin only)."""
++    entry = session.get(ScheduleEntry, entry_id)
++    if entry is None or not entry.is_active:
++        raise HTTPException(status_code=404, detail="Schedule entry not found")
++    ScheduleService.delete_schedule_entry(session, entry_id)
++    session.commit()
++    return {"message": "Schedule entry deleted"}
+diff --git a/src/getech_sms/api/routers/students.py b/src/getech_sms/api/routers/students.py
+index 4e22186..c36e8c3 100644
+--- a/src/getech_sms/api/routers/students.py
++++ b/src/getech_sms/api/routers/students.py
+@@ -3,20 +3,30 @@
+ 
+ GET /students          — list students (STUDENT_READ)
+ GET /students/export   — export students as XLSX/CSV (STUDENT_READ)
+-GET /students/{id}     — get student detail (STUDENT_READ)
++GET /students/{id}     — get student detail + satellites (STUDENT_READ)
++POST /students         — create a student with satellites (STUDENT_CREATE)
++PATCH /students/{id}   — update a student + satellites (STUDENT_CREATE)
+ 
+ Responses are enriched with the student's current classroom name,
+ inscription type label, student status label, computed age, and photo
+ path — matching the desktop app's data richness.
++
++[Mobile-Companion-Patch] The detail endpoint embeds the satellite records
++(contact, medical, scholastic, parents, guardians) so the mobile app can
++render the full student file. POST/PATCH create/update the student and
++its satellites in a single transaction (mirrors the desktop
++student_service.create_student / update_student).
+ """
+ 
+ from __future__ import annotations
+ 
+ import io
++import uuid
+ from datetime import date
+ 
+ from fastapi import APIRouter, Depends, HTTPException, Query
+ from fastapi.responses import StreamingResponse
++from pydantic import BaseModel, Field
+ from sqlalchemy.orm import Session, selectinload
+ 
+ from getech_sms.api.deps import get_current_user, get_db, require_permission_api
+@@ -28,7 +38,14 @@ from getech_sms.models.academic.inscription_type import InscriptionType
+ from getech_sms.models.academic.student_class_assignment import StudentClassAssignment
+ from getech_sms.models.academic.student_status import StudentStatus
+ from getech_sms.models.auth.user import User
++from getech_sms.models.core.school_year import SchoolYear
++from getech_sms.models.people.guardian import Guardian
+ from getech_sms.models.people.student import Student
++from getech_sms.models.people.student_contact import StudentContact
++from getech_sms.models.people.student_guardian import StudentGuardian
++from getech_sms.models.people.student_medical import StudentMedical
++from getech_sms.models.people.student_parent import StudentParent
++from getech_sms.models.people.student_scholastic import StudentScholastic
+ 
+ router = APIRouter(prefix="/students", tags=["students"])
+ 
+@@ -291,16 +308,90 @@ def export_students(
+         )
+ 
+ 
++def _student_detail_payload(student: Student) -> dict:
++    """Full student payload: base StudentResponse fields + satellites."""
++    data = _to_response(student).model_dump()
++
++    contact = student.contact
++    data["contact"] = (
++        {
++            "id": contact.id,
++            "phone": contact.phone,
++            "email": contact.email,
++            "address": contact.address,
++            "city": contact.city,
++        }
++        if contact
++        else None
++    )
++
++    medical = student.medical
++    data["medical"] = (
++        {
++            "id": medical.id,
++            "blood_type": (
++                medical.blood_type.value
++                if hasattr(medical.blood_type, "value")
++                else medical.blood_type
++            ),
++            "allergies": medical.allergies,
++            "doctor": medical.doctor_name,
++        }
++        if medical
++        else None
++    )
++
++    scholastic = student.scholastic
++    data["scholastic"] = (
++        {
++            "id": scholastic.id,
++            "previous_school": scholastic.previous_school,
++            "transport": (
++                scholastic.transport_zone
++                if scholastic.transport_zone
++                else ("Oui" if scholastic.uses_school_transport else None)
++            ),
++        }
++        if scholastic
++        else None
++    )
++
++    data["parents"] = [
++        {
++            "id": p.id,
++            "role": p.role,
++            "nom": p.last_name,
++            "prenoms": p.first_name,
++            "phone": p.phone,
++            "profession": p.profession,
++        }
++        for p in (student.parents or [])
++    ]
++    data["guardians"] = [
++        {
++            "id": g.id,
++            "nom": g.last_name,
++            "prenoms": g.first_name,
++            "phone": g.phone,
++            "email": g.email,
++            "relation": g.profession,
++        }
++        for g in (student.guardians or [])
++    ]
++    return data
++
++
+ @router.get(
+     "/{student_id}",
+-    response_model=StudentResponse,
+     dependencies=[Depends(require_permission_api("STUDENT_READ"))],
+ )
+ def get_student(
+     student_id: int,
+     current_user: User = Depends(get_current_user),
+     session: Session = Depends(get_db),
+-) -> StudentResponse:
++):
++    """Student detail incl. satellites (contact, medical, scholastic,
++    parents, guardians)."""
+     q = (
+         scoped_query(Student, session=session)
+         .options(
+@@ -319,7 +410,401 @@ def get_student(
+     student = q.first()
+     if student is None:
+         raise HTTPException(status_code=404, detail="Student not found")
+-    return _to_response(student)
++    return _student_detail_payload(student)
++
++
++# ─────────────────────────────────────────────────────────────────────────────
++# [Mobile-Companion-Patch] Write endpoints
++# ─────────────────────────────────────────────────────────────────────────────
++
++
++class ContactPayload(BaseModel):
++    phone: str | None = None
++    email: str | None = None
++    address: str | None = None
++    city: str | None = None
++
++
++class MedicalPayload(BaseModel):
++    blood_type: str | None = None
++    allergies: str | None = None
++    doctor: str | None = None
++
++
++class ScholasticPayload(BaseModel):
++    previous_school: str | None = None
++    transport: str | None = None
++
++
++class ParentPayload(BaseModel):
++    role: str = Field(..., description="PERE or MERE")
++    nom: str | None = None
++    prenoms: str | None = None
++    phone: str | None = None
++    profession: str | None = None
++
++
++class GuardianPayload(BaseModel):
++    id: int | None = None
++    nom: str | None = None
++    prenoms: str | None = None
++    phone: str | None = None
++    email: str | None = None
++    relation: str | None = None
++
++
++class StudentCreateRequest(BaseModel):
++    nom: str
++    prenoms: str | None = None
++    matricule: str | None = Field(
++        None, description="Auto-generated when omitted"
++    )
++    dob: date | None = None
++    sexe: str | None = None
++    birth_place: str | None = None
++    birth_prefecture: str | None = None
++    birth_region: str | None = None
++    birth_country: str | None = None
++    groupe: str | None = None
++    photo_path: str | None = None
++    establishment_id: int | None = None
++    classroom_id: int | None = None
++    status: str | None = Field(None, description="StudentStatus code")
++    inscription_type: str | None = Field(None, description="InscriptionType code")
++    contact: ContactPayload | None = None
++    medical: MedicalPayload | None = None
++    scholastic: ScholasticPayload | None = None
++    parents: list[ParentPayload] = []
++    guardians: list[GuardianPayload] = []
++
++
++class StudentUpdateRequest(BaseModel):
++    nom: str | None = None
++    prenoms: str | None = None
++    matricule: str | None = None
++    dob: date | None = None
++    sexe: str | None = None
++    birth_place: str | None = None
++    birth_prefecture: str | None = None
++    birth_region: str | None = None
++    birth_country: str | None = None
++    groupe: str | None = None
++    photo_path: str | None = None
++    classroom_id: int | None = None
++    status: str | None = None
++    inscription_type: str | None = None
++    contact: ContactPayload | None = None
++    medical: MedicalPayload | None = None
++    scholastic: ScholasticPayload | None = None
++    parents: list[ParentPayload] | None = None
++    guardians: list[GuardianPayload] | None = None
++
++
++def _current_establishment(session: Session, user: User, requested: int | None) -> int:
++    from getech_sms.core.security import current_establishment_id
++
++    est_id = requested or current_establishment_id()
++    if est_id is None:
++        raise HTTPException(status_code=400, detail="No establishment context")
++    return est_id
++
++
++def _generate_matricule(session: Session, establishment_id: int) -> str:
++    """Generate a unique matricule (EST-<year>-<sequence>)."""
++    year = date.today().year
++    prefix = f"EST{establishment_id}-{year}-"
++    last = (
++        session.query(Student.matricule)
++        .filter(
++            Student.establishment_id == establishment_id,
++            Student.matricule.like(f"{prefix}%"),
++        )
++        .order_by(Student.matricule.desc())
++        .first()
++    )
++    seq = 1
++    if last and last[0]:
++        try:
++            seq = int(last[0].rsplit("-", 1)[1]) + 1
++        except (ValueError, IndexError):
++            seq = 1
++    return f"{prefix}{seq:04d}"
++
++
++def _resolve_ref_id(session: Session, model, code: str | None) -> int | None:
++    if not code:
++        return None
++    row = session.query(model).filter(model.code == code.upper()).first()
++    return row.id if row else None
++
++
++def _current_school_year_id(session: Session, establishment_id: int) -> int | None:
++    sy = (
++        session.query(SchoolYear)
++        .filter(SchoolYear.establishment_id == establishment_id)
++        .order_by(SchoolYear.id.desc())
++        .first()
++    )
++    return sy.id if sy else None
++
++
++def _upsert_satellites(session: Session, student: Student, payload) -> None:
++    """Create/replace the satellite records of a student."""
++    if payload.contact is not None:
++        existing = (
++            session.query(StudentContact)
++            .filter(StudentContact.student_id == student.id)
++            .first()
++        )
++        if existing is None:
++            existing = StudentContact(student_id=student.id)
++            session.add(existing)
++        existing.phone = payload.contact.phone
++        existing.email = payload.contact.email
++        existing.address = payload.contact.address
++        existing.city = payload.contact.city
++
++    if payload.medical is not None:
++        existing = (
++            session.query(StudentMedical)
++            .filter(StudentMedical.student_id == student.id)
++            .first()
++        )
++        if existing is None:
++            existing = StudentMedical(student_id=student.id)
++            session.add(existing)
++        existing.blood_type = payload.medical.blood_type
++        existing.allergies = payload.medical.allergies
++        existing.doctor_name = payload.medical.doctor
++
++    if payload.scholastic is not None:
++        existing = (
++            session.query(StudentScholastic)
++            .filter(StudentScholastic.student_id == student.id)
++            .first()
++        )
++        if existing is None:
++            existing = StudentScholastic(student_id=student.id)
++            session.add(existing)
++        existing.previous_school = payload.scholastic.previous_school
++        if payload.scholastic.transport is not None:
++            t = payload.scholastic.transport.strip().lower()
++            existing.uses_school_transport = t in ("oui", "yes", "true", "1")
++            existing.transport_zone = payload.scholastic.transport
++
++    parents = getattr(payload, "parents", None)
++    if parents:
++        session.query(StudentParent).filter(
++            StudentParent.student_id == student.id
++        ).delete(synchronize_session=False)
++        for p in parents:
++            session.add(
++                StudentParent(
++                    student_id=student.id,
++                    role=(p.role or "PERE").upper()[:10],
++                    last_name=p.nom,
++                    first_name=p.prenoms,
++                    phone=p.phone,
++                    profession=p.profession,
++                )
++            )
++
++    guardians = getattr(payload, "guardians", None)
++    if guardians:
++        for g in guardians:
++            if g.id is not None:
++                guardian = session.get(Guardian, g.id)
++                if guardian is None:
++                    continue
++            else:
++                guardian = Guardian(
++                    establishment_id=student.establishment_id,
++                )
++                session.add(guardian)
++                session.flush()
++            if g.nom is not None:
++                guardian.last_name = g.nom
++            if g.prenoms is not None:
++                guardian.first_name = g.prenoms
++            if g.phone is not None:
++                guardian.phone = g.phone
++            if g.email is not None:
++                guardian.email = g.email
++            # Guardian n'a pas de colonne "relation" — on la range dans
++            # profession (le mobile l'affiche comme relation).
++            if g.relation is not None:
++                guardian.profession = g.relation
++            link = (
++                session.query(StudentGuardian)
++                .filter(
++                    StudentGuardian.student_id == student.id,
++                    StudentGuardian.guardian_id == guardian.id,
++                )
++                .first()
++            )
++            if link is None:
++                session.add(
++                    StudentGuardian(
++                        student_id=student.id, guardian_id=guardian.id
++                    )
++                )
++
++
++@router.post(
++    "",
++    status_code=201,
++    dependencies=[Depends(require_permission_api("STUDENT_CREATE"))],
++)
++def create_student(
++    payload: StudentCreateRequest,
++    current_user: User = Depends(get_current_user),
++    session: Session = Depends(get_db),
++):
++    """Create a student with satellites + class assignment (single
++    transaction). The matricule is auto-generated when omitted."""
++    est_id = _current_establishment(session, current_user, payload.establishment_id)
++
++    matricule = (payload.matricule or "").strip() or _generate_matricule(
++        session, est_id
++    )
++    dup = (
++        session.query(Student.id)
++        .filter(
++            Student.establishment_id == est_id,
++            Student.matricule == matricule,
++        )
++        .first()
++    )
++    if dup:
++        raise HTTPException(
++            status_code=409, detail=f"Matricule {matricule} already exists"
++        )
++
++    student = Student(
++        public_id=str(uuid.uuid4()),
++        establishment_id=est_id,
++        matricule=matricule,
++        nom=payload.nom,
++        prenoms=payload.prenoms,
++        dob=payload.dob,
++        sexe=(payload.sexe.upper()[:1] if payload.sexe else None),
++        birth_place=payload.birth_place,
++        birth_prefecture=payload.birth_prefecture,
++        birth_region=payload.birth_region,
++        birth_country=payload.birth_country,
++        groupe=payload.groupe,
++        photo_path=payload.photo_path,
++        deleted=False,
++    )
++    session.add(student)
++    session.flush()
++
++    if payload.classroom_id is not None:
++        classroom = session.get(Classroom, payload.classroom_id)
++        if classroom is None:
++            session.rollback()
++            raise HTTPException(status_code=404, detail="Classroom not found")
++        sy_id = _current_school_year_id(session, est_id)
++        if sy_id is None:
++            session.rollback()
++            raise HTTPException(
++                status_code=404, detail="No school year found for establishment"
++            )
++        session.add(
++            StudentClassAssignment(
++                student_id=student.id,
++                classroom_id=classroom.id,
++                school_year_id=sy_id,
++                inscription_type_id=_resolve_ref_id(
++                    session, InscriptionType, payload.inscription_type
++                ),
++                student_status_id=_resolve_ref_id(
++                    session, StudentStatus, payload.status
++                ),
++                active=True,
++            )
++        )
++
++    _upsert_satellites(session, student, payload)
++
++    try:
++        session.commit()
++    except Exception as exc:
++        session.rollback()
++        raise HTTPException(status_code=400, detail=str(exc)) from exc
++    session.refresh(student)
++    return _student_detail_payload(student)
++
++
++@router.patch(
++    "/{student_id}",
++    dependencies=[Depends(require_permission_api("STUDENT_CREATE"))],
++)
++def update_student(
++    student_id: int,
++    payload: StudentUpdateRequest,
++    current_user: User = Depends(get_current_user),
++    session: Session = Depends(get_db),
++):
++    """Update a student (identity, satellites, class assignment)."""
++    q = scoped_query(Student, session=session).filter(Student.id == student_id)
++    student = q.first()
++    if student is None:
++        raise HTTPException(status_code=404, detail="Student not found")
++
++    for field in (
++        "nom", "prenoms", "dob", "sexe", "birth_place", "birth_prefecture",
++        "birth_region", "birth_country", "groupe", "photo_path",
++    ):
++        value = getattr(payload, field, None)
++        if value is not None:
++            setattr(student, field, value)
++    if payload.matricule:
++        student.matricule = payload.matricule
++    if payload.sexe:
++        student.sexe = payload.sexe.upper()[:1]
++
++    if payload.classroom_id is not None:
++        classroom = session.get(Classroom, payload.classroom_id)
++        if classroom is None:
++            session.rollback()
++            raise HTTPException(status_code=404, detail="Classroom not found")
++        est_id = student.establishment_id
++        sy_id = _current_school_year_id(session, est_id)
++        if sy_id is None:
++            session.rollback()
++            raise HTTPException(
++                status_code=404, detail="No school year found for establishment"
++            )
++        # Close current active assignments, then create the new one.
++        session.query(StudentClassAssignment).filter(
++            StudentClassAssignment.student_id == student.id,
++            StudentClassAssignment.active == True,  # noqa: E712
++        ).update({"active": False}, synchronize_session=False)
++        session.add(
++            StudentClassAssignment(
++                student_id=student.id,
++                classroom_id=classroom.id,
++                school_year_id=sy_id,
++                inscription_type_id=_resolve_ref_id(
++                    session, InscriptionType, payload.inscription_type
++                ),
++                student_status_id=_resolve_ref_id(
++                    session, StudentStatus, payload.status
++                ),
++                active=True,
++            )
++        )
++
++    _upsert_satellites(session, student, payload)
++
++    try:
++        session.commit()
++    except Exception as exc:
++        session.rollback()
++        raise HTTPException(status_code=400, detail=str(exc)) from exc
++    session.refresh(student)
++    return _student_detail_payload(student)
+ 
+ 
+ # ─────────────────────────────────────────────────────────────────────────────
+-- 
+2.47.3
+

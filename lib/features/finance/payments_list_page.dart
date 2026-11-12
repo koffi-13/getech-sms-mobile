@@ -40,7 +40,8 @@ class _PaymentsListPageState extends ConsumerState<PaymentsListPage> {
   @override
   Widget build(BuildContext context) {
     final auth = ref.watch(authProvider);
-    final canRead = hasPermission(auth.permissions, RbacPermissions.paymentRead);
+    final canRead =
+        hasPermission(auth.permissions, RbacPermissions.paymentRead);
 
     if (!canRead) {
       return Scaffold(
@@ -72,9 +73,11 @@ class _PaymentsListPageState extends ConsumerState<PaymentsListPage> {
         children: [
           _FilterBar(
             filter: _filter,
-            selectedStudent: _filter.studentId != null ? studentAsync.valueOrNull : null,
+            selectedStudent:
+                _filter.studentId != null ? studentAsync.valueOrNull : null,
             onPickStudent: () => _pickStudent(context),
-            onClearStudent: () => setState(() => _filter = _filter.copyWith(clearStudent: true)),
+            onClearStudent: () =>
+                setState(() => _filter = _filter.copyWith(clearStudent: true)),
             onChanged: (next) => setState(() => _filter = next),
           ),
           Expanded(
@@ -98,7 +101,8 @@ class _PaymentsListPageState extends ConsumerState<PaymentsListPage> {
                   );
                 },
                 loading: () => const AppLoading(),
-                error: (e, st) => AppErrorWidget(message: e.toString(), onRetry: _refresh),
+                error: (e, st) =>
+                    AppErrorWidget(message: e.toString(), onRetry: _refresh),
               ),
             ),
           ),
@@ -169,13 +173,15 @@ class _FilterBar extends StatelessWidget {
                 Navigator.pop(ctx);
               },
             ),
-            ...PaymentMethod.values.map((m) => ListTile(
-                  title: Text(m.label),
-                  onTap: () {
-                    onChanged(filter.copyWith(method: m));
-                    Navigator.pop(ctx);
-                  },
-                )),
+            ...PaymentMethod.values.map(
+              (m) => ListTile(
+                title: Text(m.label),
+                onTap: () {
+                  onChanged(filter.copyWith(method: m));
+                  Navigator.pop(ctx);
+                },
+              ),
+            ),
           ],
         ),
       ),
@@ -192,17 +198,25 @@ class _PaymentTile extends StatelessWidget {
     return Card(
       child: ListTile(
         title: Text(MoneyFormatter.format(payment.amount)),
-        subtitle: Text('${payment.method.label} • ${payment.reference ?? "Pas de réf."}'),
-        trailing: StatusBadge(label: payment.status.label, color: _statusColor(payment.status)),
+        subtitle: Text(
+          '${payment.method.label} • ${payment.reference ?? "Pas de réf."}',
+        ),
+        trailing: StatusBadge(
+          label: payment.status.label,
+          color: _statusColor(payment.status),
+        ),
       ),
     );
   }
 
   Color _statusColor(PaymentStatus s) {
     switch (s) {
-      case PaymentStatus.valide: return Colors.green;
-      case PaymentStatus.enAttente: return Colors.orange;
-      default: return Colors.grey;
+      case PaymentStatus.valide:
+        return Colors.green;
+      case PaymentStatus.enAttente:
+        return Colors.orange;
+      default:
+        return Colors.grey;
     }
   }
 }
@@ -210,7 +224,8 @@ class _PaymentTile extends StatelessWidget {
 class _StudentPickerDialog extends ConsumerStatefulWidget {
   const _StudentPickerDialog();
   @override
-  ConsumerState<_StudentPickerDialog> createState() => _StudentPickerDialogState();
+  ConsumerState<_StudentPickerDialog> createState() =>
+      _StudentPickerDialogState();
 }
 
 class _StudentPickerDialogState extends ConsumerState<_StudentPickerDialog> {

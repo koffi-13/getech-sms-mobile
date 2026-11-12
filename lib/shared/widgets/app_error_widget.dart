@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
 
 /// Widget d'erreur réutilisable avec bouton de réessai.
+///
+/// [Fix-ERROR-HUMANIZE] Les messages techniques (DioException, stack traces,
+/// « Null check operator »…) ne sont PLUS affichés bruts à l'utilisateur :
+/// [AppErrorWidget.humanize] les traduit en messages clairs et actionnables.
 class AppErrorWidget extends StatelessWidget {
   const AppErrorWidget({
     super.key,
@@ -13,10 +17,132 @@ class AppErrorWidget extends StatelessWidget {
   final VoidCallback? onRetry;
   final bool compact;
 
+  /// Convertit un message d'erreur brut (souvent `e.toString()`) en message
+  /// compréhensible par un utilisateur non technique.
+  ///
+  /// Les messages serveur déjà rédigés (ApiException « Erreur : … » avec
+  /// texte français) passent tels quels ; seuls les motifs techniques
+  /// connus sont réécrits.
+  static String humanize(String raw) {
+    final m = raw.toLowerCase();
+
+    // [Fix-ERROR-DEV-INFO] Formats « ApiException(403): … » /
+    // « DioException … » : extraire le message interne puis traduire le
+    // code HTTP — l'utilisateur ne doit JAMAIS voir le nom d'une classe
+    // d'exception (retour V9 : « éviter d'afficher les informations de
+    // développement dans les messages d'erreur »).
+    final apiMatch = RegExp(
+      r'apiexception\((\d{3})[^)]*\)\s*:\s*(.*)',
+      caseSensitive: false,
+      multiLine: true,
+    ).firstMatch(raw);
+    if (apiMatch != null) {
+      final code = int.tryParse(apiMatch.group(1) ?? '') ?? 0;
+      final inner = (apiMatch.group(2) ?? '').trim();
+      switch (code) {
+        case 401:
+          return 'Session expirée. Reconnectez-vous.';
+        case 403:
+          return 'Vous n\'avez pas les droits nécessaires pour cette action.';
+        case 404:
+          return 'Fonctionnalité ou donnée non disponible sur ce serveur.';
+        case 409:
+          return inner.isNotEmpty && !inner.toLowerCase().contains('exception')
+              ? inner
+              : 'Cette donnée existe déjà.';
+        case 422:
+          return 'Certaines données envoyées sont invalides. Vérifiez les '
+              'champs puis réessayez.';
+        default:
+          return 'Le serveur a signalé une erreur ($code). '
+              'Réessayez dans un instant.';
+      }
+    }
+
+    // Réseau / serveur injoignable.
+    if (m.contains('connectiontimeout') ||
+        m.contains('connection refused') ||
+        m.contains('socketexception') ||
+        m.contains('network is unreachable') ||
+        m.contains('failed host lookup') ||
+        m.contains('connectionerror') ||
+        m.contains('software caused connection abort')) {
+      return 'Le serveur est injoignable. Vérifiez que le serveur desktop '
+          'est démarré et que le mobile est sur le même réseau ; vos '
+          'données locales restent consultables.';
+    }
+    if (m.contains('receivetimeout') || m.contains('sendtimeout') ||
+        m.contains('timeoutexception') || m.contains('timed out')) {
+      return 'Le serveur a mis trop de temps à répondre. Réessayez dans un '
+          'instant ; vos données locales restent consultables.';
+    }
+    if (m.contains('handshake') || m.contains('badcertificate')) {
+      return 'Problème de sécurité de connexion avec le serveur '
+          '(certificat).';
+    }
+
+    // Erreurs HTTP serveur.
+    if (m.contains('status code of 500') || m.contains('internal server')) {
+      return 'Le serveur a rencontré une erreur interne (500). '
+          'Réessayez plus tard ou contactez l\'administrateur.';
+    }
+    if (m.contains('status code of 502') || m.contains('status code of 503') ||
+        m.contains('status code of 504')) {
+      return 'Le serveur est momentanément indisponible. Réessayez dans un '
+          'instant.';
+    }
+    if (m.contains('status code of 404')) {
+      return 'Fonctionnalité non disponible sur ce serveur (mise à jour du '
+          'serveur desktop GeTech-SMS requise).';
+    }
+    if (m.contains('status code of 403')) {
+      return 'Vous n\'avez pas les droits nécessaires pour cette action.';
+    }
+    if (m.contains('status code of 401')) {
+      return 'Session expirée. Reconnectez-vous.';
+    }
+    if (m.contains('status code of 422')) {
+      return 'Certaines données envoyées sont invalides. Vérifiez les '
+          'champs puis réessayez.';
+    }
+
+    // [Fix-CLASSROOM-DETAIL-ERROR] « Classe #X introuvable » → message
+    // actionnable (tirer pour rafraîchir) plutôt que donnée inattendue.
+    // ⚠️ AVANT les exceptions Dart génériques : « Bad state: Classe #12
+    // introuvable » contient aussi « bad state: ».
+    if (m.contains('introuvable')) {
+      return 'L\'élément demandé est introuvable. Tirez la liste pour la '
+          'rafraîchir, puis réessayez.';
+    }
+
+    // Exceptions Dart courantes.
+    if (m.contains('null check operator') ||
+        m.contains('nullcheckerror') ||
+        m.contains('bad state:') ||
+        m.contains('rangeerror') ||
+        m.contains('formatexception')) {
+      return 'Une donnée inattendue a été reçue. Réessayez ou contactez '
+          'l\'administrateur si le problème persiste.';
+    }
+    if (m.contains('offline') || m.contains('hors-ligne') ||
+        m.contains('injoignable')) {
+      return 'Mode hors-ligne : cette action nécessite une connexion au '
+          'serveur. Vos données locales restent consultables.';
+    }
+
+    // Messages déjà rédigés (français, ApiException, etc.) → inchangés.
+    return raw;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // [Fix-ERROR-HUMANIZE] plus d'exception brute affichée à l'écran.
+    final friendly = humanize(message);
     if (compact) {
+      // [Fix-FONT-SCALE-OVERFLOW] V17 — en grande police, le message + le
+      // bouton « Réessayer » dépassaient la ligne : le texte est Flexible
+      // (ellipsis) et le bouton ne force plus la largeur.
       return Padding(
         padding: const EdgeInsets.all(12),
         child: Row(
@@ -25,13 +151,18 @@ class AppErrorWidget extends StatelessWidget {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                message,
+                friendly,
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: theme.colorScheme.error),
               ),
             ),
             if (onRetry != null)
-              TextButton(onPressed: onRetry, child: const Text('Réessayer')),
+              Flexible(
+                child: TextButton(
+                  onPressed: onRetry,
+                  child: const Text('Réessayer'),
+                ),
+              ),
           ],
         ),
       );
@@ -46,14 +177,22 @@ class AppErrorWidget extends StatelessWidget {
             const SizedBox(height: 16),
             Text(
               'Une erreur est survenue',
+              textAlign: TextAlign.center,
               style: theme.textTheme.titleMedium,
             ),
             const SizedBox(height: 8),
-            Text(
-              message,
-              textAlign: TextAlign.center,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
+            Flexible(
+              // [Fix-FONT-SCALE-OVERFLOW] V17 — message d'erreur pouvant
+              // être long + grande police : la colonne reste contrainte
+              // (scrollable par le parent) sans overflow rigide.
+              child: SingleChildScrollView(
+                child: Text(
+                  friendly,
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
               ),
             ),
             if (onRetry != null) ...[

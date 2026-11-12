@@ -28,6 +28,7 @@ import '../../shared/widgets/empty_state.dart';
 import '../../shared/widgets/section_header.dart';
 import 'connection_state.dart';
 import 'connections_controller.dart';
+import 'server_profiles.dart';
 
 /// Page d'appairage.
 class DevicePairingPage extends ConsumerStatefulWidget {
@@ -54,6 +55,15 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+    // [Fix-PAIRING-KEYBOARD] Fermer le clavier au changement d'onglet :
+    // sinon le clavier restait ouvert en arrivant sur l'onglet scanner QR et
+    // le contenu fixe de cet onglet débordait verticalement (bandeau
+    // « RIGHT OVERFLOWED » jaune pendant la transition).
+    _tabController.addListener(() {
+      if (!_tabController.indexIsChanging) return;
+      final focus = FocusManager.instance.primaryFocus;
+      focus?.unfocus();
+    });
   }
 
   @override
@@ -186,6 +196,14 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
     return Scaffold(
       appBar: AppBar(
         title: const Text('Appairage du terminal'),
+        // [Multi-serveurs] Retour direct aux serveurs enregistrés.
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.dns_rounded),
+            tooltip: 'Serveurs enregistrés',
+            onPressed: () => context.go('/connections'),
+          ),
+        ],
         bottom: TabBar(
           controller: _tabController,
           tabs: const [
@@ -195,47 +213,126 @@ class _DevicePairingPageState extends ConsumerState<DevicePairingPage>
           ],
         ),
       ),
-      body: Stack(
+      body: Column(
         children: [
-          TabBarView(
-            controller: _tabController,
-            children: [
-              _DiscoveryTab(onSelect: _prefillFromDiscovered),
-              _ManualForm(
-                formKey: _formKey,
-                serverCtrl: _serverCtrl,
-                establishmentCtrl: _establishmentCtrl,
-                pairingTokenCtrl: _pairingTokenCtrl,
-                onSubmit: _submitManual,
-                submitting: _submitting,
-                tolerateClockSkew: _tolerateClockSkew,
-                onTolerateChanged: (v) => setState(() => _tolerateClockSkew = v),
-                error: _submitError,
-              ),
-              _QrTab(
-                onScan: _openQrScanner,
-                onManual: () => _tabController.animateTo(1),
-              ),
-            ],
-          ),
-          if (_submitting)
-            Container(
-              color: Colors.black.withValues(alpha: 0.35),
-              alignment: Alignment.center,
-              child: const Card(
-                child: Padding(
-                  padding: EdgeInsets.all(20),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      CircularProgressIndicator(),
-                      SizedBox(height: 16),
-                      Text('Appairage en cours…'),
-                    ],
-                  ),
+          // [Multi-serveurs] Retour aux serveurs existants : bascule directe
+          // sans ré-appairage.
+          const _ExistingServersStrip(),
+          Expanded(
+            child: Stack(
+              children: [
+                TabBarView(
+                  controller: _tabController,
+                  children: [
+                    _DiscoveryTab(onSelect: _prefillFromDiscovered),
+                    _ManualForm(
+                      formKey: _formKey,
+                      serverCtrl: _serverCtrl,
+                      establishmentCtrl: _establishmentCtrl,
+                      pairingTokenCtrl: _pairingTokenCtrl,
+                      onSubmit: _submitManual,
+                      submitting: _submitting,
+                      tolerateClockSkew: _tolerateClockSkew,
+                      onTolerateChanged: (v) =>
+                          setState(() => _tolerateClockSkew = v),
+                      error: _submitError,
+                    ),
+                    _QrTab(
+                      onScan: _openQrScanner,
+                      onManual: () => _tabController.animateTo(1),
+                    ),
+                  ],
                 ),
-              ),
+                if (_submitting)
+                  Container(
+                    color: Colors.black.withValues(alpha: 0.35),
+                    alignment: Alignment.center,
+                    child: const Card(
+                      child: Padding(
+                        padding: EdgeInsets.all(20),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircularProgressIndicator(),
+                            SizedBox(height: 16),
+                            Text('Appairage en cours…'),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Bandeau « Serveurs existants » : retour rapide à un serveur déjà appairé
+/// (bascule directe, sans ré-appairage).
+class _ExistingServersStrip extends ConsumerWidget {
+  const _ExistingServersStrip();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final regAsync = ref.watch(serverProfileRegistryProvider);
+    final conn = ref.watch(connectionProvider);
+
+    final others = regAsync.maybeWhen(
+      data: (reg) => reg.profiles
+          .where((p) => p.id != conn.profileId)
+          .toList(growable: false),
+      orElse: () => const <ServerProfile>[],
+    );
+
+    if (others.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      width: double.infinity,
+      color: theme.colorScheme.surfaceContainerLow,
+      padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Serveurs déjà appairés',
+            style: theme.textTheme.labelMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 4),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                for (final p in others)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8, top: 4, bottom: 4),
+                    child: ActionChip(
+                      avatar: Icon(
+                        Icons.dns_rounded,
+                        size: 18,
+                        color: theme.colorScheme.primary,
+                      ),
+                      label: Text(p.displayName),
+                      onPressed: () async {
+                        await ref
+                            .read(multiServerControllerProvider)
+                            .switchTo(p.id);
+                      },
+                    ),
+                  ),
+                TextButton(
+                  onPressed: () => context.go('/connections'),
+                  child: const Text('Gérer'),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -284,10 +381,12 @@ class _DiscoveryTab extends ConsumerWidget {
                       margin: const EdgeInsets.only(bottom: 8),
                       child: ListTile(
                         leading: CircleAvatar(
-                          backgroundColor:
-                              theme.colorScheme.primaryContainer.withValues(alpha: 0.6),
-                          child: Icon(Icons.dns,
-                              color: theme.colorScheme.onPrimaryContainer),
+                          backgroundColor: theme.colorScheme.primaryContainer
+                              .withValues(alpha: 0.6),
+                          child: Icon(
+                            Icons.dns,
+                            color: theme.colorScheme.onPrimaryContainer,
+                          ),
                         ),
                         title: Text(s.establishmentName ?? s.name),
                         subtitle: Text('${s.ip}:${s.port}'
@@ -353,10 +452,13 @@ class _ManualForm extends StatelessWidget {
       key: formKey,
       child: ListView(
         padding: const EdgeInsets.all(16),
+        // [Fix-PAIRING-KEYBOARD] Le dernier champ (token) restait masqué
+        // par le clavier : padding bas dynamique = hauteur du clavier.
         children: [
           const SectionHeader(
             title: 'Appairage manuel',
-            subtitle: 'Saisissez les informations affichées sur le terminal desktop.',
+            subtitle:
+                'Saisissez les informations affichées sur le terminal desktop.',
             icon: Icons.edit_note,
           ),
           const SizedBox(height: 8),
@@ -427,7 +529,9 @@ class _ManualForm extends StatelessWidget {
             value: tolerateClockSkew,
             onChanged: (v) => onTolerateChanged(v ?? true),
             title: const Text('Tolérer les décalages d\'horloge'),
-            subtitle: const Text('Évite les erreurs d\'expiration prématurée (Mode Local Forcé)'),
+            subtitle: const Text(
+              'Évite les erreurs d\'expiration prématurée (Mode Local Forcé)',
+            ),
             controlAffinity: ListTileControlAffinity.leading,
             contentPadding: EdgeInsets.zero,
             dense: true,
@@ -456,6 +560,10 @@ class _ManualForm extends StatelessWidget {
               color: theme.colorScheme.onSurfaceVariant,
             ),
           ),
+          // [Fix-PAIRING-KEYBOARD] Espace sous le contenu = clavier ouvert.
+          SizedBox(
+            height: MediaQuery.of(context).viewInsets.bottom,
+          ),
         ],
       ),
     );
@@ -474,9 +582,12 @@ class _QrTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
+    // [Fix-PAIRING-KEYBOARD] Contenu scrollable : si le clavier restait
+    // ouvert au moment du passage à cet onglet, le Scaffold réduisait la
+    // hauteur du body et cette colonne fixe débordait (bandeau jaune).
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(24),
+      child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -484,11 +595,15 @@ class _QrTab extends StatelessWidget {
               width: 96,
               height: 96,
               decoration: BoxDecoration(
-                color: theme.colorScheme.primaryContainer.withValues(alpha: 0.4),
+                color:
+                    theme.colorScheme.primaryContainer.withValues(alpha: 0.4),
                 shape: BoxShape.circle,
               ),
-              child: Icon(Icons.qr_code_scanner,
-                  size: 48, color: theme.colorScheme.primary),
+              child: Icon(
+                Icons.qr_code_scanner,
+                size: 48,
+                color: theme.colorScheme.primary,
+              ),
             ),
             const SizedBox(height: 20),
             Text(

@@ -1,11 +1,20 @@
 /// Moteur de synchronisation offline-first (pull / push, server-wins).
 library;
 
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:dio/dio.dart' as dio_pkg;
 import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart' as log_pkg;
+import 'package:uuid/uuid.dart';
 
 import '../../features/connections/connection_state.dart';
+import '../../features/students/student_controller.dart';
+import '../../features/students/student_photos.dart';
+import '../../shared/models/grade_dto.dart';
+import '../../shared/models/student_dto.dart';
 import '../../shared/models/sync_dto.dart';
 import '../database/database.dart';
 import '../network/api_endpoints.dart';
@@ -18,6 +27,31 @@ final log_pkg.Logger _log = log_pkg.Logger(
   printer: log_pkg.PrettyPrinter(noBoxingByDefault: true),
   level: log_pkg.Level.debug,
 );
+
+const _mobileCacheVersionKey = '__mobile_cache_version__';
+
+// [Fix-SYNC-CACHE-VERSION-DELTA] V20 — 3 → 4. Retour utilisateur : après
+// installation de la nouvelle APK PAR-DESSUS l'ancienne, « les périodes se
+// chargent hors-ligne mais pas les évaluations ». Cause : l'ancienne APK
+// (e1e07ef) contenait DÉJÀ la version 3 (introduite à dea0674) et avait
+// synchronisé → syncMetadata portait lastCount=3 avec un curseur RÉCENT.
+// La nouvelle APK voyait « lastCount == 3 == _mobileCacheVersion » → pull
+// DELTA (since = curseur récent) ; or le serveur filtre
+// `updated_at > since` : les évaluations créées il y a longtemps (jamais
+// modifiées) n'étaient JAMAIS renvoyées, et la table locale restait vide.
+// Les périodes s'affichaient car l'ancienne app les répliquait déjà (cache
+// conservé par la mise à jour) → symptôme asymétrique.
+// Bump → tout appareil venant d'une APK antérieure force un pull COMPLET
+// (since = 2000-01-01) et reconstitue les tables vides (assessments,
+// weekly_schedules, cycles…). Régression : v20_assessments_delta_pull_test.
+//
+// [Fix-SYNC-REAL-EDT] V23 — 4 → 5 : le VRAI emploi du temps
+// (schedule_entries/schedule_sessions) n'est répliqué que depuis cette
+// version ; les APK ≤ v1.0.4 n'ont qu'un cache weekly_schedules VIDE (table
+// théorique jamais écrite par les écrans → EDT hors-ligne vide, retour
+// utilisateur 2026-11-08). Le bump force le pull complet qui remplit le
+// cache EDT réel dès la première reconnexion.
+const _mobileCacheVersion = 5;
 
 // ---------------------------------------------------------------------------
 // Helpers de lecture JSON (le serveur utilise du snake_case).
@@ -38,8 +72,7 @@ int? _rIntN(Map<String, dynamic> r, String k) => (r[k] as num?)?.toInt();
 double _rDbl(Map<String, dynamic> r, String k, {double d = 0.0}) =>
     (r[k] as num?)?.toDouble() ?? d;
 
-double? _rDblN(Map<String, dynamic> r, String k) =>
-    (r[k] as num?)?.toDouble();
+double? _rDblN(Map<String, dynamic> r, String k) => (r[k] as num?)?.toDouble();
 
 bool _rBool(Map<String, dynamic> r, String k, {bool d = false}) =>
     (r[k] as bool?) ?? d;
@@ -54,9 +87,26 @@ DateTime? _rDt(Map<String, dynamic> r, String k) {
   return null;
 }
 
+/// [Fix-SYNC-ASSESSMENT-NULL-NAME] V21 — retourne la chaîne si elle est
+/// non vide après trim, sinon null (chaîne de repli en cascade).
+String? _nonEmpty(String? s) =>
+    (s == null || s.trim().isEmpty) ? null : s;
+
 // ---------------------------------------------------------------------------
 // SyncState & Progress
 // ---------------------------------------------------------------------------
+
+/// [Fix-AUTO-SYNC] V15 — génération de synchronisation : incrémentée à la
+/// fin de chaque synchronisation qui a transféré des données (pull ou
+/// push). Les providers de données qui la surveillent (classement,
+/// évaluations, notes, classes…) se rafraîchissent alors automatiquement
+/// — retour utilisateur : « le classement devrait s'actualiser
+/// automatiquement à la connexion ».
+///
+/// ⚠️ Ne surveiller CE provider que dans des `FutureProvider.autoDispose`
+/// de lecture : il est incrémenté uniquement par [SyncEngine.syncNow]
+/// (jamais depuis les providers eux-mêmes → aucun cycle).
+final syncGenerationProvider = StateProvider<int>((ref) => 0);
 
 enum SyncStatus { idle, pulling, pushing, processing, success, error }
 
@@ -92,14 +142,17 @@ class SyncProgressNotifier extends StateNotifier<SyncProgress> {
   SyncProgressNotifier() : super(const SyncProgress());
 
   void update(SyncStatus status, double progress, String message) {
-    state = state.copyWith(status: status, progress: progress, message: message);
+    state =
+        state.copyWith(status: status, progress: progress, message: message);
   }
 
   void complete(SyncResult result) {
     state = state.copyWith(
       status: result.isSuccess ? SyncStatus.success : SyncStatus.error,
       progress: 1.0,
-      message: result.isSuccess ? 'Synchronisation réussie' : 'Erreur de synchronisation',
+      message: result.isSuccess
+          ? 'Synchronisation réussie'
+          : 'Erreur de synchronisation',
       lastResult: result,
     );
   }
@@ -109,7 +162,8 @@ class SyncProgressNotifier extends StateNotifier<SyncProgress> {
   }
 }
 
-final syncProgressProvider = StateNotifierProvider<SyncProgressNotifier, SyncProgress>((ref) {
+final syncProgressProvider =
+    StateNotifierProvider<SyncProgressNotifier, SyncProgress>((ref) {
   return SyncProgressNotifier();
 });
 
@@ -143,10 +197,23 @@ class SyncResult {
 // ---------------------------------------------------------------------------
 
 class SyncEngine {
-  SyncEngine(this._ref) : _db = _ref.read(databaseProvider);
+  SyncEngine(this._ref) {
+    _db = _ref.watch(databaseProvider);
+  }
 
   final Ref _ref;
-  final AppDatabase _db;
+
+  /// Base locale — initialisée depuis le provider (WATCH) pour suivre la
+  /// bascule de serveur : le moteur est recréé avec la base du profil actif.
+  late final AppDatabase _db;
+
+  /// [Fix-SYNC-REAL-EDT] V23 — sessions du VRAI EDT reçues lors du pull en
+  /// cours (id → class_subject_id/room/active), en attente des
+  /// `schedule_entries` qui arrivent dans la MÊME page (l'ordre des tables
+  /// de la réponse n'est pas garanti : on mémorise les sessions pour
+  /// résoudre les entrées quoi qu'il arrive).
+  Map<int, ({int? classSubjectId, String? room, bool isActive})>
+      _pendingScheduleSessions = {};
 
   Future<SyncResult> syncNow() async {
     final notifier = _ref.read(syncProgressProvider.notifier);
@@ -179,7 +246,11 @@ class SyncEngine {
       return res;
     }
 
-    notifier.update(SyncStatus.pushing, 0.4, 'Envoi des modifications locales...');
+    notifier.update(
+      SyncStatus.pushing,
+      0.4,
+      'Envoi des modifications locales...',
+    );
     final pushResult = await push();
     pushed += pushResult.pushed;
     errors.addAll(pushResult.errors);
@@ -196,12 +267,55 @@ class SyncEngine {
       errors: errors,
     );
     notifier.complete(finalResult);
+
+    // [Fix-AUTO-SYNC] V15 : une synchro qui a transféré des données rend
+    // les caches d'affichage potentiellement périmés (moyennes
+    // recalculées côté serveur après le push des notes, roster
+    // actualisé…). On incrémente la génération : les providers de
+    // lecture qui la surveillent se rafraîchissent tous seuls.
+    if (finalResult.isSuccess && (pulled > 0 || pushed > 0)) {
+      _ref.read(syncGenerationProvider.notifier).state++;
+
+      // [Fix-PHOTO-OFFLINE] Préchargement best-effort des photos des
+      // élèves du cache local : le disque n'était rempli qu'à l'affichage
+      // d'un avatar — sans consultation préalable de la liste, AUCUNE
+      // photo n'était disponible hors-ligne (retour production
+      // 2026-11-09). Plafonné à 50 ; la file interne régule la concurrence.
+      unawaited(_prefetchStudentPhotos());
+    }
     return finalResult;
+  }
+
+  /// Cf. [Fix-PHOTO-OFFLINE] : construit un cache photo LOCAL (pas le
+  /// provider — éviterait une dépendance circulaire features ↔ core) et
+  /// précharge les photos des 50 premiers élèves non supprimés du Drift.
+  Future<void> _prefetchStudentPhotos() async {
+    try {
+      final url = _ref.read(connectionProvider).serverUrl;
+      if (url == null) return;
+      final rows = await (_db.select(_db.students)
+            ..where((t) => t.isDeleted.equals(false)))
+          .get();
+      if (rows.isEmpty) return;
+      final cache = StudentPhotoCache(
+        dio: _ref.read(dioProvider),
+        serverUrl: url,
+      );
+      await StudentPhotoCache.prefetchPhotos(
+        cache,
+        rows.map((s) => s.id).toList(),
+      );
+      _log.i('Photos préchargées (best-effort, ≤50) sur '
+          '${rows.length} élèves du cache local');
+    } catch (e) {
+      _log.w('Préchargement des photos ignoré ($e)');
+    }
   }
 
   Future<SyncResult> pull() async {
     final conn = _ref.read(connectionProvider);
-    if (!conn.canReachServer || conn.serverUrl == null) {
+    // [Fix-OFFLINE] `checking` ne bloque pas le pull (démarrage à froid).
+    if ((!conn.canReachServer && !conn.isChecking) || conn.serverUrl == null) {
       return SyncResult(
         timestamp: DateTime.now(),
         errors: ['Serveur injoignable'],
@@ -209,51 +323,138 @@ class SyncEngine {
     }
 
     final dio = _ref.read(dioProvider);
-    final since = conn.lastSyncAt ?? DateTime(2000, 1, 1);
+    final cacheVersion = await (_db.select(_db.syncMetadata)
+          ..where(
+            (t) => t.tableNameColumn.equals(_mobileCacheVersionKey),
+          ))
+        .getSingleOrNull();
+    final since = cacheVersion?.lastCount == _mobileCacheVersion
+        ? cacheVersion!.lastSyncedAt ?? DateTime(2000, 1, 1)
+        : DateTime(2000, 1, 1);
     final url = buildUrl(conn.serverUrl!, ApiEndpoints.syncPull);
 
     try {
-      _log.i('Pull depuis $url (since=${since.toIso8601String()})');
-      final resp = await dio.getJson<Map<String, dynamic>>(
-        url,
-        query: {'since': since.toUtc().toIso8601String()},
-      );
-      final data = resp.data;
-      if (data == null) {
-        return SyncResult(
-          timestamp: DateTime.now(),
-          errors: ['Réponse vide du serveur'],
+      // [Fix-SYNC-PULL-SHAPE] Le serveur pagine à `limit_per_table`
+      // (défaut 400) et l'ancien client ne récupérait QUE la première
+      // page — pire, le curseur avançait ensuite à `server_time`, donc
+      // les lignes au-delà de la page 1 n'étaient JAMAIS répliquées.
+      // On demande maintenant le maximum serveur (2000) et on pagine
+      // tant qu'une table signale `has_more`.
+      const kPullLimit = 2000;
+      const kMaxPages = 30; // 2000×30 = 60 000 lignes/table max.
+      var pulled = 0;
+      SyncPullResponse? lastPage;
+      final pageErrors = <String>[];
+
+      for (var page = 0; page < kMaxPages; page++) {
+        _log.i('Pull depuis $url (since=${since.toIso8601String()}, '
+            'page=$page)');
+        final resp = await dio.getJson<Map<String, dynamic>>(
+          url,
+          query: {
+            'since': since.toUtc().toIso8601String(),
+            'limit_per_table': kPullLimit,
+            'reconcile': 'true',
+            if (page > 0) 'offset': page * kPullLimit,
+          },
         );
+        final data = resp.data;
+        if (data == null) {
+          return SyncResult(
+            timestamp: DateTime.now(),
+            errors: ['Réponse vide du serveur'],
+          );
+        }
+
+        final pullResp = SyncPullResponse.fromJson(data);
+        lastPage = pullResp;
+        _log.i('Pull reçu (page $page) : ${pullResp.totalChanges} '
+            'changements${pullResp.anyHasMore ? ' (pagination en cours)' : ''}');
+
+        final notifier = _ref.read(syncProgressProvider.notifier);
+        final total = pullResp.changes.length + 1;
+        var processed = 0;
+        final entries = pullResp.changes.entries.toList()
+          ..sort((left, right) {
+            final leftPriority = left.key == 'levels'
+                ? 0
+                : left.key == 'classrooms'
+                    ? 2
+                    : 1;
+            final rightPriority = right.key == 'levels'
+                ? 0
+                : right.key == 'classrooms'
+                    ? 2
+                    : 1;
+            return leftPriority.compareTo(rightPriority);
+          });
+        for (final entry in entries) {
+          processed++;
+          notifier.update(
+            SyncStatus.processing,
+            0.1 + (0.3 * (processed / total)),
+            'Traitement de ${entry.key}...',
+          );
+          // [Fix-SYNC-FAIL-SOFT] V11 — une table en échec n'ABORTE PLUS le
+          // pull entier : l'ancien rethrow laissait le cache Drift vide
+          // dès qu'UNE table était en erreur (ex. school_years avant le
+          // correctif de champ) alors que TOUTES les autres tables
+          // (périodes, matières, évaluations, roster) étaient perdus pour
+          // la même synchronisation.
+          try {
+            await _applyTableChanges(
+              entry.key,
+              entry.value,
+              pullResp.serverTime,
+            );
+          } catch (e) {
+            _log.e('Pull : table « ${entry.key} » ignorée ($e)');
+            pageErrors.add(
+              'Table ${entry.key} non répliquée (${e.runtimeType})',
+            );
+          }
+        }
+        pulled += pullResp.totalChanges;
+
+        if (pullResp.deleted.isNotEmpty) {
+          await _applyDeletes(pullResp.deleted, pullResp.serverTime);
+        }
+
+        // Réconciliation des suppressions : ids actifs serveur vs cache
+        // local (uniquement pour les tables complètes — pas en pagination).
+        if (!pullResp.anyHasMore) {
+          await _reconcileDeletedRows(pullResp);
+        }
+
+        if (!pullResp.anyHasMore) break;
+        if (pullResp.totalChanges == 0) {
+          // Sécurité : has_more sans rien recevoir → on arrête pour éviter
+          // une boucle infinie (serveur ancien sans support d'offset).
+          pageErrors.add('Pagination interrompue (serveur sans offset ?)');
+          break;
+        }
       }
 
-      final pullResp = SyncPullResponse.fromJson(data);
-      _log.i('Pull reçu : ${pullResp.totalChanges} changements, '
-          '${pullResp.deleted.length} suppressions');
 
-      final notifier = _ref.read(syncProgressProvider.notifier);
-      int processed = 0;
-      final total = pullResp.changes.length + (pullResp.deleted.isNotEmpty ? 1 : 0);
-
-      for (final entry in pullResp.changes.entries) {
-        processed++;
-        notifier.update(SyncStatus.processing, 0.1 + (0.3 * (processed/total)), 'Traitement de ${entry.key}...');
-        await _applyTableChanges(entry.key, entry.value, pullResp.serverTime);
+      final pullResp =
+          lastPage ?? SyncPullResponse(serverTime: DateTime.now().toUtc());
+      if (pageErrors.isNotEmpty) {
+        _log.w('Pull : ${pageErrors.join('; ')}');
       }
 
-      if (pullResp.deleted.isNotEmpty) {
-        notifier.update(SyncStatus.processing, 0.4, 'Traitement des suppressions...');
-        await _applyDeletes(pullResp.deleted, pullResp.serverTime);
+      if (pageErrors.isEmpty) {
+        await _ref.read(connectionProvider.notifier).recordSync(count: pulled);
+
+        // Le curseur n'avance qu'après la DERNIÈRE page (sinon les pages
+        // suivantes auraient filtré les lignes déjà reçues). Un pull partiel
+        // conserve aussi l'ancien curseur pour retenter les tables en erreur.
+        await _updateSyncMetadata(pullResp.serverTime, pulled);
       }
-
-      await _ref
-          .read(connectionProvider.notifier)
-          .recordSync(count: pullResp.totalChanges);
-
-      await _updateSyncMetadata(pullResp.serverTime, pullResp.totalChanges);
 
       return SyncResult(
-        pulled: pullResp.totalChanges,
+        pulled: pulled,
         timestamp: pullResp.serverTime,
+        errors: pageErrors,
       );
     } on ApiException catch (e) {
       _log.w('Pull échoué (API) : ${e.message}');
@@ -264,9 +465,81 @@ class SyncEngine {
     }
   }
 
+  /// [Fix-SYNC-PULL-SHAPE] Réconciliation des suppressions : pour chaque
+  /// table dont le serveur a renvoyé la liste COMPLÈTE des ids actifs
+  /// (`reconcile=true` + `has_more=false`), les lignes locales non sales
+  /// (`isDirty=false`) absentes de cette liste sont marquées supprimées.
+  ///
+  /// L'ancien code attendait un champ `deleted` que le serveur n'envoie
+  /// JAMAIS : les suppressions distantes n'étaient donc jamais répliquées.
+  Future<void> _reconcileDeletedRows(SyncPullResponse resp) async {
+    for (final entry in resp.activeIdsByTable.entries) {
+      final activeIds = entry.value;
+      if (activeIds == null) continue; // table incomplète (pagination).
+      final localIds = await _localIdsForTable(entry.key);
+      if (localIds == null) continue; // table non répliquée localement.
+      final active = activeIds.toSet();
+      final missing = localIds.where((id) => !active.contains(id)).toList();
+      if (missing.isEmpty) continue;
+      _log.i('Réconciliation ${entry.key} : ${missing.length} suppression(s)');
+      for (final id in missing) {
+        await _updateRowSyncState(
+          entry.key,
+          id,
+          resp.serverTime,
+          deleted: true,
+        );
+      }
+    }
+  }
+
+  /// Ids locaux non sales d'une table répliquée (null si table inconnue).
+  Future<List<int>?> _localIdsForTable(String table) async {
+    try {
+      switch (table) {
+        case 'classrooms':
+          return (await (_db.select(_db.classrooms)
+                    ..where((t) => t.isDirty.equals(false)))
+                  .get())
+              .map((r) => r.id)
+              .toList();
+        case 'class_subjects':
+          return (await (_db.select(_db.classSubjects)
+                    ..where((t) => t.isDirty.equals(false)))
+                  .get())
+              .map((r) => r.id)
+              .toList();
+        case 'assessments':
+          return (await (_db.select(_db.assessments)
+                    ..where((t) => t.isDirty.equals(false)))
+                  .get())
+              .map((r) => r.id)
+              .toList();
+        case 'students':
+          return (await (_db.select(_db.students)
+                    ..where((t) => t.isDirty.equals(false)))
+                  .get())
+              .map((r) => r.id)
+              .toList();
+        case 'subjects':
+          return (await (_db.select(_db.subjects)
+                    ..where((t) => t.isDirty.equals(false)))
+                  .get())
+              .map((r) => r.id)
+              .toList();
+        default:
+          return null; // tables sans réconciliation locale (satellites…).
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<SyncResult> push() async {
     final conn = _ref.read(connectionProvider);
-    if (!conn.canReachServer || conn.serverUrl == null) {
+    // [Fix-OFFLINE] L'état `checking` (démarrage à froid) ne bloque pas :
+    // la requête échouera d'elle-même si le serveur est injoignable.
+    if ((!conn.canReachServer && !conn.isChecking) || conn.serverUrl == null) {
       return SyncResult(
         timestamp: DateTime.now(),
         errors: ['Serveur injoignable'],
@@ -280,124 +553,1002 @@ class SyncEngine {
       return SyncResult(timestamp: DateTime.now());
     }
 
-    // [Fix-OUTBOX-LINES] Le serveur attend {"lines":[{line_id,table,op,
-    // data}]} — l'ancien corps {"changes":{table:[payloads]}} recevait 422
-    // à CHAQUE appel (validation `lines` manquant) : l'outbox ne s'est
-    // jamais vidée, chaque écriture hors-ligne était réessayée puis
-    // écrasée par le pull (« jamais envoyée au serveur », retour terrain
-    // 2026-11-12). L'id d'enregistrement est FUSIONNÉ dans `data` car le
-    // payload d'un PATCH ne le porte pas.
-    final lines = <Map<String, dynamic>>[];
-    for (final entry in pending) {
-      if (entry.recordId == null) continue;
-      lines.add({
-        'line_id': '${entry.tableNameColumn}:${entry.recordId}',
-        'table': entry.tableNameColumn,
-        'op': entry.operation.toUpperCase() == 'DELETE'
-            ? 'delete'
-            : 'upsert',
-        'data': {'id': entry.recordId, ...entry.payloadMap},
-      });
-    }
-    // Créations sans id corrélable : le protocole v1 ne peut pas les
-    // associer — erreur explicite plutôt que de bloquer toute la file.
-    final orphans = pending.where((e) => e.recordId == null).toList();
+    var pushed = 0;
+    final errors = <String>[];
 
+    // ---------------------------------------------------------------------
+    // 1. [Grade-Validation] Soumissions de notes hors-ligne → endpoint
+    // dédié (POST /grades/assessments/{id}/grades) avec sémantique de
+    // file de validation. Jamais via /sync/push (le push direct des
+    // notes serait écrasé / bypasserait la validation).
+    // ---------------------------------------------------------------------
+    final submissions = pending
+        .where((e) => e.tableNameColumn == 'grade_submission')
+        .toList(growable: false);
+
+    // [Fix-STUDENT-DUP] Les mutations d'élèves (POST/PATCH hors-ligne)
+    // passent par les endpoints REST dédiés — `/sync/push` rejette la
+    // table `students` (lecture seule côté serveur), ce qui laissait les
+    // modifications hors-ligne partir en erreur « read-only » sans jamais
+    // atteindre le serveur.
+    final studentMutations = pending
+        .where(
+          (e) =>
+              e.tableNameColumn == 'students' &&
+              e.operation.toUpperCase() != 'DELETE',
+        )
+        .toList(growable: false);
+    final studentDeletes = pending
+        .where(
+          (e) =>
+              e.tableNameColumn == 'students' &&
+              e.operation.toUpperCase() == 'DELETE',
+        )
+        .toList(growable: false);
+    // [Fix-PHOTO-OFFLINE] Photos d'élèves prises hors-ligne : stockées en
+    // base64 dans le payload (le cache disque peut être purgé par l'OS),
+    // rejouées en multipart vers POST /students/{id}/photo à la
+    // reconnexion, via le même garde-fou anti-retry infini.
+    final studentPhotos = pending
+        .where((e) => e.tableNameColumn == 'student_photo')
+        .toList(growable: false);
+    final rest = pending
+        .where(
+          (e) =>
+              e.tableNameColumn != 'grade_submission' &&
+              e.tableNameColumn != 'students' &&
+              e.tableNameColumn != 'student_photo',
+        )
+        .toList(growable: false);
+
+    for (final entry in submissions) {
+      try {
+        pushed += await _pushGradeSubmission(entry, outbox);
+      } catch (e) {
+        _log.w('Soumission notes #${entry.id} échouée : $e');
+        errors.add('Notes hors-ligne : $e');
+        // Garde-fou anti-retry infini : après 5 tentatives on abandonne
+        // l'entrée (erreur conservée dans lastError).
+        if (entry.attempts >= 4) {
+          await outbox.markProcessed(
+            entry.id,
+            error: 'Abandon après ${entry.attempts + 1} tentatives : $e',
+          );
+        }
+      }
+    }
+
+    // [Fix-STUDENT-DUP] Rejeu REST des mutations d'élèves.
+    for (final entry in studentMutations) {
+      try {
+        pushed += await _pushStudentMutation(entry, outbox);
+      } catch (e) {
+        _log.w('Mutation élève #${entry.id} échouée : $e');
+        errors.add('Élève hors-ligne : $e');
+        // Garde-fou anti-retry infini (miroir des soumissions de notes).
+        if (entry.attempts >= 4) {
+          await outbox.markProcessed(
+            entry.id,
+            error: 'Abandon après ${entry.attempts + 1} tentatives : $e',
+          );
+        }
+      }
+    }
+
+    // Les suppressions d'élèves n'ont pas d'endpoint serveur : marquées
+    // traitées avec une note explicite (le soft-delete local reste).
+    for (final entry in studentDeletes) {
+      await outbox.markProcessed(
+        entry.id,
+        error: 'Suppression d\'élève non synchropluggable — le serveur '
+            'n\'expose pas DELETE /students.',
+      );
+    }
+
+    // [Fix-PHOTO-OFFLINE] Rejeu des photos prises hors-ligne.
+    for (final entry in studentPhotos) {
+      try {
+        pushed += await _pushStudentPhoto(entry, outbox);
+      } catch (e) {
+        _log.w('Photo élève #${entry.id} échouée : $e');
+        errors.add('Photo hors-ligne : $e');
+        if (entry.attempts >= 4) {
+          await outbox.markProcessed(
+            entry.id,
+            error: 'Abandon après ${entry.attempts + 1} tentatives : $e',
+          );
+        }
+      }
+    }
+
+    if (rest.isEmpty) {
+      return pushed == 0 && errors.isEmpty
+          ? SyncResult(timestamp: DateTime.now())
+          : SyncResult(
+              pushed: pushed,
+              timestamp: DateTime.now(),
+              errors: errors,
+            );
+    }
+
+    // ---------------------------------------------------------------------
+    // 2. Lignes classiques — [Fix-SYNC-PUSH] contrat RÉEL du serveur :
+    // POST /sync/push {lines: [{line_id, op, table, data}]}. L'ancien
+    // format {changes: {table: [rows]}} provoquait un 422 permanent.
+    // ---------------------------------------------------------------------
     final dio = _ref.read(dioProvider);
     final url = buildUrl(conn.serverUrl!, ApiEndpoints.syncPush);
-    final tables = <String>{for (final l in lines) l['table'] as String};
+    final lines = [
+      for (final e in rest)
+        {
+          'line_id': 'ob-${e.id}',
+          'table': e.tableNameColumn,
+          'op': e.operation.toLowerCase() == 'delete' ? 'delete' : 'upsert',
+          'data': e.payloadMap,
+        },
+    ];
 
     try {
-      _log.i('Push vers $url : ${lines.length} ligne(s), '
-          '${tables.length} table(s) (${tables.join(', ')})');
+      _log.i(
+        'Push vers $url : ${lines.length} lignes (+${submissions.length} soumissions notes)',
+      );
+
+      // [Fix-SYNC-IDEMPOTENCE] Enrichir chaque ligne du payload avec
+      // idempotency_key et device_uuid pour permettre au serveur de détecter
+      // les doublons en cas de retry réseau (coupure, timeout). Le device_uuid
+      // est récupéré depuis le secure storage (généré au pairing).
+      // Rétrocompatible : champs absents -> le serveur applique le LWW
+      // classique (server-wins).
+      String? deviceUuid;
+      try {
+        deviceUuid = await _ref.read(secureStorageProvider).getDeviceId();
+      } catch (e) {
+        _log.w('device_uuid indisponible — push sans idempotence : $e');
+      }
+
+      final SyncPushRequest pushRequest;
+      if (deviceUuid != null && deviceUuid.isNotEmpty) {
+        pushRequest = SyncPushRequest.withIdempotency(
+          lines: lines,
+          deviceUuid: deviceUuid,
+          generateIdempotencyKey: _generateIdempotencyKey,
+        );
+      } else {
+        // Fallback : push sans idempotence (rétrocompatible avec l'ancien
+        // comportement — le serveur applique LWW classique).
+        pushRequest = SyncPushRequest(lines: lines);
+      }
+
       final resp = await dio.postJson<Map<String, dynamic>>(
         url,
-        data: {'lines': lines},
+        data: pushRequest.toJson(),
       );
       final data = resp.data;
       if (data == null) {
         return SyncResult(
           timestamp: DateTime.now(),
-          errors: ['Réponse vide du serveur'],
+          pushed: pushed,
+          errors: [...errors, 'Réponse vide du serveur'],
         );
       }
 
-      // [Fix-OUTBOX-LINES] Lecture du VRAI contrat serveur :
-      // {server_time, accepted, results:[{line_id,table,status,detail}]}
-      // (+ champs de compat applied/conflicts). Chaque entrée d'outbox est
-      // tranchée par son line_id ; un verdict non-applied marque l'entrée
-      // traitée AVEC l'erreur serveur — plus de re-tentative infinie.
-      final serverTime =
-          DateTime.tryParse(data['server_time'] as String? ?? '') ??
-              DateTime.now().toUtc();
-      final resultsByLineId = <String, Map<String, dynamic>>{};
-      for (final r in (data['results'] as List? ?? const [])) {
-        if (r is Map) {
-          final key = r['line_id']?.toString();
-          if (key != null) {
-            resultsByLineId[key] = Map<String, dynamic>.from(r);
-          }
-        }
-      }
-      final applied = Map<String, int>.from(
-        (data['applied'] as Map?)?.map(
-          (k, v) => MapEntry(k.toString(), (v as num).toInt()),
-        ) ??
-            const {},
-      );
-      final appliedCount = applied.values.fold(0, (sum, n) => sum + n);
-      _log.i('Push terminé : $appliedCount appliqué(s), '
-          '${resultsByLineId.length} verdict(s)');
+      final pushResp = SyncPushResponse.fromJson(data);
+      _log.i('Push terminé : ${pushResp.accepted} appliqués '
+          '(${pushResp.results.length} lignes)');
 
-      var rejected = 0;
-      for (final entry in pending) {
-        if (entry.recordId == null) continue;
-        final verdict =
-            resultsByLineId['${entry.tableNameColumn}:${entry.recordId}'];
-        final status = verdict?['status'] as String?;
-        if (status == null) continue; // non jugée → reste en file
-        if (status == 'applied') {
-          await outbox.markProcessed(entry.id);
-          final isDelete = entry.operation.toUpperCase() == 'DELETE';
-          await _updateRowSyncState(
-            entry.tableNameColumn,
-            entry.recordId!,
-            serverTime,
-            deleted: isDelete,
-          );
-        } else {
-          rejected++;
+      for (final entry in rest) {
+        final lineId = 'ob-${entry.id}';
+        final r = pushResp.resultFor(lineId);
+        if (r == null) {
           await outbox.markProcessed(
             entry.id,
-            error: '$status : '
-                '${verdict?['detail'] ?? 'rejetée par le serveur'}',
+            error: 'Sans réponse du serveur pour cette ligne',
           );
+          continue;
         }
-      }
-      for (final orphan in orphans) {
-        await outbox.markProcessed(
-          orphan.id,
-          error: 'Création sans id corrélable (protocole v1) — '
-              'rejouez l\'opération en ligne',
-        );
+        switch (r.status) {
+          case 'applied':
+            pushed++;
+            await outbox.markProcessed(entry.id);
+            if (entry.recordId != null) {
+              await _updateRowSyncState(
+                entry.tableNameColumn,
+                entry.recordId!,
+                pushResp.serverTime,
+                deleted: entry.operation.toUpperCase() == 'DELETE',
+              );
+            }
+            break;
+          case 'queued_for_validation':
+            // [Grade-Validation] Cas théorique (les notes passent par
+            // l'endpoint dédié) — traité comme un succès partiel.
+            pushed++;
+            await outbox.markProcessed(entry.id, error: r.detail);
+            break;
+          default:
+            // conflict_server_wins | invalid | unknown_table | error :
+            // marqué traité (pas de retry infini), erreur conservée.
+            await outbox.markProcessed(
+              entry.id,
+              error: '${r.status} : ${r.detail ?? ''}',
+            );
+        }
       }
 
       await outbox.clearProcessed();
 
-      final errors = rejected == 0
-          ? const <String>[]
-          : ['$rejected écriture(s) rejetée(s) par le serveur (voir outbox)'];
+      final conflicts = pushResp.results
+          .where((r) => r.status == 'conflict_server_wins')
+          .length;
+      if (conflicts > 0) {
+        errors.add(
+          '$conflicts conflit(s) résolu(s) (server-wins) — re-pull requis',
+        );
+      }
+
       return SyncResult(
-        pushed: appliedCount,
-        timestamp: serverTime,
+        pushed: pushed,
+        timestamp: pushResp.serverTime,
         errors: errors,
       );
     } on ApiException catch (e) {
       _log.w('Push échoué (API) : ${e.message}');
-      return SyncResult(timestamp: DateTime.now(), errors: [e.message]);
+      return SyncResult(
+        timestamp: DateTime.now(),
+        pushed: pushed,
+        errors: [...errors, e.message],
+      );
     } catch (e) {
       _log.e('Push échoué (inattendu) : $e');
-      return SyncResult(timestamp: DateTime.now(), errors: [e.toString()]);
+      return SyncResult(
+        timestamp: DateTime.now(),
+        pushed: pushed,
+        errors: [...errors, e.toString()],
+      );
+    }
+  }
+
+  /// Pousse UNE soumission de notes hors-ligne via l'endpoint dédié et
+  /// applique les marques locales (queued / résolues).
+  Future<int> _pushGradeSubmission(
+    OutboxEntry entry,
+    Outbox outbox,
+  ) async {
+    final conn = _ref.read(connectionProvider);
+    final dio = _ref.read(dioProvider);
+    final payload = entry.payloadMap;
+    final assessmentId = (payload['assessment_id'] as num?)?.toInt() ?? 0;
+    final rows = ((payload['grades'] as List?) ?? const [])
+        .whereType<Map>()
+        .map(Map<String, dynamic>.from)
+        .toList();
+    if (assessmentId == 0 || rows.isEmpty) {
+      await outbox.markProcessed(entry.id, error: 'Soumission vide — ignorée');
+      return 0;
+    }
+
+    final url =
+        buildUrl(conn.serverUrl!, ApiEndpoints.assessmentGrades(assessmentId));
+    final resp = await dio.post(url, data: {'grades': rows});
+    final data = resp.data is Map
+        ? Map<String, dynamic>.from(resp.data as Map)
+        : const <String, dynamic>{};
+    final body = SaveGradesResponse.fromJson(data);
+
+    // Marques locales par ligne (valeur proposée conservée pour
+    // l'affichage « X -> Y · en attente de validation »).
+    await _applySubmissionMarks(assessmentId, rows, body);
+    await outbox.markProcessed(entry.id);
+    _log.i('Soumission notes #$assessmentId : ${body.savedCount} saved, '
+        '${body.queuedCount} queued, ${body.skippedCount} unchanged');
+    return body.savedCount + body.queuedCount + body.skippedCount;
+  }
+
+  /// [Fix-STUDENT-DUP] Pousse UNE mutation d'élève hors-ligne via l'endpoint
+  /// REST dédié (`POST /students` ou `PATCH /students/{id}`) et réconcilie
+  /// la ligne locale temporaire (id négatif) avec la réponse serveur.
+  Future<int> _pushStudentMutation(
+    OutboxEntry entry,
+    Outbox outbox,
+  ) async {
+    final conn = _ref.read(connectionProvider);
+    final dio = _ref.read(dioProvider);
+    final payload = entry.payloadMap;
+    final op = entry.operation.toUpperCase();
+    final recordId = entry.recordId;
+
+    // PATCH sur une ligne locale temporaire (id négatif — élève créé
+    // hors-ligne puis modifié) : le serveur ne connaît pas cet id → on
+    // rejoue une CRÉATION avec le payload le plus récent.
+    final isCreate = op == 'POST' || (recordId != null && recordId < 0);
+
+    if (isCreate) {
+      final url = buildUrl(conn.serverUrl!, ApiEndpoints.students);
+      final resp = await dio.post(url, data: payload);
+      if (resp.data is Map) {
+        final serverDto = StudentDto.fromJson(
+          Map<String, dynamic>.from(resp.data as Map),
+        );
+        // Réconcilie l'id local (négatif) avec l'id serveur — sinon la
+        // ligne locale ET la ligne serveure coexistaient (doublon).
+        if (recordId != null && recordId < 0) {
+          try {
+            await _ref
+                .read(studentRepositoryProvider)
+                .reconcileCreatedStudent(recordId, serverDto);
+          } catch (e) {
+            _log.w('Réconciliation élève #$recordId différée au pull : $e');
+          }
+        }
+        await outbox.markProcessed(entry.id);
+        _log.i('Création élève hors-ligne poussée : '
+            '${serverDto.matricule} (id ${serverDto.id})');
+        return 1;
+      }
+      throw const ApiException('Réponse serveur inattendue après création');
+    }
+
+    // PATCH d'un élève existant (id serveur positif).
+    if (recordId == null || recordId <= 0) {
+      await outbox.markProcessed(
+        entry.id,
+        error: 'Modification sans identifiant serveur — ignorée',
+      );
+      return 0;
+    }
+    final url = buildUrl(conn.serverUrl!, ApiEndpoints.student(recordId));
+    await dio.patch(url, data: payload);
+    // La ligne locale redevient propre (les valeurs reviendront au pull).
+    await (_db.update(_db.students)..where((t) => t.id.equals(recordId))).write(
+      const StudentsCompanion(isDirty: Value(false)),
+    );
+    await outbox.markProcessed(entry.id);
+    _log.i('Modification élève #$recordId poussée');
+    return 1;
+  }
+
+  /// [Fix-PHOTO-OFFLINE] Rejoue une photo d'élève prise hors-ligne :
+  /// multipart vers POST /students/{id}/photo (endpoint existant, 5 Mo
+  /// max). Le payload de l'outbox porte les octets en base64 — plus fiable
+  /// que le fichier cache disque, que l'OS peut purger. Après succès, le
+  /// cache photo local est invalidé pour re-télécharger la photo servie.
+  Future<int> _pushStudentPhoto(
+    OutboxEntry entry,
+    Outbox outbox,
+  ) async {
+    final conn = _ref.read(connectionProvider);
+    final dio = _ref.read(dioProvider);
+    final payload = entry.payloadMap;
+    final recordId = entry.recordId;
+
+    if (recordId == null || recordId <= 0) {
+      // Élève créé hors-ligne (id négatif) pas encore réconcilié :
+      // laisse l'entrée en file — elle remontera après le POST principal.
+      if (recordId != null && recordId < 0) {
+        throw const ApiException(
+          'Élève local non encore créé côté serveur — photo réessayée '
+          'à la prochaine synchro',
+        );
+      }
+      await outbox.markProcessed(
+        entry.id,
+        error: 'Photo sans identifiant serveur — ignorée',
+      );
+      return 0;
+    }
+
+    final b64 = payload['photo_base64'] as String?;
+    final ext = (payload['extension'] as String?) ?? 'jpg';
+    if (b64 == null || b64.isEmpty) {
+      await outbox.markProcessed(entry.id, error: 'Photo vide — ignorée');
+      return 0;
+    }
+    if (b64.length > 7000000) {
+      // ~5 Mo de binaires une fois décodés — limite serveur FileService.
+      await outbox.markProcessed(
+        entry.id,
+        error: 'Photo trop volumineuse (max 5 Mo) — ignorée',
+      );
+      return 0;
+    }
+
+    final bytes = base64Decode(b64);
+    final form = dio_pkg.FormData.fromMap({
+      'file': dio_pkg.MultipartFile.fromBytes(
+        bytes,
+        filename: 'eleve_$recordId.${ext == 'jpeg' ? 'jpg' : ext}',
+        contentType: dio_pkg.DioMediaType.parse('image/$ext'),
+      ),
+    });
+    final url = buildUrl(conn.serverUrl!, '/students/$recordId/photo');
+    await dio.post(url, data: form);
+    await outbox.markProcessed(entry.id);
+    _log.i('Photo élève #$recordId poussée (${bytes.length} octets)');
+    return 1;
+  }
+
+  /// Applique les marques issues d'une soumission sur les lignes Drift
+  /// locales (les lignes existent déjà — répliquées par le pull).
+  Future<void> _applySubmissionMarks(
+    int assessmentId,
+    List<Map<String, dynamic>> requestRows,
+    SaveGradesResponse body,
+  ) async {
+    final byStudent = <int, Map<String, dynamic>>{};
+    for (final r in requestRows) {
+      final sid = (r['student_id'] as num?)?.toInt();
+      if (sid != null) byStudent[sid] = r;
+    }
+
+    for (final line in body.results) {
+      final gradeId = line.gradeId;
+      if (gradeId == null) continue; // note nouvelle : le pull la matérialisera
+      final request = byStudent[line.studentId];
+      final queued = line.action == 'queued';
+      await (_db.update(_db.grades)..where((t) => t.id.equals(gradeId))).write(
+        GradesCompanion(
+          syncStatus: queued ? const Value('queued') : const Value(null),
+          proposedValue: queued
+              ? Value((request?['value'] as num?)?.toDouble())
+              : const Value(null),
+          proposedIsAbsent: queued
+              ? Value((request?['is_absent'] as bool?) ?? false)
+              : const Value(null),
+          proposedComments: queued
+              ? Value(request?['comment'] as String?)
+              : const Value(null),
+          isDirty: const Value(false),
+        ),
+      );
+    }
+  }
+
+  /// [Grade-Validation] Application du pull des notes avec préservation
+  /// des marques locales :
+  ///   - une ligne locale `queued` n'est PAS écrasée si la valeur serveur
+  ///     n'a pas encore repris la valeur proposée (l'admin n'a pas tranché) ;
+  ///   - quand la valeur serveur rejoint la valeur proposée, la marque est
+  ///     résolue (syncStatus -> null) ;
+  ///   - les colonnes proposées (proposedValue…) survivent à l'upsert.
+  Future<void> _applyGradesPull(
+    List<Map<String, dynamic>> rows,
+    DateTime syncedAt,
+  ) async {
+    final ids = rows.map(_rId).where((id) => id > 0).toList();
+    final byId = <int, Grade>{};
+    if (ids.isNotEmpty) {
+      final existing =
+          await (_db.select(_db.grades)..where((t) => t.id.isIn(ids))).get();
+      for (final g in existing) {
+        byId[g.id] = g;
+      }
+    }
+
+    await _db.batch((b) {
+      for (final row in rows) {
+        final id = _rId(row);
+        if (id <= 0) continue;
+        final local = byId[id];
+
+        // Protection : proposition pas encore poussée -> le pull attend.
+        if (local != null && local.syncStatus == 'pending') continue;
+
+        final serverValue = _rDblN(row, 'value') ?? _rDblN(row, 'score');
+        String? nextStatus = local?.syncStatus;
+        double? nextProposed = local?.proposedValue;
+        bool? nextProposedAbsent = local?.proposedIsAbsent;
+        String? nextProposedComments = local?.proposedComments;
+
+        // Résolution implicite : l'admin a appliqué la valeur proposée.
+        if (local != null &&
+            local.syncStatus == 'queued' &&
+            serverValue != null &&
+            local.proposedValue != null &&
+            (serverValue - local.proposedValue!).abs() < 0.001) {
+          nextStatus = null;
+          nextProposed = null;
+          nextProposedAbsent = null;
+          nextProposedComments = null;
+        }
+
+        b.insert(
+          _db.grades,
+          GradesCompanion.insert(
+            id: Value(id),
+            assessmentId: _rInt(row, 'assessment_id'),
+            studentId: _rInt(row, 'student_id'),
+            value: Value(serverValue),
+            isAbsent: Value(_rBool(row, 'is_absent')),
+            comments: Value(
+              _rStrN(row, 'comments') ?? _rStrN(row, 'comment'),
+            ),
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: const Value(false),
+            // [Grade-Validation] marques préservées / résolues.
+            syncStatus: Value(nextStatus),
+            proposedValue: Value(nextProposed),
+            proposedIsAbsent: Value(nextProposedAbsent),
+            proposedComments: Value(nextProposedComments),
+            // [Fix-SYNC-IDEMPOTENCE] champs de sync lus depuis le serveur
+            // (nullables — absents => null, rétrocompatible).
+            idempotencyKey: Value(_rStrN(row, 'idempotency_key')),
+            deviceUuid: Value(_rStrN(row, 'device_uuid')),
+            syncVersion: Value(_rInt(row, 'sync_version')),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
+      }
+    });
+  }
+
+  // [Fix-SYNC-PRESERVE-DENORM] V17 — Bug 2 résiduel #1
+  // Cf. [_applyTableChanges] early-return case 'classrooms' pour le contexte.
+  // Utilise `insertOnConflictUpdate` (UPSERT SQLite) qui ne met à jour QUE
+  // les colonnes présentes dans le companion — les colonnes dénormalisées
+  // (currentStudentsCount, headTeacherName, levelName, cycleName, cycleId,
+  // seriesName) NON présentes dans le companion sont PRÉSERVÉES sur les
+  // lignes existantes. Pour les NOUVELLES lignes (première sync), ces
+  // colonnes sont NULL — elles seront peuplées par le prochain
+  // `_fetchFromApi()` du contrôleur Classes (qui utilise `insertOrReplace`
+  // avec currentStudentsCount explicite — voir ClassroomController._saveToLocal).
+  //
+  // [Fix-SYNC-CYCLE-RESOLVE] V18 : après l'upsert des classes, on RE-PARCOURT
+  // les lignes dont `cycleId` est resté NULL alors qu'un `level_id` connu
+  // existe dans la table locale `levels` — le cas se produit quand le serveur
+  // envoie `levels` APRÈS `classrooms` dans une page ultérieure (pagination
+  // ou ordre des tables côté registre serveur) : la première passe a laissé
+  // cycleId=null, la résolution par level_id est alors définitivement
+  // manquée (le prochain pull incrémental ne renverra plus ces classes).
+  Future<void> _applyClassroomsPull(
+    List<Map<String, dynamic>> rows,
+    DateTime syncedAt,
+  ) async {
+    final levels = await _db.select(_db.levels).get();
+    final cycleByLevelId = {
+      for (final level in levels) level.id: level.cycleId,
+    };
+    final existingClassrooms = await (_db.select(_db.classrooms)
+          ..where((t) => t.id.isIn(rows.map(_rId))))
+        .get();
+    final classroomById = {
+      for (final classroom in existingClassrooms) classroom.id: classroom,
+    };
+
+    // Transaction : atomicité par table (équivalent du batch d'origine).
+    // [Fix-DRIFT-2.21-API] V17 — Drift 2.21+ a changé la signature de
+    // `transaction` : la callback ne prend PLUS d'argument (l'ancienne
+    // API `transaction((txn) async {...})` ne compile pas — la closure
+    // inférée `Future<Null> Function(dynamic)` ne matche pas le type
+    // attendu `Future<T> Function()`). On utilise `_db` directement à
+    // l'intérieur de la closure — Drift route les requêtes via la
+    // connexion transactionnelle automatiquement.
+    await _db.transaction(() async {
+      for (final row in rows) {
+        final id = _rId(row);
+        final levelId = _rIntN(row, 'level_id');
+        final cached = classroomById[id];
+        await _db.into(_db.classrooms).insertOnConflictUpdate(
+              ClassroomsCompanion.insert(
+                id: Value(id),
+                name: _rStr(row, 'name'),
+                code: Value(_rStrN(row, 'code')),
+                levelId: Value(levelId),
+                streamId: Value(_rIntN(row, 'stream_id')),
+                seriesId: Value(_rIntN(row, 'series_id')),
+                // [Fix-SYNC-FIELD-MAP] Le serveur envoie `head_teacher_id`
+                // (colonne Classroom réelle).
+                teacherId: Value(
+                  _rIntN(row, 'head_teacher_id') ?? _rIntN(row, 'teacher_id'),
+                ),
+                // [Fix-SYNC-FIELD-MAP] Le serveur envoie `max_students`
+                // (colonne Classroom réelle).
+                capacity: Value(
+                  _rInt(row, 'max_students', d: _rInt(row, 'capacity', d: 0)),
+                ),
+                schoolYearId: Value(_rIntN(row, 'school_year_id')),
+                establishmentId: Value(
+                  _rIntN(row, 'establishment_id') ?? cached?.establishmentId,
+                ),
+                cycleId: Value(
+                  _rIntN(row, 'cycle_id') ??
+                      (levelId == null ? null : cycleByLevelId[levelId]) ??
+                      cached?.cycleId,
+                ),
+                isActive: Value(
+                  row.containsKey('is_active')
+                      ? _rBool(row, 'is_active')
+                      : cached?.isActive ?? true,
+                ),
+                syncedAt: Value(syncedAt),
+                isDirty: const Value(false),
+                isDeleted: const Value(false),
+                // Les informations non présentes dans le pull restent
+                // préservées sur les lignes existantes.
+              ),
+            );
+      }
+    });
+
+    // [Fix-SYNC-CYCLE-RESOLVE] V18 — deuxième passe : classes encore sans
+    // cycle alors que leur `level_id` existe désormais dans `levels`
+    // (table arrivée après `classrooms` dans le même pull ou un pull
+    // précédent). Sans cette passe, le cycle restait NULL à vie et le
+    // dropdown Périodes retombait sur la liste complète (ou vide avant
+    // le fix dea0674-inverse) au lieu du cycle de la classe.
+    final unresolved = await (_db.select(_db.classrooms)
+          ..where((t) => t.cycleId.isNull())
+          ..where((t) => t.levelId.isIn(cycleByLevelId.keys)))
+        .get();
+    for (final classroom in unresolved) {
+      final cycleId = cycleByLevelId[classroom.levelId];
+      if (cycleId == null) continue;
+      await (_db.update(_db.classrooms)
+            ..where((t) => t.id.equals(classroom.id)))
+          .write(ClassroomsCompanion(cycleId: Value(cycleId)));
+      _log.i('Cycle résolu (2e passe) : classe #${classroom.id} '
+          '« ${classroom.name} » → cycle $cycleId');
+    }
+  }
+
+  // [Fix-SYNC-RESOLVE-IDS] V17 — Bug 2 résiduel #2
+  // Cf. [_applyTableChanges] early-return case 'student_class_assignments'
+  // pour le contexte. Le serveur envoie `inscription_type_id` et
+  // `student_status_id` (entiers — cf. sync_registry.py:258-260). On
+  // pré-charge en une seule requête les tables locales InscriptionTypes /
+  // StudentStatuses (sync AVANT le roster — cf. sync_registry.py:163-164,
+  // 250-257) puis on résout l'ID en code textuel pour peupler les colonnes
+  // `inscriptionType` / `status` du mobile. Sans cette résolution, le filtre
+  // `localActiveStudentCounts isNotIn(['EXCU','ABANDON'])` ne servait à rien
+  // (colonne toujours NULL → tous les élèves passaient par `| isNull()`).
+  // [Fix-SYNC-CYCLE-RESOLVE] V18 — réplication de `levels` + résolution
+  // rétroactive du cycle des classes déjà en cache (miroir de la 2e passe
+  // de [_applyClassroomsPull], pour le cas où levels arrive après).
+  Future<void> _applyLevelsPull(
+    List<Map<String, dynamic>> rows,
+    DateTime syncedAt,
+  ) async {
+    await _db.batch((b) {
+      for (final row in rows) {
+        b.insert(
+          _db.levels,
+          LevelsCompanion.insert(
+            id: Value(_rId(row)),
+            // [Fix-SYNC-FIELD-MAP] V18 : le serveur réel envoie `label`
+            // (colonne Level.label) — `name` n'existe pas côté serveur.
+            name: _rStr(row, 'label', d: _rStr(row, 'name')),
+            code: Value(_rStrN(row, 'code')),
+            cycleId: Value(_rIntN(row, 'cycle_id')),
+            order: Value(_rInt(row, 'order', d: 0)),
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: const Value(false),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
+      }
+    });
+
+    // Résolution rétroactive : classes sans cycle dont le niveau est
+    // désormais connu.
+    final cycleByLevelId = {
+      for (final level in await _db.select(_db.levels).get())
+        if (level.cycleId != null) level.id: level.cycleId,
+    };
+    if (cycleByLevelId.isEmpty) return;
+    final unresolved = await (_db.select(_db.classrooms)
+          ..where((t) => t.cycleId.isNull())
+          ..where((t) => t.levelId.isIn(cycleByLevelId.keys)))
+        .get();
+    for (final classroom in unresolved) {
+      final cycleId = cycleByLevelId[classroom.levelId];
+      if (cycleId == null) continue;
+      await (_db.update(_db.classrooms)
+            ..where((t) => t.id.equals(classroom.id)))
+          .write(ClassroomsCompanion(cycleId: Value(cycleId)));
+      _log.i('Cycle résolu (levels) : classe #${classroom.id} '
+          '« ${classroom.name} » → cycle $cycleId');
+    }
+  }
+
+  // [Fix-SYNC-EDT-FIELD-MAP] V18 — réplication de `weekly_schedules` au
+  // FORMAT RÉEL du serveur (vérifié sur un /sync/pull live) :
+  //   {id, class_subject_id, day_of_week (0=Mon..6=Sun), start_time,
+  //    end_time, room, active, notes}
+  // Le serveur n'envoie NI classroom_id/subject_id/teacher_id (résolus ici
+  // via la table locale `class_subjects`) NI week_type (un WeeklySchedule
+  // serveur vaut pour TOUTES les semaines → sentinel 'ALL' côté Drift).
+  // L'ancien batch lisait des colonnes inexistantes → EDT vide après pull.
+  Future<void> _applyWeeklySchedulesPull(
+    List<Map<String, dynamic>> rows,
+    DateTime syncedAt,
+  ) async {
+    // Lookup unique class_subjects → (classroom, subject, teacher).
+    final classSubjects = await _db.select(_db.classSubjects).get();
+    final csById = {
+      for (final cs in classSubjects) cs.id: cs,
+    };
+
+    await _db.transaction(() async {
+      for (final row in rows) {
+        final id = _rId(row);
+        final csId = _rIntN(row, 'class_subject_id');
+        final cs = csId == null ? null : csById[csId];
+        // day_of_week serveur : 0=Mon..6=Sun → convention mobile 1..6
+        // (Dimanche non affiché côté mobile).
+        final serverDay = _rInt(row, 'day_of_week', d: -1);
+        final mobileDay = serverDay >= 0 && serverDay <= 5
+            ? serverDay + 1
+            : (serverDay == 6 ? 7 : 1);
+        await _db.into(_db.weeklySchedules).insertOnConflictUpdate(
+              WeeklySchedulesCompanion.insert(
+                id: Value(id),
+                classroomId: Value(cs?.classroomId),
+                subjectId: Value(cs?.subjectId),
+                teacherId: Value(cs?.teacherId),
+                timeSlotId: 0,
+                dayOfWeek: mobileDay,
+                startTime: Value(
+                  _rStrN(row, 'start_time')?.length == 8
+                      ? _rStrN(row, 'start_time')!.substring(0, 5)
+                      : _rStrN(row, 'start_time'),
+                ),
+                endTime: Value(
+                  _rStrN(row, 'end_time')?.length == 8
+                      ? _rStrN(row, 'end_time')!.substring(0, 5)
+                      : _rStrN(row, 'end_time'),
+                ),
+                room: Value(_rStrN(row, 'room')),
+                // Pas de week_type côté serveur → cours TOUTES les semaines
+                // (sentinel 'ALL' du cache Drift, cf. schedule_controller).
+                weekType: const Value('ALL'),
+                syncedAt: Value(syncedAt),
+                isDirty: const Value(false),
+                isDeleted: Value(!_rBool(row, 'active', d: true)),
+              ),
+            );
+      }
+    });
+
+    if (rows.isNotEmpty) {
+      _log.i('EDT répliqué : ${rows.length} créneau(x) '
+          '(résolus via ${csById.length} class_subjects)');
+    }
+  }
+
+  /// [Fix-SYNC-COURSE-SESSIONS-RESOLVE] V22 — réplication de
+  /// `course_sessions` avec résolution `class_subject_id` → (classe,
+  /// matière) via la table locale `class_subjects` (miroir de
+  /// [_applyWeeklySchedulesPull]). Le serveur envoie selon les déploiements :
+  ///   {id, class_subject_id, teacher_id, date, scheduled_start_time,
+  ///    start_time, end_time, state, notes}
+  /// Les colonnes classroom_id / subject_id séparées sont utilisées quand
+  /// elles sont présentes (déploiements récents), sinon résolues localement.
+  Future<void> _applyCourseSessionsPull(
+    List<Map<String, dynamic>> rows,
+    DateTime syncedAt,
+  ) async {
+    final classSubjects = await _db.select(_db.classSubjects).get();
+    final csById = {
+      for (final cs in classSubjects) cs.id: cs,
+    };
+
+    await _db.transaction(() async {
+      for (final row in rows) {
+        final id = _rId(row);
+        final csId = _rIntN(row, 'class_subject_id');
+        final cs = csId == null ? null : csById[csId];
+        final startAt = _rDt(row, 'start_at');
+        String? _hhmm(dynamic v) {
+          final s = v == null ? null : v.toString();
+          if (s == null || s.isEmpty) return null;
+          return s.length >= 8 ? s.substring(0, 5) : s;
+        }
+
+        await _db.into(_db.courseSessions).insertOnConflictUpdate(
+              CourseSessionsCompanion.insert(
+                id: Value(id),
+                weeklyScheduleId: Value(_rIntN(row, 'weekly_schedule_id')),
+                classroomId: Value(
+                  _rIntN(row, 'classroom_id') ?? cs?.classroomId,
+                ),
+                subjectId: Value(
+                  _rIntN(row, 'subject_id') ?? cs?.subjectId,
+                ),
+                teacherId: Value(
+                  _rIntN(row, 'teacher_id') ?? cs?.teacherId,
+                ),
+                date: startAt ?? (_rDt(row, 'date') ?? DateTime.now()),
+                startTime: Value(
+                  _hhmm(_rStrN(row, 'start_time')) ??
+                      _hhmm(_rStrN(row, 'scheduled_start_time')) ??
+                      (startAt?.toIso8601String().substring(11, 16)),
+                ),
+                endTime: Value(
+                  _hhmm(_rStrN(row, 'end_time')) ??
+                      (() {
+                        final endAt = _rDt(row, 'end_at');
+                        return endAt?.toIso8601String().substring(11, 16);
+                      })(),
+                ),
+                state: Value(
+                  _rStr(row, 'state', d: 'PENDING'),
+                ),
+                syncedAt: Value(syncedAt),
+                isDirty: const Value(false),
+                isDeleted: const Value(false),
+              ),
+            );
+      }
+    });
+
+    if (rows.isNotEmpty) {
+      _log.i('Sessions répliquées : ${rows.length} session(s) '
+          '(résolues via ${csById.length} class_subjects)');
+    }
+  }
+
+  /// [Fix-SYNC-REAL-EDT] V23 — convertit les `schedule_entries` du VRAI
+  /// emploi du temps en lignes du cache `weeklySchedules`, avec l'ID DE
+  /// L'ENTRY (le même que GET /schedule renvoie → le cache écrit en ligne
+  /// par _saveScheduleToLocal et celui-ci se remplacent proprement).
+  ///
+  /// Résolutions locales :
+  /// - session_id → class_subject_id → (classe, matière, enseignant) ;
+  /// - time_slot_id → (jour 1..6, horaires HH:mm) — time_slots est envoyée
+  ///   AVANT dans la même réponse (ordre alphabétique du registre) ;
+  /// - week_type : NULL → 'ALL' (sentinel « toutes les semaines ») ;
+  /// - is_active=false → isDeleted=true (le reconcile purge en suite).
+  ///
+  /// Les sessions reçues APRÈS les entrées (ordre non garanti) sont
+  /// réinjectées depuis [_pendingScheduleSessions] ; une session inconnue
+  /// (page de pagination différente) laisse l'entrée de côté SANS erreur —
+  /// elle sera résolue au prochain pull complet (bump _mobileCacheVersion).
+  Future<void> _applyRealEdtEntriesPull(
+    List<Map<String, dynamic>> rows,
+    DateTime syncedAt,
+  ) async {
+    final classSubjects = await _db.select(_db.classSubjects).get();
+    final csById = {for (final cs in classSubjects) cs.id: cs};
+    final timeSlots = await _db.select(_db.timeSlots).get();
+    final tsById = {for (final ts in timeSlots) ts.id: ts};
+
+    var applied = 0;
+    var skipped = 0;
+    await _db.transaction(() async {
+      for (final row in rows) {
+        final id = _rId(row);
+        final sessionId = _rIntN(row, 'session_id');
+        final session = _pendingScheduleSessions[sessionId];
+        if (session == null) {
+          skipped++;
+          continue;
+        }
+        final cs = session.classSubjectId == null
+            ? null
+            : csById[session.classSubjectId];
+        final tsId = _rIntN(row, 'time_slot_id');
+        final ts = tsId == null ? null : tsById[tsId];
+        final isActive = _rBool(row, 'is_active', d: true) && session.isActive;
+
+        await _db.into(_db.weeklySchedules).insertOnConflictUpdate(
+              WeeklySchedulesCompanion.insert(
+                // ID de l'entry = ID vu par GET /schedule (cohérence cache).
+                id: Value(id),
+                classroomId: Value(cs?.classroomId),
+                subjectId: Value(cs?.subjectId),
+                teacherId: Value(cs?.teacherId),
+                timeSlotId: tsId ?? 0,
+                dayOfWeek: ts?.dayOfWeek ?? 1,
+                startTime: Value(ts?.startTime),
+                endTime: Value(ts?.endTime),
+                // Salle : la session porte la salle (miroir GET /schedule
+                // qui lit sched_session.room).
+                room: Value(session.room),
+                // NULL = toutes les semaines → sentinel 'ALL'.
+                weekType: Value(_rStrN(row, 'week_type') ?? 'ALL'),
+                syncedAt: Value(syncedAt),
+                isDirty: const Value(false),
+                isDeleted: Value(!isActive),
+              ),
+            );
+        applied++;
+      }
+    });
+
+    if (rows.isNotEmpty) {
+      _log.i('EDT réel répliqué : $applied/${rows.length} entrée(s)'
+          '${skipped > 0 ? ' ($skipped session(s) non résolue(s))' : ''}');
+    }
+  }
+
+  Future<void> _applyStudentClassAssignmentsPull(
+    List<Map<String, dynamic>> rows,
+    DateTime syncedAt,
+  ) async {
+    // Pré-chargement des lookup tables (1 requête par table — pas de N+1).
+    // Si ces tables n'ont pas encore été sync (premier sync partiel), les
+    // maps seront vides et les colonnes textuelles resteront NULL — le
+    // prochain sync (après que inscription_types/student_statuses soient
+    // arrivés) remplira les codes correctement.
+    final inscriptionMap = <int, String>{};
+    final statusMap = <int, String>{};
+    final inscRows = await _db.select(_db.inscriptionTypes).get();
+    for (final r in inscRows) {
+      inscriptionMap[r.id] = r.code;
+    }
+    final statRows = await _db.select(_db.studentStatuses).get();
+    for (final r in statRows) {
+      statusMap[r.id] = r.code;
+    }
+
+    await _db.batch((b) {
+      for (final row in rows) {
+        // [Fix-SYNC-FIELD-MAP-V11] Le serveur envoie `active` (bool) :
+        // une assignation inactive (élève ayant quitté la classe) doit
+        // être marquée supprimée localement — sinon le roster hors-ligne
+        // garde des élèves partis. Repli `is_deleted` pour les registres
+        // anciens, `is_active` jamais observé mais couvert par défense.
+        final assignDeleted = _rBool(
+          row,
+          'is_deleted',
+          d: !_rBool(row, 'active', d: true),
+        );
+
+        // [Fix-SYNC-RESOLVE-IDS] Résolution ID → code textuel via lookup
+        // tables locales (sync_registry.py:132-139 documente explicitement
+        // cette attente côté mobile).
+        final inscTypeId = _rIntN(row, 'inscription_type_id');
+        final statId = _rIntN(row, 'student_status_id');
+        final inscTypeCode =
+            inscTypeId != null ? inscriptionMap[inscTypeId] : null;
+        final statusCode = statId != null ? statusMap[statId] : null;
+
+        b.insert(
+          _db.studentClassAssignments,
+          StudentClassAssignmentsCompanion.insert(
+            id: Value(_rId(row)),
+            studentId: _rInt(row, 'student_id'),
+            classroomId: _rInt(row, 'classroom_id'),
+            schoolYearId: Value(_rIntN(row, 'school_year_id')),
+            // [Fix-SYNC-RESOLVE-IDS] colonnes textuelles peuplées depuis
+            // la résolution ID → code via les lookup tables locales.
+            status: Value(statusCode),
+            inscriptionType: Value(inscTypeCode),
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(assignDeleted),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
+      }
+    });
+  }
+
+  /// [Fix-PULL-DIRTY] Retire les lignes dont l'élève local est isDirty
+  /// (édition en attente de push) : l'insertOrReplace du pull écrasait
+  /// l'édition locale ET repoussait isDirty=false avant que le push ne
+  /// parte — modification « enregistrée en local puis perdue » (retour
+  /// terrain 2026-11-12). La ligne reviendra au pull suivant, une fois
+  /// l'outbox vidée par le push.
+  Future<List<Map<String, dynamic>>> _dropDirtyStudents(
+    List<Map<String, dynamic>> rows,
+  ) async {
+    try {
+      final ids = rows.map(_rId).where((id) => id > 0).toSet();
+      if (ids.isEmpty) return rows;
+      final dirtyIds = await (_db.select(_db.students)
+            ..where((t) => t.id.isIn(ids) & t.isDirty.equals(true)))
+          .map((row) => row.id)
+          .get();
+      if (dirtyIds.isEmpty) return rows;
+      _log.i('[Fix-PULL-DIRTY] ${dirtyIds.length} élève(s) local(aux) '
+          'modifié(s) préservé(s) du pull (attente de push)');
+      final dirty = dirtyIds.toSet();
+      return rows.where((r) => !dirty.contains(_rId(r))).toList();
+    } catch (e) {
+      _log.w('Filtre isDirty (students) impossible : $e');
+      return rows;
     }
   }
 
@@ -408,22 +1559,176 @@ class SyncEngine {
   ) async {
     if (rows.isEmpty) return;
 
-    // [Fix-PULL-DIRTY] Une ligne locale modifiée (isDirty : édition en
-    // attente dans l'outbox) ne doit PAS être écrasée par le pull :
-    // l'insertOrReplace réécrivait les valeurs serveur ET repoussait
-    // isDirty=false avant que le push ne parte — l'édition était perdue
-    // (« enregistrée en local puis modifications perdues », retour
-    // terrain 2026-11-12). La ligne reviendra au pull suivant, une fois
-    // l'outbox vidée par le push.
+    // [Fix-PULL-DIRTY] Les élèves locaux modifiés non encore poussés ne
+    // sont PAS écrasés par le pull (voir _dropDirtyStudents).
     if (table == 'students') {
       rows = await _dropDirtyStudents(rows);
       if (rows.isEmpty) return;
     }
 
+    // [Grade-Validation] Les notes suivent un chemin dédié : préservation
+    // des marques (queued/rejected + valeur proposée) et protection des
+    // propositions en attente contre l'écrasement par le pull.
+    if (table == 'grades') {
+      await _applyGradesPull(rows, syncedAt);
+      return;
+    }
+
+    // [Fix-SYNC-PRESERVE-DENORM] V17 — Bug 2 résiduel #1 : case 'classrooms'
+    // sorti du batch pour utiliser `insertOnConflictUpdate` qui préserve les
+    // colonnes dénormalisées (currentStudentsCount, headTeacherName,
+    // levelName, cycleName, cycleId, seriesName) que le serveur n'envoie PAS
+    // dans le spec sync (sync_registry.py:230-232 — `current_students_count`
+    // n'est pas une colonne, c'est un @property côté serveur). L'ancien
+    // `InsertMode.insertOrReplace` du batch DELETAIT la ligne existante et
+    // INSÉRAIT une nouvelle avec NULL sur ces colonnes → l'effectif
+    // disparaissait de l'UI Classes à chaque sync pull (jusqu'au prochain
+    // `_fetchFromApi()` qui persiste à nouveau la valeur).
+    if (table == 'classrooms') {
+      await _applyClassroomsPull(rows, syncedAt);
+      return;
+    }
+
+    // [Fix-SYNC-EDT-FIELD-MAP] V18 : weekly_schedules sorti du batch — la
+    // ligne serveur ne porte QUE class_subject_id (+ day_of_week 0..6) : il
+    // faut résoudre classe/matière/enseignant via la table locale
+    // `class_subjects` (répliquée avant, cf. priorité de tri) pour remplir
+    // les colonnes dénormalisées attendues par l'UI EDT.
+    if (table == 'weekly_wchedules' || table == 'weekly_schedules') {
+      await _applyWeeklySchedulesPull(rows, syncedAt);
+      return;
+    }
+
+    // [Fix-EDT-OFFLINE] V24 : le VRAI emploi du temps (écrit par les
+    // éditeurs desktop/mobile via POST /schedule/entries) vit dans
+    // schedule_entries → schedule_sessions → class_subjects / time_slots.
+    // weekly_schedules est une table théorique jamais écrite par aucun
+    // écran : ne répliquer qu'elle laissait l'EDT hors-ligne VIDE alors
+    // qu'il s'affichait en ligne (retour production 2026-11-08). Le serveur
+    // envoie désormais les deux sections ; on les reçoit dans le désordre
+    // possible (entries avant sessions selon la pagination) → on STAGE les
+    // entrées puis on résout quand les deux sections sont connues (les
+    // lookups se font dans les tables Drift déjà répliquées au cours du
+    // MÊME pull complet — le bump _mobileCacheVersion 4→5 garantit que
+    // class_subjects/time_slots sont déjà là au moment du traitement).
+
+    // [Fix-SYNC-RESOLVE-IDS] V17 — Bug 2 résiduel #2 : case
+    // 'student_class_assignments' sorti du batch pour résoudre les IDs
+    // entiers `inscription_type_id` et `student_status_id` (envoyés par le
+    // serveur — cf. sync_registry.py:258-260) en codes textuels via les
+    // tables locales `InscriptionTypes` / `StudentStatuses` (sync AVANT le
+    // roster — cf. sync_registry.py:163-164, 250-257). Le serveur
+    // documente explicitement cette résolution côté mobile
+    // (sync_registry.py:132-139) mais elle n'était JAMAIS faite — les
+    // colonnes textuelles `inscriptionType` / `status` restaient NULL → le
+    // filtre `localActiveStudentCounts isNotIn(['EXCU','ABANDON'])` ne
+    // servait à rien (toutes les lignes passaient par `| isNull()`).
+    if (table == 'student_class_assignments') {
+      await _applyStudentClassAssignmentsPull(rows, syncedAt);
+      return;
+    }
+
+    // [Fix-SYNC-CYCLE-RESOLVE] V18 : quand `levels` est répliqué (surtout
+    // APRÈS `classrooms` — page ultérieure de la pagination), on résout
+    // rétroactivement le cycle des classes déjà en cache dont cycleId est
+    // NULL. Sans cela, un serveur qui pagine classrooms avant levels laisse
+    // le cycle indéfiniment non résolu (dropdown Périodes dégradé).
+    if (table == 'levels') {
+      await _applyLevelsPull(rows, syncedAt);
+      return;
+    }
+
+    // [Fix-SYNC-COURSE-SESSIONS-RESOLVE] V22 : course_sessions sorti du
+    // batch — la ligne serveur ne porte que `class_subject_id` (+ ids
+    // séparés selon les déploiements) : il faut résoudre matière/classe
+    // via la table locale `class_subjects` (miroir de
+    // _applyWeeklySchedulesPull). L'ancien mappage laissit classroomId
+    // NULL et rangea l'id de class_subject dans subjectId (espace d'ids
+    // faux) → l'historique d'absences hors-ligne affichait « matière ? ».
+    if (table == 'course_sessions') {
+      await _applyCourseSessionsPull(rows, syncedAt);
+      return;
+    }
+
+    // [Fix-SYNC-REAL-EDT] V23 — le VRAI emploi du temps (celui que les
+    // éditeurs desktop/mobile écrivent) vit dans schedule_entries →
+    // schedule_sessions : la table weekly_schedules répliquée depuis V18
+    // est une table THÉORIQUE jamais écrite par les écrans → EDT
+    // hors-ligne VIDE alors qu'il s'affichait en ligne (retour
+    // utilisateur 2026-11-08). Les deux tables sont résolues ENSEMBLE :
+    // les entrées sont converties en lignes weeklySchedules avec l'ID de
+    // l'entry (le même que renvoie GET /schedule → cohérence du cache),
+    // jour + horaires venant de time_slots, classe/matière/enseignant de
+    // class_subjects, salle de la session.
+    if (table == 'schedule_sessions') {
+      _pendingScheduleSessions = {
+        for (final row in rows)
+          _rId(row): (
+            classSubjectId: _rIntN(row, 'class_subject_id'),
+            room: _rStrN(row, 'room'),
+            isActive: _rBool(row, 'is_active', d: true),
+          ),
+      };
+      return;
+    }
+    if (table == 'schedule_entries') {
+      await _applyRealEdtEntriesPull(rows, syncedAt);
+      return;
+    }
+
     try {
       await _db.batch((b) {
         for (final row in rows) {
-          switch (table) {
+          _upsertRow(b, table, row, syncedAt);
+        }
+      });
+    } catch (e) {
+      // [Fix-SYNC-PER-ROW-RETRY] V21 — le batch est ATOMIQUE : une seule
+      // ligne invalide (ex. champ NOT NULL absent du payload serveur) fait
+      // échouer TOUTE la table. Avant ce correctif, l'échec était avalé
+      // silencieusement : le pull se disait « succès », le curseur
+      // avançait, et la table n'était JAMAIS répliquée (retour utilisateur
+      // « toujours rien » pour les évaluations alors que les périodes,
+      // elles, passaient). On rejoue maintenant LIGNE PAR LIGNE : seules
+      // les lignes fautives sont perdues, et l'erreur remonte à la boucle
+      // de pull (pageErrors) pour diagnostic au lieu d'être invisible.
+      _log.w('Batch table "$table" échoué ($e) — rejeu ligne par ligne');
+      var failed = 0;
+      for (final row in rows) {
+        try {
+          await _db.batch((b) => _upsertRow(b, table, row, syncedAt));
+        } catch (rowError) {
+          failed++;
+          _log.e(
+            'Pull : ligne ignorée table "$table" '
+            'id=${_rId(row)} ($rowError)',
+          );
+        }
+      }
+      if (failed > 0) {
+        // Remonte à la boucle de pull → pageErrors → SyncResult.errors
+        // (visible dans les journaux et l'écran de synchro) au lieu d'une
+        // perte silencieuse.
+        throw StateError(
+          'Table $table : $failed/${rows.length} ligne(s) ignorée(s)',
+        );
+      }
+    }
+  }
+
+  /// [Fix-SYNC-PER-ROW-RETRY] V21 — un upsert d'UNE ligne de pull (appelé
+  /// par le batch de [_applyTableChanges] puis, en cas d'échec atomique,
+  /// rejeu ligne par ligne). Le comportement d'insertion est identique au
+  /// batch d'origine (insertOrReplace, mêmes companions) : seule la
+  /// granularité change.
+  void _upsertRow(
+    Batch b,
+    String table,
+    Map<String, dynamic> row,
+    DateTime syncedAt,
+  ) {
+    final sw = table;
+    switch (sw) {
             case 'establishments':
               b.insert(
                 _db.establishments,
@@ -447,14 +1752,30 @@ class SyncEngine {
               break;
 
             case 'school_years':
+              // [Fix-SYNC-SCHOOL-YEAR-FIELD] V11 — CAUSE RACINE du
+              // « Aucun élève » hors-ligne : le serveur envoie la colonne
+              // RÉELLE `school_year` (ex. « 2025-2026 »), pas `name`.
+              // L'ancienne lecture produisait name='' → InvalidDataException
+              // (contrainte min 1 caractère) → le batch ENTIER du pull
+              // échouait → le cache Drift ne se remplissait JAMAIS
+              // (périodes, matières, évaluations, roster) alors que la
+              // page Élèves (chemin API propre) affichait les élèves.
               b.insert(
                 _db.schoolYears,
                 SchoolYearsCompanion.insert(
                   id: Value(_rId(row)),
-                  name: _rStr(row, 'name'),
+                  name: _rStr(row, 'school_year', d: '') != ''
+                      ? _rStr(row, 'school_year')
+                      : _rStr(row, 'name'),
                   startDate: Value(_rDt(row, 'start_date')),
                   endDate: Value(_rDt(row, 'end_date')),
-                  isActive: Value(_rBool(row, 'is_active')),
+                  isActive: Value(
+                    _rBool(
+                      row,
+                      'is_active',
+                      d: _rBool(row, 'is_current', d: false),
+                    ),
+                  ),
                   alternatingWeekStartDate:
                       Value(_rDt(row, 'alternating_week_start_date')),
                   establishmentId: Value(_rIntN(row, 'establishment_id')),
@@ -473,6 +1794,8 @@ class SyncEngine {
                   id: Value(_rId(row)),
                   name: _rStr(row, 'name'),
                   schoolYearId: Value(_rIntN(row, 'school_year_id')),
+                  cycleId: Value(_rIntN(row, 'cycle_id')),
+                  cycleName: Value(_rStrN(row, 'cycle_name')),
                   startDate: Value(_rDt(row, 'start_date')),
                   endDate: Value(_rDt(row, 'end_date')),
                   weight: Value(_rDbl(row, 'weight', d: 1.0)),
@@ -492,6 +1815,7 @@ class SyncEngine {
                   id: Value(_rId(row)),
                   name: _rStr(row, 'name'),
                   code: Value(_rStrN(row, 'code')),
+                  cycleId: Value(_rIntN(row, 'cycle_id')),
                   order: Value(_rInt(row, 'order', d: 0)),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
@@ -531,27 +1855,6 @@ class SyncEngine {
               );
               break;
 
-            case 'classrooms':
-              b.insert(
-                _db.classrooms,
-                ClassroomsCompanion.insert(
-                  id: Value(_rId(row)),
-                  name: _rStr(row, 'name'),
-                  code: Value(_rStrN(row, 'code')),
-                  levelId: Value(_rIntN(row, 'level_id')),
-                  streamId: Value(_rIntN(row, 'stream_id')),
-                  seriesId: Value(_rIntN(row, 'series_id')),
-                  teacherId: Value(_rIntN(row, 'teacher_id')),
-                  capacity: Value(_rInt(row, 'capacity', d: 0)),
-                  schoolYearId: Value(_rIntN(row, 'school_year_id')),
-                  syncedAt: Value(syncedAt),
-                  isDirty: const Value(false),
-                  isDeleted: const Value(false),
-                ),
-                mode: InsertMode.insertOrReplace,
-              );
-              break;
-
             case 'subjects':
               b.insert(
                 _db.subjects,
@@ -575,7 +1878,16 @@ class SyncEngine {
                   classroomId: _rInt(row, 'classroom_id'),
                   subjectId: _rInt(row, 'subject_id'),
                   coefficient: Value(_rDbl(row, 'coefficient', d: 1.0)),
-                  teacherId: Value(_rIntN(row, 'teacher_id')),
+                  // [Fix-SYNC-FIELD-MAP] Le serveur envoie
+                  // `assigned_teacher_id` (colonne ClassSubject) — l'ancienne
+                  // lecture `teacher_id` était TOUJOURS nulle : aucune matière
+                  // locale n'était rattachée à l'enseignant, et le repli Drift
+                  // du périmètre enseignant (classes « enseignées ») était
+                  // définitivement vide — cause directe de l'Accueil à 0.
+                  teacherId: Value(
+                    _rIntN(row, 'assigned_teacher_id') ??
+                        _rIntN(row, 'teacher_id'),
+                  ),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
                   isDeleted: const Value(false),
@@ -591,11 +1903,46 @@ class SyncEngine {
                   id: Value(_rId(row)),
                   classSubjectId: _rInt(row, 'class_subject_id'),
                   periodId: Value(_rIntN(row, 'period_id')),
-                  title: _rStr(row, 'title'),
+                  // [Fix-SYNC-ASSESSMENT-NULL-NAME] V21 — le serveur
+                  // autorise `name` NULL (modèle String(255) nullable ;
+                  // l'UI desktop crée `name_field.value.strip() or None`
+                  // → main_page.py:9155, et la duplication de période
+                  // aussi :9419) et le REST renvoie même `name or ""`.
+                  // L'ancienne lecture `?? ''` produisait un titre VIDE →
+                  // InvalidDataException (contrainte Drift min 1
+                  // caractère) → le batch de TOUTE la table assessments
+                  // échouait SILENCIEUSEusement (catch sans remontée) →
+                  // zéro évaluation hors-ligne, à CHAQUE synchro, alors
+                  // que le pull se disait « succès » (retour utilisateur
+                  // « toujours rien » après le fix v1.0.2 du pull complet).
+                  // Repli : nom serveur, sinon type d'évaluation, sinon
+                  // « Évaluation #id » — JAMAIS vide.
+                  title: _nonEmpty(
+                        _rStrN(row, 'title') ?? _rStrN(row, 'name'),
+                      ) ??
+                      _nonEmpty(_rStrN(row, 'assessment_type_name')) ??
+                      'Évaluation #${_rId(row)}',
                   type: Value(_rStr(row, 'type', d: 'DEVOIR')),
-                  date: Value(_rDt(row, 'date')),
+                  // [Fix-RANKING-OFFLINE] V22 — FK vers le référentiel
+                  // local assessment_types : catégorie CLASS/EXAM pour le
+                  // classement hors-ligne (miroir de la formule serveur).
+                  assessmentTypeId: Value(
+                    _rIntN(row, 'assessment_type_id'),
+                  ),
+                  date: Value(
+                    _rDt(row, 'date') ?? _rDt(row, 'date_taken'),
+                  ),
                   maxScore: Value(_rDbl(row, 'max_score', d: 20.0)),
-                  coefficient: Value(_rDbl(row, 'coefficient', d: 1.0)),
+                  // [Fix-SYNC-FIELD-MAP-V11] Le serveur envoie `weight`
+                  // (colonne réelle Assessment.weight) — l'ancienne lecture
+                  // `coefficient` seule tombait toujours sur le défaut 1.0.
+                  coefficient: Value(
+                    _rDbl(
+                      row,
+                      'coefficient',
+                      d: _rDbl(row, 'weight', d: 1.0),
+                    ),
+                  ),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
                   isDeleted: const Value(false),
@@ -604,16 +1951,26 @@ class SyncEngine {
               );
               break;
 
-            case 'grades':
+            // [Grade-Validation] `grades` est routé en tête de méthode vers
+            // _applyGradesPull (préservation des marques) — pas de cas ici.
+            // [Fix-SYNC-COURSE-SESSIONS-RESOLVE] V22 : course_sessions est
+            // routé en tête de méthode vers _applyCourseSessionsPull
+            // (résolution class_subject_id → classe/matière) — pas de cas ici.
+            case 'assessment_types':
+              // [Fix-RANKING-OFFLINE] V22 — référentiel des catégories
+              // d'évaluation (CLASS/EXAM). Table globale du serveur (sans
+              // establishment_id) ; répliquée telle quelle. La catégorie
+              // arrive en MAJUSCULES ('CLASS' / 'EXAM') — repli 'CLASS'.
               b.insert(
-                _db.grades,
-                GradesCompanion.insert(
+                _db.assessmentTypes,
+                AssessmentTypesCompanion.insert(
                   id: Value(_rId(row)),
-                  assessmentId: _rInt(row, 'assessment_id'),
-                  studentId: _rInt(row, 'student_id'),
-                  value: Value(_rDblN(row, 'value')),
-                  isAbsent: Value(_rBool(row, 'is_absent')),
-                  comments: Value(_rStrN(row, 'comments')),
+                  code: _nonEmpty(_rStrN(row, 'code')) ??
+                      'TYPE-${_rId(row)}',
+                  name: Value(_rStrN(row, 'name')),
+                  category: Value(
+                    (_rStrN(row, 'category') ?? 'CLASS').toUpperCase(),
+                  ),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
                   isDeleted: const Value(false),
@@ -621,8 +1978,14 @@ class SyncEngine {
                 mode: InsertMode.insertOrReplace,
               );
               break;
-
             case 'students':
+              // [Fix-SOFT-DELETED-SYNC] Le registre serveur filtre désormais
+              // les élèves supprimés logiquement (abandon/exclusion), mais
+              // un serveur encore sur l'ancien registre peut continuer à les
+              // envoyer : respecter le champ `deleted` de la ligne au lieu
+              // de le forcer à false — sinon l'élève est ressuscité par id à
+              // chaque synchronisation.
+              final studentDeleted = _rBool(row, 'deleted');
               b.insert(
                 _db.students,
                 StudentsCompanion.insert(
@@ -630,7 +1993,13 @@ class SyncEngine {
                   matricule: _rStr(row, 'matricule'),
                   nom: _rStr(row, 'nom'),
                   prenoms: Value(_rStrN(row, 'prenoms')),
-                  dob: Value(_rDt(row, 'dob')),
+                  // [Fix-SYNC-FIELD-MAP-V11] Le registre du serveur main
+                  // envoie `date_naissance` (ancien nom) alors que le
+                  // registre corrigé envoie `dob` (colonne réelle) — lire
+                  // les deux pour couvrir les deux déploiements.
+                  dob: Value(
+                    _rDt(row, 'dob') ?? _rDt(row, 'date_naissance'),
+                  ),
                   sexe: Value(_rStrN(row, 'sexe')),
                   birthPlace: Value(_rStrN(row, 'birth_place')),
                   birthPrefecture: Value(_rStrN(row, 'birth_prefecture')),
@@ -641,7 +2010,7 @@ class SyncEngine {
                   establishmentId: Value(_rIntN(row, 'establishment_id')),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
-                  isDeleted: const Value(false),
+                  isDeleted: Value(studentDeleted),
                 ),
                 mode: InsertMode.insertOrReplace,
               );
@@ -750,24 +2119,6 @@ class SyncEngine {
               );
               break;
 
-            case 'student_class_assignments':
-              b.insert(
-                _db.studentClassAssignments,
-                StudentClassAssignmentsCompanion.insert(
-                  id: Value(_rId(row)),
-                  studentId: _rInt(row, 'student_id'),
-                  classroomId: _rInt(row, 'classroom_id'),
-                  schoolYearId: Value(_rIntN(row, 'school_year_id')),
-                  status: Value(_rStrN(row, 'status')),
-                  inscriptionType: Value(_rStrN(row, 'inscription_type')),
-                  syncedAt: Value(syncedAt),
-                  isDirty: const Value(false),
-                  isDeleted: const Value(false),
-                ),
-                mode: InsertMode.insertOrReplace,
-              );
-              break;
-
             case 'student_statuses':
               b.insert(
                 _db.studentStatuses,
@@ -799,56 +2150,72 @@ class SyncEngine {
               break;
 
             case 'time_slots':
+              // [Fix-SYNC-FIELD-MAP] V18 : le serveur envoie day_of_week
+              // 1..6 (TimeSlot serveur, Lundi=1) et start_time/end_time
+              // 'HH:MM:SS' ; is_break remplace l'ancien break_after (colonne
+              // inexistante → pauses jamais détectées).
+              final tsDay = _rInt(row, 'day_of_week', d: 1);
+              String _hhmm(String v) =>
+                  v.length >= 8 ? v.substring(0, 5) : v;
               b.insert(
                 _db.timeSlots,
                 TimeSlotsCompanion.insert(
                   id: Value(_rId(row)),
-                  dayOfWeek: _rInt(row, 'day_of_week'),
-                  startTime: _rStr(row, 'start_time'),
-                  endTime: _rStr(row, 'end_time'),
+                  dayOfWeek: tsDay < 1 || tsDay > 6 ? 1 : tsDay,
+                  startTime: _hhmm(_rStr(row, 'start_time')),
+                  endTime: _hhmm(_rStr(row, 'end_time')),
                   breakAfter: Value(_rIntN(row, 'break_after')),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
-                  isDeleted: const Value(false),
+                  isDeleted: Value(!_rBool(row, 'is_active', d: true)),
                 ),
                 mode: InsertMode.insertOrReplace,
               );
               break;
 
             case 'weekly_schedules':
-              b.insert(
-                _db.weeklySchedules,
-                WeeklySchedulesCompanion.insert(
-                  id: Value(_rId(row)),
-                  classroomId: Value(_rIntN(row, 'classroom_id')),
-                  subjectId: Value(_rIntN(row, 'subject_id')),
-                  teacherId: Value(_rIntN(row, 'teacher_id')),
-                  timeSlotId: _rInt(row, 'time_slot_id'),
-                  dayOfWeek: _rInt(row, 'day_of_week'),
-                  startTime: Value(_rStrN(row, 'start_time')),
-                  endTime: Value(_rStrN(row, 'end_time')),
-                  room: Value(_rStrN(row, 'room')),
-                  weekType: Value(_rStr(row, 'week_type', d: 'A')),
-                  syncedAt: Value(syncedAt),
-                  isDirty: const Value(false),
-                  isDeleted: const Value(false),
-                ),
-                mode: InsertMode.insertOrReplace,
-              );
+              // [Fix-SYNC-EDT-FIELD-MAP] V18 : le registre serveur envoie
+              // `class_subject_id` + `day_of_week` 0..6 (Lundi=0) et PAS de
+              // week_type (WeeklySchedule serveur : cours TOUTES les
+              // semaines) — l'ancienne lecture `classroom_id`/`subject_id`/
+              // `teacher_id`/`time_slot_id`/`week_type` ne matchait AUCUNE
+              // colonne réelle → EDT local vide après pull.
+              // La résolution class_subject_id → (classe, matière,
+              // enseignant) est faite dans _applyWeeklySchedulesPull (sorti
+              // du batch : lookup Drift nécessaire par ligne).
               break;
 
             case 'course_sessions':
+              // [Fix-SYNC-FIELD-MAP-V11] Le registre serveur envoie
+              // `class_subject_id` + `start_at`/`end_at` (colonnes réelles
+              // de CourseSession) — l'ancienne lecture `weekly_schedule_id`/
+              // `classroom_id`/`date` échouait silencieusement (id de
+              // matière nul, date en repli « maintenant »).
+              final startAt = _rDt(row, 'start_at');
+              final csSubjectId = _rIntN(row, 'class_subject_id');
               b.insert(
                 _db.courseSessions,
                 CourseSessionsCompanion.insert(
                   id: Value(_rId(row)),
                   weeklyScheduleId: Value(_rIntN(row, 'weekly_schedule_id')),
                   classroomId: Value(_rIntN(row, 'classroom_id')),
-                  subjectId: Value(_rIntN(row, 'subject_id')),
+                  subjectId: Value(csSubjectId ?? _rIntN(row, 'subject_id')),
                   teacherId: Value(_rIntN(row, 'teacher_id')),
-                  date: _rDt(row, 'date') ?? DateTime.now(),
-                  startTime: Value(_rStrN(row, 'start_time')),
-                  endTime: Value(_rStrN(row, 'end_time')),
+                  date: startAt ?? (_rDt(row, 'date') ?? DateTime.now()),
+                  // [Fix-SYNC-FIELD-MAP] Colonne réelle :
+                  // scheduled_start_time (miroir de CourseSession).
+                  startTime: Value(
+                    _rStrN(row, 'start_time') ??
+                        _rStrN(row, 'scheduled_start_time') ??
+                        (startAt?.toIso8601String().substring(11, 16)),
+                  ),
+                  endTime: Value(
+                    _rStrN(row, 'end_time') ??
+                        (() {
+                          final endAt = _rDt(row, 'end_at');
+                          return endAt?.toIso8601String().substring(11, 16);
+                        }()),
+                  ),
                   state: Value(_rStr(row, 'state', d: 'PENDING')),
                   lessonRecordId: Value(_rIntN(row, 'lesson_record_id')),
                   syncedAt: Value(syncedAt),
@@ -864,13 +2231,25 @@ class SyncEngine {
                 _db.studentAbsences,
                 StudentAbsencesCompanion.insert(
                   id: Value(_rId(row)),
-                  courseSessionId: _rInt(row, 'course_session_id'),
+                  // [Fix-SYNC-ABSENCE-SESSION-ID] V22 — le registre serveur
+                  // envoie `session_id` (sync_registry.py) alors que la
+                  // colonne Drift s'appelle courseSessionId : l'ancienne
+                  // lecture `course_session_id` tombait TOUJOURS sur le
+                  // défaut 0 → les absences n'étaient liées à AUCUNE
+                  // session (historique hors-ligne vide, décomptes à 0).
+                  // On lit les deux clés (défense aux déploiements mixtes).
+                  courseSessionId: _rIntN(row, 'course_session_id') ??
+                      _rInt(row, 'session_id'),
                   studentId: _rInt(row, 'student_id'),
                   isJustified: Value(_rBool(row, 'is_justified')),
                   reason: Value(_rStrN(row, 'reason')),
                   syncedAt: Value(syncedAt),
                   isDirty: const Value(false),
                   isDeleted: const Value(false),
+                  // [Fix-SYNC-IDEMPOTENCE] Lecture des champs de sync.
+                  idempotencyKey: Value(_rStrN(row, 'idempotency_key')),
+                  deviceUuid: Value(_rStrN(row, 'device_uuid')),
+                  syncVersion: Value(_rInt(row, 'sync_version')),
                 ),
                 mode: InsertMode.insertOrReplace,
               );
@@ -898,8 +2277,21 @@ class SyncEngine {
                 UsersCompanion.insert(
                   id: Value(_rId(row)),
                   username: _rStr(row, 'username'),
-                  firstName: Value(_rStrN(row, 'first_name')),
-                  lastName: Value(_rStrN(row, 'last_name')),
+                  // [Fix-SYNC-FIELD-MAP-V11] Le registre serveur envoie
+                  // `nom`/`prenoms` (colonnes réelles du modèle User)
+                  // — l'ancienne lecture `first_name`/`last_name` seule
+                  // perdait TOUS les noms (ex. « prof principal » vide,
+                  // noms des enseignants absents hors-ligne).
+                  firstName: Value(
+                    _rStrN(row, 'first_name') ?? _rStrN(row, 'nom'),
+                  ),
+                  lastName: Value(
+                    _rStrN(row, 'last_name') ?? _rStrN(row, 'prenoms'),
+                  ),
+                  // [Fix-EDT-TEACHERS-OFFLINE] V22 — rôle principal :
+                  // filtrage local des enseignants hors-ligne (EDT admin
+                  // « Par enseignant », consultation des présences).
+                  role: Value(_rStrN(row, 'role')),
                   email: Value(_rStrN(row, 'email')),
                   phone: Value(_rStrN(row, 'phone')),
                   photoPath: Value(_rStrN(row, 'photo_path')),
@@ -914,37 +2306,18 @@ class SyncEngine {
               );
               break;
 
+            case 'cycles':
+              // [Fix-SYNC-LEVELS-CYCLES] V18 : table serveur réelle (code,
+              // label) — acceptée silencieusement : le mobile ne la stocke
+              // pas (pas de table Drift dédiée), la résolution
+              // classroom→cycle passe par levels.cycle_id.
+              _log.d('Table cycles : 1 ligne '
+                  '(résolution via levels.cycle_id)');
+              break;
+
             default:
               _log.w('Table non gérée par le sync engine : $table '
-                  '(${rows.length} lignes ignorées)');
-          }
-        }
-      });
-    } catch (e) {
-      _log.e('Erreur batch upsert table "$table" : $e');
-      rethrow;
-    }
-  }
-
-  /// Retire les lignes dont l'élève local est isDirty (en attente de push).
-  Future<List<Map<String, dynamic>>> _dropDirtyStudents(
-    List<Map<String, dynamic>> rows,
-  ) async {
-    try {
-      final ids = rows.map(_rId).where((id) => id > 0).toSet();
-      if (ids.isEmpty) return rows;
-      final dirtyIds = await (_db.select(_db.students)
-            ..where((t) => t.id.isIn(ids) & t.isDirty.equals(true)))
-          .map((row) => row.id)
-          .get();
-      if (dirtyIds.isEmpty) return rows;
-      _log.i('[Fix-PULL-DIRTY] ${dirtyIds.length} élève(s) local(aux) '
-          'modifié(s) préservé(s) du pull (attente de push)');
-      final dirty = dirtyIds.toSet();
-      return rows.where((r) => !dirty.contains(_rId(r))).toList();
-    } catch (e) {
-      _log.w('Filtre isDirty (students) impossible : $e');
-      return rows;
+                  '(1 ligne ignorée)');
     }
   }
 
@@ -977,239 +2350,301 @@ class SyncEngine {
       case 'establishments':
         await (_db.update(_db.establishments)
               ..where((t) => t.id.equals(recordId)))
-            .write(EstablishmentsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          EstablishmentsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'school_years':
         await (_db.update(_db.schoolYears)..where((t) => t.id.equals(recordId)))
-            .write(SchoolYearsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          SchoolYearsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'periods':
         await (_db.update(_db.periods)..where((t) => t.id.equals(recordId)))
-            .write(PeriodsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          PeriodsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'levels':
         await (_db.update(_db.levels)..where((t) => t.id.equals(recordId)))
-            .write(LevelsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          LevelsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'series':
         await (_db.update(_db.series)..where((t) => t.id.equals(recordId)))
-            .write(SeriesCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          SeriesCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'streams':
         await (_db.update(_db.streams)..where((t) => t.id.equals(recordId)))
-            .write(StreamsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StreamsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'classrooms':
         await (_db.update(_db.classrooms)..where((t) => t.id.equals(recordId)))
-            .write(ClassroomsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          ClassroomsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'subjects':
         await (_db.update(_db.subjects)..where((t) => t.id.equals(recordId)))
-            .write(SubjectsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          SubjectsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'class_subjects':
         await (_db.update(_db.classSubjects)
               ..where((t) => t.id.equals(recordId)))
-            .write(ClassSubjectsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          ClassSubjectsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'assessments':
         await (_db.update(_db.assessments)..where((t) => t.id.equals(recordId)))
-            .write(AssessmentsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          AssessmentsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'grades':
         await (_db.update(_db.grades)..where((t) => t.id.equals(recordId)))
-            .write(GradesCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          GradesCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+            // [Grade-Validation] écriture directe appliquée -> marque résolue.
+            syncStatus: const Value(null),
+            proposedValue: const Value(null),
+            proposedIsAbsent: const Value(null),
+            proposedComments: const Value(null),
+          ),
+        );
         break;
       case 'students':
         await (_db.update(_db.students)..where((t) => t.id.equals(recordId)))
-            .write(StudentsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_contacts':
         await (_db.update(_db.studentContacts)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentContactsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentContactsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_medicals':
         await (_db.update(_db.studentMedicals)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentMedicalsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentMedicalsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_scholastics':
         await (_db.update(_db.studentScholastics)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentScholasticsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentScholasticsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_parents':
         await (_db.update(_db.studentParents)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentParentsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentParentsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'guardians':
         await (_db.update(_db.guardians)..where((t) => t.id.equals(recordId)))
-            .write(GuardiansCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          GuardiansCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_guardians':
         await (_db.update(_db.studentGuardians)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentGuardiansCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentGuardiansCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_class_assignments':
         await (_db.update(_db.studentClassAssignments)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentClassAssignmentsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentClassAssignmentsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_statuses':
         await (_db.update(_db.studentStatuses)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentStatusesCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentStatusesCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'inscription_types':
         await (_db.update(_db.inscriptionTypes)
               ..where((t) => t.id.equals(recordId)))
-            .write(InscriptionTypesCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          InscriptionTypesCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'time_slots':
         await (_db.update(_db.timeSlots)..where((t) => t.id.equals(recordId)))
-            .write(TimeSlotsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          TimeSlotsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'weekly_schedules':
         await (_db.update(_db.weeklySchedules)
               ..where((t) => t.id.equals(recordId)))
-            .write(WeeklySchedulesCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          WeeklySchedulesCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'course_sessions':
         await (_db.update(_db.courseSessions)
               ..where((t) => t.id.equals(recordId)))
-            .write(CourseSessionsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          CourseSessionsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'student_absences':
         await (_db.update(_db.studentAbsences)
               ..where((t) => t.id.equals(recordId)))
-            .write(StudentAbsencesCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          StudentAbsencesCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'lesson_records':
         await (_db.update(_db.lessonRecords)
               ..where((t) => t.id.equals(recordId)))
-            .write(LessonRecordsCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          LessonRecordsCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       case 'users':
         await (_db.update(_db.users)..where((t) => t.id.equals(recordId)))
-            .write(UsersCompanion(
-          syncedAt: Value(syncedAt),
-          isDirty: const Value(false),
-          isDeleted: Value(deleted),
-        ));
+            .write(
+          UsersCompanion(
+            syncedAt: Value(syncedAt),
+            isDirty: const Value(false),
+            isDeleted: Value(deleted),
+          ),
+        );
         break;
       default:
         _log.w('_updateRowSyncState : table non gérée "$table" (id=$recordId)');
     }
   }
 
-  Future<void> _updateSyncMetadata(DateTime serverTime, int totalChanges) async {
+  Future<void> _updateSyncMetadata(
+    DateTime serverTime,
+    int totalChanges,
+  ) async {
     try {
       await _db.batch((b) {
         for (final table in replicatedTables) {
@@ -1224,6 +2659,16 @@ class SyncEngine {
             mode: InsertMode.insertOrReplace,
           );
         }
+        b.insert(
+          _db.syncMetadata,
+          SyncMetadataCompanion.insert(
+            tableNameColumn: _mobileCacheVersionKey,
+            lastSyncedAt: Value(serverTime),
+            lastCount: const Value(_mobileCacheVersion),
+            updatedAt: Value(serverTime),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
       });
     } catch (e) {
       _log.w('Échec mise à jour sync_metadata : $e');
@@ -1231,4 +2676,19 @@ class SyncEngine {
   }
 }
 
-final syncEngineProvider = Provider<SyncEngine>((ref) => SyncEngine(ref));
+/// [Fix-SYNC-IDEMPOTENCE] Génère une clé d'idempotence UUID v4 standard.
+///
+/// Utilisée par [SyncEngine.push] pour enrichir chaque ligne du payload
+/// avec une `idempotency_key` unique, permettant au serveur de détecter
+/// les doublons en cas de retry réseau (coupure, timeout).
+///
+/// Probabilité de collision : 1 sur 5,3 × 10^36 — négligeable.
+String _generateIdempotencyKey() {
+  return const Uuid().v4();
+}
+
+final syncEngineProvider = Provider<SyncEngine>((ref) {
+  // WATCH databaseProvider : invalide le moteur lors d'une bascule.
+  ref.watch(databaseProvider);
+  return SyncEngine(ref);
+});

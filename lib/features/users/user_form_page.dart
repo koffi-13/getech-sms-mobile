@@ -115,9 +115,11 @@ class _UserFormPageState extends ConsumerState<UserFormPage> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(isEdit
-                ? 'Utilisateur mis à jour avec succès.'
-                : 'Utilisateur créé avec succès.'),
+            content: Text(
+              isEdit
+                  ? 'Utilisateur mis à jour avec succès.'
+                  : 'Utilisateur créé avec succès.',
+            ),
           ),
         );
         context.pop();
@@ -143,7 +145,8 @@ class _UserFormPageState extends ConsumerState<UserFormPage> {
   Widget build(BuildContext context) {
     final auth = ref.watch(authProvider);
     // RBAC : USER_MANAGE requis. Seul un superuser peut définir isSuperuser.
-    final canManage = hasPermission(auth.permissions, RbacPermissions.userManage);
+    final canManage =
+        hasPermission(auth.permissions, RbacPermissions.userManage);
     if (!canManage) {
       return Scaffold(
         appBar: AppBar(title: const Text('Utilisateur')),
@@ -224,17 +227,19 @@ class _UserFormPageState extends ConsumerState<UserFormPage> {
                       prefixIcon: const Icon(Icons.person_outline),
                     ),
                     DropdownButtonFormField<Sexe>(
-                      value: _sexe,
+                      initialValue: _sexe,
                       decoration: const InputDecoration(
                         labelText: 'Sexe',
                         prefixIcon: Icon(Icons.wc_outlined),
                         border: OutlineInputBorder(),
                       ),
                       items: Sexe.values
-                          .map((s) => DropdownMenuItem(
-                                value: s,
-                                child: Text(s.label),
-                              ))
+                          .map(
+                            (s) => DropdownMenuItem(
+                              value: s,
+                              child: Text(s.label),
+                            ),
+                          )
                           .toList(),
                       onChanged: (v) => setState(() => _sexe = v),
                     ),
@@ -302,11 +307,14 @@ class _UserFormPageState extends ConsumerState<UserFormPage> {
                       obscureText: _obscurePassword,
                       prefixIcon: const Icon(Icons.lock_outline),
                       suffixIcon: IconButton(
-                        icon: Icon(_obscurePassword
-                            ? Icons.visibility_outlined
-                            : Icons.visibility_off_outlined),
+                        icon: Icon(
+                          _obscurePassword
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined,
+                        ),
                         onPressed: () => setState(
-                            () => _obscurePassword = !_obscurePassword),
+                          () => _obscurePassword = !_obscurePassword,
+                        ),
                       ),
                       validator: (v) {
                         if (isEdit) {
@@ -349,7 +357,8 @@ class _UserFormPageState extends ConsumerState<UserFormPage> {
                       onChanged: (v) => setState(() => _isActive = v),
                       title: const Text('Compte actif'),
                       subtitle: const Text(
-                          'Un compte inactif ne peut pas se connecter.'),
+                        'Un compte inactif ne peut pas se connecter.',
+                      ),
                       secondary: Icon(
                         _isActive ? Icons.check_circle : Icons.block,
                         color: _isActive ? Colors.green : Colors.grey,

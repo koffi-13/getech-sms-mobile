@@ -162,9 +162,7 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
   late final MobileScannerController _controller;
   bool _torchOn = false;
   bool _hasTorch = false;
-  bool _permissionDenied = false;
   bool _starting = true;
-  String? _startError;
 
   @override
   void initState() {
@@ -174,6 +172,26 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
       returnImage: false,
     );
     _bootstrap();
+  }
+
+  /// [Fix-QR-BLACK-SCREEN] Relance propre de la caméra : stop + start
+  /// dans un try/catch — start() sur un contrôleur déjà actif lève une
+  /// erreur en mobile_scanner 5.x qui restait non interceptée.
+  /// Sert de « Réessayer » depuis les écrans d'erreur (errorBuilder).
+  Future<void> _restartCamera() async {
+    if (!mounted) return;
+    setState(() => _starting = true);
+    try {
+      await _controller.stop();
+    } catch (_) {}
+    try {
+      await _controller.start();
+    } catch (_) {
+      // L'échec sera re-rendu par errorBuilder (pas de setState pendant
+      // le build — cf. [Fix-QR-BLACK-SCREEN-v2]).
+    } finally {
+      if (mounted) setState(() => _starting = false);
+    }
   }
 
   Future<void> _bootstrap() async {
@@ -208,119 +226,6 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
     Navigator.of(context).pop<PairingPayload>(payload);
   }
 
-  /// Tente de parser le payload. Supporte :
-  /// 1. URI : getech://pair?ip=...&port=8000&token=...&code=...
-  /// 2. JSON : {"ip": "...", "port": 8000, "token": "...", "establishment_code": "..."}
-  /// 3. JWT : décodage des claims pour extraire IP/port/code
-  /// 4. Base64 : JSON encodé
-  /// 5. Délimité : ip:port|code|token
-  static PairingPayload? tryParsePayload(String raw) {
-    final trimmed = raw.trim();
-    if (trimmed.isEmpty) return null;
-
-    // 1. URI (getech://pair ou http://.../pair)
-    if (trimmed.startsWith('getech://') || trimmed.startsWith('http')) {
-      try {
-        // Normalisation pour Uri.parse si c'est getech://
-        final uri = Uri.parse(
-          trimmed.startsWith('getech://')
-              ? trimmed.replaceFirst('getech://pair', 'http://getech-app/pair')
-              : trimmed,
-        );
-        
-        final ip = uri.queryParameters['ip'] ?? uri.queryParameters['host'] ?? 
-                  (uri.host == 'getech-app' ? '' : uri.host);
-        final port = int.tryParse(uri.queryParameters['port'] ?? uri.port.toString()) ?? 8000;
-        final code = uri.queryParameters['code'] ?? uri.queryParameters['establishment_code'] ?? uri.queryParameters['est_code'] ?? '';
-        final token = uri.queryParameters['token'] ?? uri.queryParameters['pairing_token'] ?? '';
-
-        if (token.isNotEmpty) {
-          return PairingPayload(
-            ip: ip,
-            port: port,
-            establishmentCode: code,
-            pairingToken: token,
-          );
-        }
-      } catch (_) {}
-    }
-
-    // 2. JSON ou Base64 JSON
-    try {
-      String jsonStr = trimmed;
-      if (!trimmed.startsWith('{') && !trimmed.contains(' ')) {
-        // Tentative Base64
-        try {
-          jsonStr = utf8.decode(base64.decode(base64.normalize(trimmed)));
-        } catch (_) {}
-      }
-
-      if (jsonStr.startsWith('{')) {
-        final decoded = jsonDecode(jsonStr);
-        if (decoded is Map) {
-          final data = decoded['pairing'] is Map ? decoded['pairing'] as Map : decoded;
-          return PairingPayload(
-            ip: data['ip']?.toString() ?? data['host']?.toString() ?? '',
-            port: int.tryParse(data['port']?.toString() ?? '8000') ?? 8000,
-            establishmentCode: data['establishment_code']?.toString() ?? data['code']?.toString() ?? '',
-            pairingToken: data['pairing_token']?.toString() ?? data['token']?.toString() ?? '',
-          );
-        }
-      }
-    } catch (_) {}
-
-    // 3. JWT (3 segments)
-    if (trimmed.contains('.') && trimmed.split('.').length == 3) {
-      try {
-        final payloadPart = trimmed.split('.')[1];
-        final normalized = base64.normalize(payloadPart);
-        final payloadJson = utf8.decode(base64.decode(normalized));
-        final payload = jsonDecode(payloadJson);
-        if (payload is Map) {
-          return PairingPayload(
-            ip: payload['ip']?.toString() ?? payload['host']?.toString() ?? '',
-            port: int.tryParse(payload['port']?.toString() ?? '8000') ?? 8000,
-            establishmentCode: payload['establishment_code']?.toString() ?? payload['code']?.toString() ?? '',
-            pairingToken: trimmed,
-          );
-        }
-      } catch (_) {}
-    }
-
-    // 4. Délimité (ip:port|code|token)
-    if (trimmed.contains('|')) {
-      final parts = trimmed.split('|');
-      if (parts.length >= 2) {
-        String ip = '';
-        int port = 8000;
-        if (parts[0].contains(':')) {
-          final hostParts = parts[0].split(':');
-          ip = hostParts[0];
-          port = int.tryParse(hostParts[1]) ?? 8000;
-        } else {
-          ip = parts[0];
-        }
-        return PairingPayload(
-          ip: ip,
-          port: port,
-          establishmentCode: parts.length > 2 ? parts[1] : '',
-          pairingToken: parts.last,
-        );
-      }
-    }
-
-    // 5. Token brut (dernier recours)
-    if (trimmed.length >= 6 && !trimmed.contains(' ')) {
-      return PairingPayload(
-        ip: '',
-        port: 8000,
-        establishmentCode: '',
-        pairingToken: trimmed,
-      );
-    }
-
-    return null;
-  }
 
   void _toggleTorch() async {
     try {
@@ -336,10 +241,12 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text(msg),
-        behavior: SnackBarBehavior.floating,
-      ));
+      ..showSnackBar(
+        SnackBar(
+          content: Text(msg),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
   }
 
   void _enterManually() {
@@ -378,45 +285,44 @@ class _QrScannerPageState extends ConsumerState<QrScannerPage> {
   }
 
   Widget _buildBody(ThemeData theme) {
-    if (_permissionDenied) {
-      return _PermissionDenied(
-        onRetry: () {
-          setState(() => _permissionDenied = false);
-          _controller.start();
-        },
-        onManual: _enterManually,
-      );
-    }
-    if (_startError != null && _starting) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.videocam_off, size: 48, color: Colors.white70),
-              const SizedBox(height: 16),
-              Text(
-                _startError!,
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white70),
-              ),
-              const SizedBox(height: 20),
-              OutlinedButton.icon(
-                onPressed: _enterManually,
-                icon: const Icon(Icons.edit),
-                label: const Text('Saisir manuellement'),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
+    // [Fix-QR-BLACK-SCREEN-v2] Toute la gestion d'erreur caméra se fait
+    // DANS errorBuilder (rendu direct, sans setState) — voir le commentaire
+    // du bloc MobileScanner ci-dessous. Les anciennes branches
+    // `_permissionDenied` / `_startError && _starting` étaient inaccessibles
+    // ou lévaient « setState() called during build », laissant la preview
+    // NOIRE sans message sur certains téléphones.
     return Stack(
       children: [
         MobileScanner(
           controller: _controller,
           onDetect: _onDetect,
+          // [Fix-QR-BLACK-SCREEN] Sans errorBuilder, une erreur de
+          // démarrage caméra (permission refusée définitivement, caméra
+          // occupée par une autre app, libération CameraX pas encore
+          // terminée à la réouverture) était AVALÉE et la preview
+          // restait NOIRE sans message.
+          // [Fix-QR-BLACK-SCREEN-v2] ERREUR de la 1re tentative de fix :
+          // errorBuilder est appelé PENDANT le build — y faire setState()
+          // lève « setState()/markNeedsBuild() called during build », et
+          // l'écran d'erreur n'apparaissait jamais. On rend l'écran
+          // directement ici, sans toucher à l'état : si l'erreur persiste,
+          // ce builder est simplement rappelé ; dès que la caméra
+          // démarre (Réessayer), la preview remplace naturellement l'écran.
+          errorBuilder: (context, error, child) {
+            final code = error.errorCode;
+            if (code == MobileScannerErrorCode.permissionDenied) {
+              return _PermissionDenied(
+                onRetry: _restartCamera,
+                onManual: _enterManually,
+              );
+            }
+            return _CameraError(
+              message: 'Caméra indisponible ($code). '
+                  'Vérifiez la permission caméra ou réessayez.',
+              onRetry: _restartCamera,
+              onManual: _enterManually,
+            );
+          },
         ),
         // Viseur carré centré
         _ScannerOverlay(colorScheme: theme.colorScheme),
@@ -578,40 +484,57 @@ class _PermissionDenied extends StatelessWidget {
 }
 
 class _CameraError extends StatelessWidget {
-  const _CameraError({required this.message, required this.onManual});
+  const _CameraError({
+    required this.message,
+    required this.onRetry,
+    required this.onManual,
+  });
   final String message;
+  final VoidCallback onRetry;
   final VoidCallback onManual;
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.error_outline, size: 48, color: Colors.white70),
-            const SizedBox(height: 16),
-            Text(
-              'Caméra indisponible',
-              style: Theme.of(context)
-                  .textTheme
-                  .titleMedium
-                  ?.copyWith(color: Colors.white),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              message,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white70, fontSize: 12),
-            ),
-            const SizedBox(height: 20),
-            OutlinedButton.icon(
-              onPressed: onManual,
-              icon: const Icon(Icons.edit),
-              label: const Text('Saisir manuellement'),
-            ),
-          ],
+    // [Fix-QR-BLACK-SCREEN-v2] Fond noir opaque : errorBuilder remplace la
+    // preview ; sans lui, l'écran d'erreur laissait voir la page noire
+    // derrière — indistinguable du bug de preview noire.
+    return ColoredBox(
+      color: Colors.black,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.error_outline, size: 48, color: Colors.white70),
+              const SizedBox(height: 16),
+              Text(
+                'Caméra indisponible',
+                style: Theme.of(context)
+                    .textTheme
+                    .titleMedium
+                    ?.copyWith(color: Colors.white),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+              const SizedBox(height: 20),
+              FilledButton.icon(
+                onPressed: onRetry,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Réessayer'),
+              ),
+              const SizedBox(height: 8),
+              TextButton.icon(
+                onPressed: onManual,
+                icon: const Icon(Icons.edit),
+                label: const Text('Saisir manuellement'),
+              ),
+            ],
+          ),
         ),
       ),
     );

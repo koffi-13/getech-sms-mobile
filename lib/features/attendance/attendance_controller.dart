@@ -4,11 +4,16 @@
 ///
 /// Source de données V1 : API REST (online). Aucun cache Drift pour limiter
 /// la surface de codegen.
+///
+/// RÈGLE MÉTIER : la présence n'est saisie qu'en connexion au serveur.
+/// Aucune mutation n'est mise en file d'attente hors-ligne (contrairement
+/// aux notes) — chaque appel vérifie [ConnectionState.canReachServer].
 library;
 
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/database/database.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
@@ -20,12 +25,29 @@ import '../../shared/models/student_dto.dart';
 /// Contrôleur Riverpod exposant les opérations de mutation (démarrage de
 /// session, sauvegarde des absences, cahier de texte). Stateless : la page
 /// appelante gère son propre indicateur de chargement.
+///
+/// [Fix-PRESENCE-ONLINE] Règle métier : la présence n'est JAMAIS saisie
+/// hors-ligne (ni file d'attente, ni cache d'écriture). Chaque mutation
+/// exige une connexion au serveur confirmée par le heartbeat.
 class AttendanceController {
   AttendanceController(this._ref);
   final Ref _ref;
 
   Dio get _dio => _ref.read(dioProvider);
   String? get _serverUrl => _ref.read(connectionProvider).serverUrl;
+
+  /// Garde commune : refuse toute saisie de présence tant que la liaison
+  /// au serveur n'est pas établie (couvre : non appairé, heartbeat en cours,
+  /// serveur injoignable, mode hors-ligne forcé).
+  void _requireOnlineServer() {
+    final conn = _ref.read(connectionProvider);
+    if (!conn.canReachServer) {
+      throw const ApiException(
+        'La présence ne peut être saisie qu\'en connexion au serveur. '
+        'Attendez que la connexion soit établie, puis réessayez.',
+      );
+    }
+  }
 
   /// Démarre une session de cours : `POST /attendance/session`.
   Future<CourseSessionDto> startSession({
@@ -37,6 +59,7 @@ class AttendanceController {
     String? startTime,
     String? endTime,
   }) async {
+    _requireOnlineServer();
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
     final body = <String, dynamic>{
@@ -63,7 +86,10 @@ class AttendanceController {
   /// Enregistre les absences d'une session (lot) :
   /// `POST /attendance/session/{sessionId}/absences`.
   Future<void> saveAbsences(
-      int sessionId, List<StudentAbsenceDto> absences) async {
+    int sessionId,
+    List<StudentAbsenceDto> absences,
+  ) async {
+    _requireOnlineServer();
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
     await _dio.post(
@@ -76,7 +102,10 @@ class AttendanceController {
 
   /// Marque une session comme terminée (PATCH /attendance/session/{id}).
   Future<CourseSessionDto> markSessionState(
-      int sessionId, String state) async {
+    int sessionId,
+    String state,
+  ) async {
+    _requireOnlineServer();
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
     final resp = await _dio.patch(
@@ -100,6 +129,7 @@ class AttendanceController {
     String? homework,
     int? recordId,
   }) async {
+    _requireOnlineServer();
     final url = _serverUrl;
     if (url == null) throw const ApiException('Serveur non configuré');
     final dto = LessonRecordDto(
@@ -110,7 +140,9 @@ class AttendanceController {
     );
     final resp = await _dio.post(
       buildUrl(
-          url, '${ApiEndpoints.attendanceSession}/$sessionId/lesson-record'),
+        url,
+        '${ApiEndpoints.attendanceSession}/$sessionId/lesson-record',
+      ),
       data: dto.toJson(),
     );
     final data = resp.data is Map
@@ -146,6 +178,48 @@ final classStudentsProvider = FutureProvider.autoDispose
     if (api.statusCode == 403) return const [];
     rethrow;
   }
+});
+
+/// [Présence-V10] Paramètre du provider d'élèves fusionnés : la liste des
+/// classes d'un groupe de cours JUMELÉS (chevauchement de créneaux).
+class MergedStudentsQuery {
+  final List<int> classroomIds;
+  const MergedStudentsQuery(this.classroomIds);
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MergedStudentsQuery &&
+          _listEquals(other.classroomIds, classroomIds);
+
+  @override
+  int get hashCode => Object.hashAll(classroomIds);
+
+  static bool _listEquals(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+}
+
+/// [Présence-V10] Élèves de plusieurs classes (classes jumelées), triés
+/// alphabétiquement. Une seule classe → simple délégation à
+/// [classStudentsProvider].
+final mergedClassStudentsProvider = FutureProvider.autoDispose
+    .family<List<StudentDto>, MergedStudentsQuery>((ref, q) async {
+  if (q.classroomIds.length <= 1) {
+    final list =
+        await ref.watch(classStudentsProvider(q.classroomIds.first).future);
+    return list;
+  }
+  final all = <StudentDto>[];
+  for (final cid in q.classroomIds) {
+    all.addAll(await ref.watch(classStudentsProvider(cid).future));
+  }
+  all.sort((a, b) => a.fullName.compareTo(b.fullName));
+  return all;
 });
 
 /// Liste de tous les élèves (pour le sélecteur d'historique d'absences) :
@@ -252,7 +326,9 @@ final lessonRecordProvider = FutureProvider.autoDispose
   try {
     final resp = await dio.get(
       buildUrl(
-          conn.serverUrl!, '${ApiEndpoints.attendanceSession}/$sessionId/lesson-record'),
+        conn.serverUrl!,
+        '${ApiEndpoints.attendanceSession}/$sessionId/lesson-record',
+      ),
     );
     if (resp.data is Map) {
       return LessonRecordDto.fromJson(resp.data as Map<String, dynamic>);
@@ -288,6 +364,91 @@ final absenceHistoryProvider = FutureProvider.autoDispose
   }
 });
 
+/// [Fix-STUDENTS-LIST-TRUNCATED] Le serveur pagine `GET /students`
+/// (défaut 50, max 200 par page) : l'ancien appel sans paramètre ne
+/// renvoyait que la 1re page — une classe de 57 élèves affichait 50
+/// lignes dans la feuille de présence (retour terrain 2026-11-12 : « la
+/// liste de présence n'affiche pas tous les élèves pour des listes
+/// longues »). On demande explicitement des pages de 200 et on boucle
+/// jusqu'à épuisement (garde-fou 30 pages = 6000 élèves).
+Future<List<StudentDto>> _fetchAllStudents(
+  Dio dio,
+  String serverUrl, {
+  int? classroomId,
+}) async {
+  final out = <StudentDto>[];
+  const perPage = 200;
+  var page = 1;
+  while (page <= 30) {
+    final resp = await dio.get(
+      buildUrl(serverUrl, ApiEndpoints.students),
+      queryParameters: {
+        'page': page,
+        'per_page': perPage,
+        if (classroomId != null) 'classroom_id': classroomId,
+      },
+    );
+    final batch = _parseStudentList(resp.data);
+    out.addAll(batch);
+    final total = _parseStudentTotal(resp.data);
+    if (batch.length < perPage || (total > 0 && out.length >= total)) break;
+    page++;
+  }
+  return out;
+}
+
+int _parseStudentTotal(dynamic data) {
+  if (data is Map && data['total'] is num) {
+    return (data['total'] as num).toInt();
+  }
+  return 0;
+}
+
+/// [Fix-OFFLINE] Historique d'absences depuis le cache Drift local
+/// (tables `student_absences` + `course_sessions` + `subjects`, remplies
+/// par la synchro) — sert l'historique quand le serveur ne répond pas.
+Future<List<AbsenceHistoryEntry>> _absenceHistoryFromLocal(
+  Ref ref,
+  int studentId,
+) async {
+  try {
+    final db = ref.read(databaseProvider);
+    final absences = await (db.select(db.studentAbsences)
+          ..where((t) => t.studentId.equals(studentId)))
+        .get();
+    if (absences.isEmpty) return const [];
+
+    final sessionIds = absences.map((a) => a.courseSessionId).toSet();
+    final sessions = await (db.select(db.courseSessions)
+          ..where((t) => t.id.isIn(sessionIds)))
+        .get();
+    final sessionById = {for (final s in sessions) s.id: s};
+    final subjects = {
+      for (final s in await db.select(db.subjects).get()) s.id: s.name,
+    };
+
+    final entries = absences.map((a) {
+      final s = sessionById[a.courseSessionId];
+      return AbsenceHistoryEntry(
+        id: a.id,
+        studentId: studentId,
+        studentName: '',
+        courseSessionId: a.courseSessionId,
+        date: s?.date,
+        courseName: s == null ? null : subjects[s.subjectId],
+        isJustified: a.isJustified,
+        reason: a.reason,
+      );
+    }).toList();
+    entries.sort(
+      (a, b) => (b.date ?? DateTime(1970)).compareTo(a.date ?? DateTime(1970)),
+    );
+    return entries;
+  } catch (_) {
+    return const [];
+  }
+}
+
 /// Vue enrichie d'une absence pour l'historique : inclut la date du cours et
 /// le nom de la matière (dénormalisés côté serveur dans la réponse
 /// `/attendance/absences`). [StudentAbsenceDto] ne expose pas ces champs, on
@@ -320,8 +481,7 @@ class AbsenceHistoryEntry {
         studentName: j['student_name'] as String? ?? '',
         courseSessionId: (j['course_session_id'] as num?)?.toInt() ?? 0,
         date: DateFormatter.parse(j['date'] as String?),
-        courseName:
-            j['course_name'] as String? ?? j['subject_name'] as String?,
+        courseName: j['course_name'] as String? ?? j['subject_name'] as String?,
         isJustified: (j['is_justified'] as bool?) ?? false,
         reason: j['reason'] as String?,
       );
@@ -329,10 +489,14 @@ class AbsenceHistoryEntry {
 
 /// Historique enrichi : `GET /attendance/absences?student_id=` →
 /// `List<AbsenceHistoryEntry>` (avec date + matière).
+///
+/// [Fix-OFFLINE] Repli cache Drift si le serveur ne répond pas.
 final absenceHistoryEntriesProvider = FutureProvider.autoDispose
     .family<List<AbsenceHistoryEntry>, int>((ref, studentId) async {
   final conn = ref.watch(connectionProvider);
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return _absenceHistoryFromLocal(ref, studentId);
+  }
   final dio = ref.watch(dioProvider);
   try {
     final resp = await dio.get(
@@ -342,11 +506,14 @@ final absenceHistoryEntriesProvider = FutureProvider.autoDispose
     final raw = <Map<String, dynamic>>[];
     if (resp.data is List) {
       raw.addAll(
-          (resp.data as List).whereType<Map>().map(Map<String, dynamic>.from));
+        (resp.data as List).whereType<Map>().map(Map<String, dynamic>.from),
+      );
     } else if (resp.data is Map && (resp.data as Map)['items'] is List) {
-      raw.addAll(((resp.data as Map)['items'] as List)
-          .whereType<Map>()
-          .map(Map<String, dynamic>.from));
+      raw.addAll(
+        ((resp.data as Map)['items'] as List)
+            .whereType<Map>()
+            .map(Map<String, dynamic>.from),
+      );
     }
     return raw.map(AbsenceHistoryEntry.fromJson).toList();
   } on DioException catch (e) {
@@ -354,7 +521,10 @@ final absenceHistoryEntriesProvider = FutureProvider.autoDispose
         ? e.error as ApiException
         : dioErrorToApiException(e);
     if (api.statusCode == 403) return const [];
-    rethrow;
+    // Serveur injoignable → cache local.
+    return _absenceHistoryFromLocal(ref, studentId);
+  } catch (_) {
+    return _absenceHistoryFromLocal(ref, studentId);
   }
 });
 

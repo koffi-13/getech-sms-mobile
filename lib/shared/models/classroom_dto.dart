@@ -2,14 +2,37 @@
 /// schémas Pydantic du desktop (schemas.py).
 library;
 
-import '../../core/config/constants.dart';
 import '../../core/utils/formatters.dart';
+
+/// Utilitaire de conversion sécurisée en String.
+/// Si la valeur est null, retourne null.
+/// Si c'est déjà une String, la retourne.
+/// Sinon, retourne toString().
+String? _safeString(dynamic v) {
+  if (v == null) return null;
+  if (v is String) return v;
+  return v.toString();
+}
+
+/// [Fix-TEACHER-CLASSES-403] Ids tolérants : num ou chaîne numérique.
+int _asId(dynamic v) {
+  if (v is num) return v.toInt();
+  if (v is String) return int.tryParse(v) ?? 0;
+  return 0;
+}
+
+int? _asIdNullable(dynamic v) {
+  if (v == null) return null;
+  if (v is num) return v.toInt();
+  if (v is String) return int.tryParse(v);
+  return null;
+}
 
 /// Classe (ClassroomResponse côté serveur).
 ///
 /// Champs serveur : {id, name, establishment_id, max_students, is_active,
-/// head_teacher_id, head_teacher_name, level_name, cycle_name,
-/// current_students_count, series_name}.
+/// head_teacher_id, head_teacher_name, level_name, cycle_name, cycle_id
+/// [Fix-PERIOD-CYCLE], current_students_count, series_name}.
 class ClassroomDto {
   final int id;
   final String name;
@@ -20,6 +43,7 @@ class ClassroomDto {
   final String? headTeacherName;
   final String? levelName;
   final String? cycleName;
+  final int? cycleId;
   final int? currentStudentsCount;
   final String? seriesName;
 
@@ -33,9 +57,40 @@ class ClassroomDto {
     this.headTeacherName,
     this.levelName,
     this.cycleName,
+    this.cycleId,
     this.currentStudentsCount,
     this.seriesName,
   });
+
+  /// Copie avec champs surchargés (fusion remote/local du détail classe).
+  ClassroomDto copyWith({
+    int? id,
+    String? name,
+    int? establishmentId,
+    int? maxStudents,
+    bool? isActive,
+    int? headTeacherId,
+    String? headTeacherName,
+    String? levelName,
+    String? cycleName,
+    int? cycleId,
+    int? currentStudentsCount,
+    String? seriesName,
+  }) =>
+      ClassroomDto(
+        id: id ?? this.id,
+        name: name ?? this.name,
+        establishmentId: establishmentId ?? this.establishmentId,
+        maxStudents: maxStudents ?? this.maxStudents,
+        isActive: isActive ?? this.isActive,
+        headTeacherId: headTeacherId ?? this.headTeacherId,
+        headTeacherName: headTeacherName ?? this.headTeacherName,
+        levelName: levelName ?? this.levelName,
+        cycleName: cycleName ?? this.cycleName,
+        cycleId: cycleId ?? this.cycleId,
+        currentStudentsCount: currentStudentsCount ?? this.currentStudentsCount,
+        seriesName: seriesName ?? this.seriesName,
+      );
 
   /// Alias de commodité : capacité = max_students.
   int get capacity => maxStudents ?? 0;
@@ -47,20 +102,31 @@ class ClassroomDto {
   double get occupancyRate =>
       capacity == 0 ? 0 : (studentCount / capacity).clamp(0, 1);
 
-  /// Titulaire de classe.
+  /// Titulaire de classe (jamais null — chaîne vide si inconnu).
   String get teacherName => headTeacherName ?? '';
 
+  /// Libellé synthétique niveau · cycle · série.
+  String get levelLabel => [
+        levelName,
+        cycleName,
+        seriesName,
+      ].whereType<String>().where((s) => s.isNotEmpty).join(' · ');
+
   factory ClassroomDto.fromJson(Map<String, dynamic> j) => ClassroomDto(
-        id: (j['id'] as num).toInt(),
+        // [Fix-TEACHER-CLASSES-403] ids tolérants (num ou chaîne numérique —
+        // certaines sérialisations serveur renvoient des ids en string).
+        id: _asId(j['id']),
         name: j['name'] as String? ?? '',
-        establishmentId: (j['establishment_id'] as num?)?.toInt(),
-        maxStudents: (j['max_students'] as num?)?.toInt(),
+        establishmentId: _asIdNullable(j['establishment_id']),
+        maxStudents: _asIdNullable(j['max_students']),
         isActive: (j['is_active'] as bool?) ?? true,
-        headTeacherId: (j['head_teacher_id'] as num?)?.toInt(),
+        headTeacherId: _asIdNullable(j['head_teacher_id']),
         headTeacherName: j['head_teacher_name'] as String?,
-        levelName: j['level_name'] as String?,
-        cycleName: j['cycle_name'] as String?,
-        currentStudentsCount: (j['current_students_count'] as num?)?.toInt(),
+        levelName: _safeString(j['level_name']),
+        cycleName: _safeString(j['cycle_name']),
+        cycleId: _asIdNullable(j['cycle_id']),
+        currentStudentsCount:
+            _asIdNullable(j['current_students_count']),
         seriesName: j['series_name'] as String?,
       );
 
@@ -74,6 +140,7 @@ class ClassroomDto {
         'head_teacher_name': headTeacherName,
         'level_name': levelName,
         'cycle_name': cycleName,
+        'cycle_id': cycleId,
         'current_students_count': currentStudentsCount,
         'series_name': seriesName,
       };
@@ -261,14 +328,20 @@ class SchoolYearDto {
 /// Période (PeriodResponse côté serveur).
 ///
 /// ⚠️ `start_date`/`end_date` sont des **strings** (pas datetime) côté serveur.
-/// Champs serveur : {id, name, start_date: str, end_date: str, is_active}.
+/// Champs serveur : {id, name, start_date: str, end_date: str, is_active,
+/// cycle_id, cycle_name [Fix-PERIOD-CYCLE], school_year_id}.
+///
+/// Les périodes sont rattachées à un **cycle** (ex. collège vs lycée) : le
+/// mobile filtre `period.cycle_id == classroom.cycle_id` pour n'afficher que
+/// les périodes du cycle de la classe sélectionnée.
 class PeriodDto {
   final int id;
   final String name;
   final String? startDate;
   final String? endDate;
   final bool isActive;
-  // Champs de compatibilité (non dans la réponse serveur de base)
+  final int? cycleId;
+  final String? cycleName;
   final int? schoolYearId;
   final double weight;
 
@@ -278,16 +351,33 @@ class PeriodDto {
     this.startDate,
     this.endDate,
     this.isActive = false,
+    this.cycleId,
+    this.cycleName,
     this.schoolYearId,
     this.weight = 1.0,
   });
 
+  /// La période est-elle active aujourd'hui (start ≤ today ≤ end) ?
+  /// Miroir de `GradeService.get_active_period` du desktop.
+  bool get isCurrent {
+    final s = DateTime.tryParse(startDate ?? '');
+    final e = DateTime.tryParse(endDate ?? '');
+    if (s == null || e == null) return false;
+    final today = DateTime.now();
+    final start = DateTime(s.year, s.month, s.day);
+    final end = DateTime(e.year, e.month, e.day);
+    final now = DateTime(today.year, today.month, today.day);
+    return !now.isBefore(start) && !now.isAfter(end);
+  }
+
   factory PeriodDto.fromJson(Map<String, dynamic> j) => PeriodDto(
         id: (j['id'] as num).toInt(),
-        name: j['name'] as String? ?? '',
-        startDate: j['start_date'] as String?,
-        endDate: j['end_date'] as String?,
+        name: _safeString(j['name']) ?? '',
+        startDate: _safeString(j['start_date']),
+        endDate: _safeString(j['end_date']),
         isActive: (j['is_active'] as bool?) ?? false,
+        cycleId: (j['cycle_id'] as num?)?.toInt(),
+        cycleName: _safeString(j['cycle_name']),
         schoolYearId: (j['school_year_id'] as num?)?.toInt(),
         weight: (j['weight'] as num?)?.toDouble() ?? 1.0,
       );
@@ -298,6 +388,8 @@ class PeriodDto {
         'start_date': startDate,
         'end_date': endDate,
         'is_active': isActive,
+        'cycle_id': cycleId,
+        'cycle_name': cycleName,
         'school_year_id': schoolYearId,
         'weight': weight,
       };

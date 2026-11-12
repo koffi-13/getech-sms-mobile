@@ -1,17 +1,45 @@
-/// Page « Présence » : sélection classe + date + cours (issu de l'emploi du
-/// temps du jour), démarrage d'une session de cours, saisie des absences
-/// (case Absent + motif + justifié) et cahier de texte (contenu + devoirs).
+/// Page « Présence » : cours déterminé par l'emploi du temps de
+/// l'UTILISATEUR et par « l'heure qui sonne », démarrage de session(s),
+/// saisie des absences (case Absent + motif) et cahier de texte.
 ///
-/// Le cours est dérivé de l'emploi du temps hebdomadaire de la classe pour
-/// le jour sélectionné (filtrage par `dayOfWeek`).
+/// [Présence-V10] Trois évolutions majeures (retour utilisateur : « les
+/// cours qui n'appartiennent pas à l'utilisateur s'affichent ») :
+/// - **Cours de l'utilisateur uniquement** : l'enseignant voit SES cours
+///   (`GET /schedule/my` via [TeacherScope]) — plus les cours des autres
+///   enseignants de la classe.
+/// - **L'heure qui sonne** : le créneau affiché est celui dont l'intervalle
+///   CONTIENT l'heure courante (sinon le prochain créneau du jour). La
+///   classe où l'enseignant doit se trouver et le cours qui doit tenir en
+///   découlent automatiquement.
+/// - **Chevauchements = classes jumelées** : deux cours qui se
+///   chevauchent forment UN groupe (l'enseignant a jumelé les classes) ;
+///   une session est ouverte par classe et l'appel présente la liste
+///   FUSIONNÉE des élèves (badges de classe).
+/// - **Sélection verrouillée** : pour l'enseignant, classe/date/semaine/
+///   cours ne sont plus choisissables — ils suivent l'emploi du temps et
+///   l'heure courante (horloge 30 s). L'administration conserve le flux
+///   manuel historique.
+///
+/// [Présence-V9] conservé :
+/// - **Deux temps de saisie** : l'APPEL se fait au DÉBUT du cours (liste
+///   des élèves d'emblée visible) ; le CAHIER DE TEXTE se remplit à la
+///   FIN du cours (section repliée tant que le créneau n'est pas terminé,
+///   mais ouvrable à tout moment — rattrapage).
+/// - **Justification réservée à l'administration** : l'enseignant MARQUE
+///   l'absence (absent + motif) ; le statut « Justifié » n'est modifiable
+///   que par un admin (le serveur le garantit aussi — [Fix-JUSTIFY-ADMIN]).
 library;
 
+import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../core/auth/auth_state.dart';
+import '../../core/auth/teacher_scope.dart';
 import '../../core/config/constants.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/utils/formatters.dart';
@@ -22,6 +50,7 @@ import '../../shared/models/classroom_dto.dart';
 import '../../shared/models/student_dto.dart';
 import '../../shared/widgets/widgets.dart';
 import 'attendance_controller.dart';
+import 'course_selection.dart' as smart;
 
 class AttendancePage extends ConsumerStatefulWidget {
   const AttendancePage({super.key});
@@ -31,12 +60,40 @@ class AttendancePage extends ConsumerStatefulWidget {
 }
 
 class _AttendancePageState extends ConsumerState<AttendancePage> {
+  // ── Sélection (flux manuel — administration) ──────────────────────────
   int? _classroomId;
   WeekType _weekType = WeekType.a;
   DateTime _date = DateTime.now();
 
-  _MergedCourse? _selectedCourse;
-  CourseSessionDto? _activeSession;
+  WeeklyScheduleDto? _selectedCourse;
+
+  /// [Présence-V10] Session(s) active(s) : UNE par classe du groupe de
+  /// cours (classes jumelées → plusieurs sessions ouvertes d'un coup).
+  List<CourseSessionDto> _activeSessions = const [];
+  smart.CourseGroup? _activeGroup;
+
+  /// [Présence-V10] élève → session de SA classe (sauvegarde des absences
+  /// vers la bonne session quand les classes sont jumelées).
+  Map<int, int> _sessionByStudent = const {};
+
+  /// [Présence-V10] Cahier de texte partagé : id de fiche existante PAR
+  /// session (les classes jumelées partagent le même contenu).
+  Map<int, int> _lessonRecordIds = {};
+
+  /// [Présence-V9] L'utilisateur a-t-il choisi MANUELLEMENT la semaine A/B ?
+  /// Sinon la semaine calculée (`currentWeekTypeProvider`) fait foi.
+  bool _userPickedWeek = false;
+
+  /// [Présence-V9] L'utilisateur a-t-il replié/déplié manuellement le
+  /// cahier de texte ? Sinon : replié avant la fin du cours, déplié après.
+  bool _cahierUserToggled = false;
+  bool _cahierExpanded = false;
+
+  /// [Présence-V9/V10] Horloge : rafraîchit l'UI toutes les 30 s pour que
+  /// le créneau « heure qui sonne » suive l'heure courante et que la
+  /// section cahier de texte se DÉPLIE automatiquement quand l'heure de
+  /// fin du cours est atteinte.
+  Timer? _clockTimer;
 
   /// Brouillons d'absences indexés par `studentId`. Seuls les élèves absents
   /// sont présents dans cette map (présent = absent de la map).
@@ -44,173 +101,560 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
 
   final TextEditingController _lessonContentCtrl = TextEditingController();
   final TextEditingController _lessonHomeworkCtrl = TextEditingController();
-  int? _lessonRecordId;
   bool _lessonLoaded = false;
 
   bool _saving = false;
 
-  /// [Fix-DRAFT-PERSISTENCE] Clé unique de la feuille en cours.
-  static const _kPendingSession = 'attendance_pending_session';
+  /// Session « principale » (première du groupe) — rétrocompatibilité
+  /// d'affichage (badge d'état, horaires).
+  CourseSessionDto? get _activeSession =>
+      _activeSessions.isEmpty ? null : _activeSessions.first;
 
   @override
   void initState() {
     super.initState();
-    // [Fix-DRAFT-PERSISTENCE] Restaurer la saisie en cours (session +
-    // brouillons + cahier de texte) au retour sur la page : sortir de
-    // l'interface ne doit plus perdre une feuille non enregistrée
-    // (retour terrain 2026-11-12).
+    _clockTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
+    // [Fix-DRAFT-PERSISTENCE] Restaurer la saisie en cours (sessions,
+    // brouillons, cahier de texte) au retour sur la page : sortir de
+    // l'interface ne doit plus perdre une feuille de présence non
+    // enregistrée (retour terrain 2026-11-12).
     Future(_restorePendingSession);
-    // Le cahier de texte se persistera à chaque frappe (avec les
-    // brouillons, aux actions de session).
+    // Le cahier de texte se persiste à chaque frappe.
     _lessonContentCtrl.addListener(_persistPendingSession);
     _lessonHomeworkCtrl.addListener(_persistPendingSession);
   }
 
   @override
   void dispose() {
+    _clockTimer?.cancel();
     _lessonContentCtrl.dispose();
     _lessonHomeworkCtrl.dispose();
     super.dispose();
   }
 
+  /// [Présence-V9] Semaine effective : choix manuel > semaine calculée > A.
+  WeekType _effectiveWeekType(WeekType? autoWeek) =>
+      _userPickedWeek ? _weekType : (autoWeek ?? _weekType);
+
+  bool get _hasActiveSession => _activeSessions.isNotEmpty;
+
   @override
   Widget build(BuildContext context) {
     final conn = ref.watch(connectionProvider);
+    final auth = ref.watch(authProvider);
     final classrooms = ref.watch(classroomsForScheduleProvider);
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final scope = scopeAsync.valueOrNull;
+    final autoWeek = ref.watch(currentWeekTypeProvider).valueOrNull;
+    final restricted =
+        scope != null && scope.isTeacher && !scope.isAdminOrHeadmaster;
+    final effectiveWeek = _effectiveWeekType(autoWeek);
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Présence'),
         actions: [
+          // [Fix-ATTENDANCE-REVIEW] V22 — consultation des présences pour
+          // l'administration (lecture seule, servie par le cache Drift →
+          // accessible même hors-ligne ; la saisie, elle, reste en ligne).
+          if (auth.isAdminOrHeadmaster || auth.isSuperuser)
+            IconButton(
+              tooltip: 'Consulter les présences',
+              icon: const Icon(Icons.fact_check_outlined),
+              onPressed: () => context.push('/attendance/review'),
+            ),
+          // [Fix-PRESENCE-ONLINE] La saisie n'est proposée QUE lorsque la
+          // connexion au serveur est établie (y compris pendant la
+          // vérification initiale : état indéterminé = pas de saisie).
           if (!conn.canReachServer)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: StatusBadge.offline(),
+              child: conn.isChecking
+                  ? const StatusBadge(
+                      label: 'Connexion…',
+                      color: Colors.orange,
+                      icon: Icons.wifi_find,
+                    )
+                  : StatusBadge.offline(),
             ),
         ],
       ),
-      body: !conn.canReachServer
-          ? const EmptyState(
-              title: 'Hors-ligne',
-              message: 'La saisie des présences nécessite une connexion au serveur.',
-              icon: Icons.cloud_off,
-            )
-          : ListView(
+      // [Fix-PRESENCE-ONLINE] Garde stricte : contrairement aux autres
+      // modules (local-first), la présence n'est JAMAIS saisie hors-ligne —
+      // ni en file d'attente ni en cache. L'état « checking » (heartbeat en
+      // cours) est traité comme non-connecté : on attend le verdict.
+      body: conn.canReachServer
+          ? ListView(
               padding: const EdgeInsets.all(16),
               children: [
-                // --- Sélecteurs ---
+                // --- Sélection ---
                 SectionHeader(
                   title: 'Sélection',
                   icon: Icons.filter_list,
-                  subtitle: _activeSession == null
-                      ? 'Choisissez une classe, une date puis un cours.'
-                      : 'Session active — modifications limitées.',
+                  subtitle: _hasActiveSession
+                      ? 'Session active — modifications limitées.'
+                      : restricted
+                          // [Présence-V10] Sélection verrouillée : tout est
+                          // déterminé par l'emploi du temps + l'heure.
+                          ? 'Cours déterminé par votre emploi du temps et '
+                              'l\'heure courante.'
+                          : 'Choisissez une classe, une date puis un cours.',
                 ),
                 const SizedBox(height: 8),
-                classrooms.when(
-                  data: (list) {
-                    if (list.isEmpty) {
-                      return const _DisabledField(
-                          label: 'Classe', hint: 'Aucune classe');
-                    }
-                    if (_classroomId == null ||
-                        !list.any((c) => c.id == _classroomId)) {
-                      _classroomId = list.first.id;
-                    }
-                    return DropdownButtonFormField<ClassroomDto>(
-                      value: list.firstWhere((c) => c.id == _classroomId),
-                      decoration: const InputDecoration(
-                        labelText: 'Classe',
-                        border: OutlineInputBorder(),
-                        isDense: true,
-                      ),
-                      items: list
-                          .map((c) => DropdownMenuItem(
-                                value: c,
-                                child: Text(c.name),
-                              ))
-                          .toList(),
-                      onChanged: _activeSession == null
-                          ? (c) => setState(() {
-                                _classroomId = c?.id;
-                                _selectedCourse = null;
-                              })
-                          : null,
-                    );
-                  },
-                  loading: () => const LinearProgressIndicator(minHeight: 56),
-                  error: (e, _) => _DisabledField(
-                      label: 'Classe', hint: 'Erreur : $e'),
-                ),
-                const SizedBox(height: 12),
+
+                // [Présence-V10] ENSEIGNANT : panneau automatique verrouillé.
+                // ADMINISTRATION : sélecteurs interactifs (flux historique).
+                if (restricted)
+                  _teacherSelectionPanel(context, scope, effectiveWeek)
+                else
+                  _adminSelectors(context, classrooms, effectiveWeek),
+                const SizedBox(height: 24),
+
+                if (!_hasActiveSession) ...[
+                  if (restricted)
+                    _teacherCoursePanel(context, scope, effectiveWeek)
+                  else
+                    _courseSelector(context, effectiveWeek),
+                ] else ...[
+                  _activeSessionView(context, effectiveWeek),
+                ],
+              ],
+            )
+          : _offlinePlaceholder(conn),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // [Présence-V10] PANneau ENSEIGNANT : champs verrouillés (heure qui sonne)
+  // ---------------------------------------------------------------------------
+
+  /// Ligne d'information verrouillée (classe / date / semaine / cours) :
+  /// la sélection manuelle est DÉSACTIVÉE — ces valeurs suivent l'emploi
+  /// du temps de l'enseignant et l'heure courante.
+  Widget _teacherSelectionPanel(
+    BuildContext context,
+    TeacherScope scope,
+    WeekType effectiveWeek,
+  ) {
+    final now = DateTime.now();
+    final groups = smart.groupOverlappingCourses(
+      scope.coursesForDate(now, currentWeek: effectiveWeek),
+    );
+    final current = smart.autoCourseGroup(groups, now: now);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: _LockedField(
+                label: 'Date',
+                value: '${DateFormatter.date(now)} (${_weekdayLabel(now)})',
+                icon: Icons.calendar_today,
+              ),
+            ),
+            const SizedBox(width: 12),
+            SizedBox(
+              width: 110,
+              child: _LockedField(
+                label: 'Semaine',
+                value: effectiveWeek == WeekType.a ? 'A' : 'B',
+                icon: Icons.view_week,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        _LockedField(
+          label: 'Classe',
+          value: current?.classroomLabel ?? '—',
+          icon: Icons.school_outlined,
+        ),
+        const SizedBox(height: 12),
+        _LockedField(
+          label: 'Cours (heure courante)',
+          value: current == null
+              ? 'Aucun cours aujourd\'hui'
+              : '${_fmtMinutes(current.startMinutes)} – '
+                  '${_fmtMinutes(current.endMinutes)} • ${current.subjectLabel}'
+                  '${current.isMerged ? ' (classes jumelées)' : ''}',
+          icon: Icons.schedule,
+        ),
+      ],
+    );
+  }
+
+  /// Panneau « heure qui sonne » de l'enseignant : carte du créneau
+  /// courant + déroulé de la journée (lecture seule) + démarrage.
+  Widget _teacherCoursePanel(
+    BuildContext context,
+    TeacherScope scope,
+    WeekType effectiveWeek,
+  ) {
+    final now = DateTime.now();
+
+    // Dimanche : pas de cours.
+    if (now.weekday == DateTime.sunday) {
+      return const EmptyState(
+        title: 'Pas de cours le dimanche',
+        message: 'La reprise des cours est prévue lundi.',
+        icon: Icons.weekend,
+      );
+    }
+
+    final groups = smart.groupOverlappingCourses(
+      scope.coursesForDate(now, currentWeek: effectiveWeek),
+    );
+    if (groups.isEmpty) {
+      return EmptyState(
+        title: 'Aucun cours aujourd\'hui',
+        message: 'Votre emploi du temps ne comporte aucun cours aujourd\'hui '
+            '(semaine ${effectiveWeek == WeekType.a ? 'A' : 'B'}).',
+        icon: Icons.event_busy,
+      );
+    }
+    final current = smart.autoCourseGroup(groups, now: now);
+    if (current == null) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // ── Carte du créneau « heure qui sonne » ──
+        Card(
+          margin: const EdgeInsets.only(bottom: 12),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
                 Row(
                   children: [
-                    Expanded(
-                      child: InkWell(
-                        onTap: _activeSession == null
-                            ? () async {
-                                final picked = await showDatePicker(
-                                  context: context,
-                                  initialDate: _date,
-                                  firstDate:
-                                      DateTime(DateTime.now().year - 1, 1, 1),
-                                  lastDate:
-                                      DateTime(DateTime.now().year + 1, 12, 31),
-                                );
-                                if (picked != null) {
-                                  setState(() {
-                                    _date = picked;
-                                    _selectedCourse = null;
-                                  });
-                                }
-                              }
-                            : null,
-                        child: InputDecorator(
-                          decoration: const InputDecoration(
-                            labelText: 'Date',
-                            border: OutlineInputBorder(),
-                            isDense: true,
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.calendar_today, size: 16),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  '${DateFormatter.date(_date)} (${_weekdayLabel(_date)})',
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
+                    Icon(
+                      Icons.schedule,
+                      color: Theme.of(context).colorScheme.primary,
                     ),
-                    const SizedBox(width: 12),
-                    SegmentedButton<WeekType>(
-                      segments: const [
-                        ButtonSegment(value: WeekType.a, label: Text('A')),
-                        ButtonSegment(value: WeekType.b, label: Text('B')),
-                      ],
-                      selected: {_weekType},
-                      onSelectionChanged: _activeSession == null
-                          ? (s) => setState(() {
-                                _weekType = s.first;
-                                _selectedCourse = null;
-                              })
-                          : null,
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _groupStateLabel(current, now),
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.bold,
+                            ),
+                      ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 24),
-
-                if (_activeSession == null) ...[
-                  _courseSelector(context),
-                ] else ...[
-                  _activeSessionView(context),
+                const SizedBox(height: 8),
+                Text(
+                  '${_fmtMinutes(current.startMinutes)} – '
+                  '${_fmtMinutes(current.endMinutes)} • '
+                  '${current.subjectLabel}',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        current.classroomLabel +
+                            (current.isMerged ? '  (classes jumelées)' : ''),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+                if (current.isMerged) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Un seul appel pour l\'ensemble des classes jumelées : '
+                    'les élèves des deux classes sont listés ensemble.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                  ),
                 ],
               ],
             ),
+          ),
+        ),
+
+        // ── Déroulé de la journée (lecture seule) ──
+        ...groups.map((g) {
+          final isCurrent = identical(g, current);
+          final nowMin = now.hour * 60 + now.minute;
+          final isPast = nowMin >= g.endMinutes;
+          return Card(
+            margin: const EdgeInsets.only(bottom: 6),
+            color: isCurrent
+                ? Theme.of(context).colorScheme.primaryContainer
+                : null,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: Row(
+                children: [
+                  Icon(
+                    isCurrent
+                        ? Icons.play_circle_fill
+                        : (isPast
+                            ? Icons.check_circle_outline
+                            : Icons.circle_outlined),
+                    size: 18,
+                    color: isCurrent
+                        ? Theme.of(context).colorScheme.primary
+                        : (isPast
+                            ? Colors.green
+                            : Theme.of(context).colorScheme.onSurfaceVariant),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '${_fmtMinutes(g.startMinutes)} – '
+                      '${_fmtMinutes(g.endMinutes)} • ${g.subjectLabel} • '
+                      '${g.classroomLabel}'
+                      '${g.isMerged ? ' (jumelées)' : ''}',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            fontWeight: isCurrent ? FontWeight.bold : null,
+                          ),
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 2,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }),
+
+        const SizedBox(height: 16),
+        FilledButton.icon(
+          onPressed: _saving ? null : () => _startSessionGroup(current),
+          icon: _saving
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.play_arrow),
+          label: Text(
+            current.isMerged
+                ? 'Démarrer les sessions (classes jumelées)'
+                : 'Démarrer la session',
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _groupStateLabel(smart.CourseGroup g, DateTime now) {
+    final nowMin = now.hour * 60 + now.minute;
+    if (nowMin >= g.startMinutes && nowMin < g.endMinutes) {
+      return 'Cours en cours';
+    }
+    if (nowMin < g.startMinutes) return 'Prochain cours';
+    return 'Dernier cours de la journée';
+  }
+
+  static String _fmtMinutes(int m) =>
+      '${(m ~/ 60).toString().padLeft(2, '0')}:${(m % 60).toString().padLeft(2, '0')}';
+
+  // ---------------------------------------------------------------------------
+  // Sélecteurs ADMINISTRATION (flux historique interactif)
+  // ---------------------------------------------------------------------------
+
+  Widget _adminSelectors(
+    BuildContext context,
+    AsyncValue<List<ClassroomDto>> classrooms,
+    WeekType effectiveWeek,
+  ) {
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final scope = scopeAsync.valueOrNull;
+    final restricted =
+        scope != null && scope.isTeacher && !scope.isAdminOrHeadmaster;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        classrooms.when(
+          data: (list) {
+            var classList = list;
+            if (restricted) {
+              final myIds = scope.myClassroomIds;
+              final byId = <int, ClassroomDto>{
+                for (final c in list)
+                  if (myIds.contains(c.id)) c.id: c,
+              };
+              for (final c in scope.myClassrooms) {
+                byId.putIfAbsent(c.id, () => c);
+              }
+              classList = byId.values.toList()
+                ..sort((a, b) => a.name.compareTo(b.name));
+            }
+            if (classList.isEmpty) {
+              return const _DisabledField(
+                label: 'Classe',
+                hint: 'Aucune classe',
+              );
+            }
+            // [Présence-V9] Présélection intelligente : classe du
+            // créneau EN COURS ou À VENIR aujourd'hui (emploi du
+            // temps enseignant) — sinon 1re classe de la liste.
+            if (_classroomId == null ||
+                !classList.any((c) => c.id == _classroomId)) {
+              _classroomId = smart.defaultClassroomId(
+                    classList,
+                    scope,
+                    DateTime.now(),
+                    effectiveWeek: effectiveWeek,
+                  ) ??
+                  classList.first.id;
+            }
+            return DropdownButtonFormField<ClassroomDto>(
+              initialValue: classList.firstWhere(
+                (c) => c.id == _classroomId,
+                orElse: () => classList.first,
+              ),
+              // [Fix-OVERFLOW] isExpanded : contraint la valeur
+              // sélectionnée à la largeur du champ.
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: 'Classe',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              items: classList
+                  .map(
+                    (c) => DropdownMenuItem(
+                      value: c,
+                      child: Text(
+                        c.name,
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                      ),
+                    ),
+                  )
+                  .toList(),
+              onChanged: _hasActiveSession
+                  ? null
+                  : (c) => setState(() {
+                        _classroomId = c?.id;
+                        _selectedCourse = null;
+                      }),
+            );
+          },
+          loading: () => const LinearProgressIndicator(minHeight: 56),
+          error: (e, _) => _DisabledField(label: 'Classe', hint: 'Erreur : $e'),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: InkWell(
+                onTap: _hasActiveSession
+                    ? null
+                    : () async {
+                        final picked = await showDatePicker(
+                          context: context,
+                          initialDate: _date,
+                          firstDate: DateTime(DateTime.now().year - 1, 1, 1),
+                          lastDate: DateTime(DateTime.now().year + 1, 12, 31),
+                        );
+                        if (picked != null) {
+                          setState(() {
+                            _date = picked;
+                            _selectedCourse = null;
+                          });
+                        }
+                      },
+                child: InputDecorator(
+                  decoration: const InputDecoration(
+                    labelText: 'Date',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.calendar_today, size: 16),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '${DateFormatter.date(_date)} (${_weekdayLabel(_date)})',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            SegmentedButton<WeekType>(
+              segments: const [
+                ButtonSegment(value: WeekType.a, label: Text('A')),
+                ButtonSegment(value: WeekType.b, label: Text('B')),
+              ],
+              selected: {effectiveWeek},
+              onSelectionChanged: _hasActiveSession
+                  ? null
+                  : (s) => setState(() {
+                        // [Présence-V9] Choix MANUEL : il prend le
+                        // dessus sur la semaine calculée.
+                        _userPickedWeek = true;
+                        _weekType = s.first;
+                        _selectedCourse = null;
+                      }),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// [Fix-PRESENCE-ONLINE] Vue affichée à la place du formulaire tant que la
+  /// connexion au serveur n'est pas établie. Trois états :
+  /// - non appairé : aucun serveur configuré → proposer l'appairage ;
+  /// - vérification en cours (heartbeat) : attendre le verdict ;
+  /// - hors-ligne / mode hors-ligne forcé : inviter à se reconnecter.
+  Widget _offlinePlaceholder(ConnectionState conn) {
+    if (!conn.isPaired) {
+      return EmptyState(
+        title: 'Aucun serveur',
+        message: 'La présence ne peut être saisie qu\'en connexion au serveur. '
+            'Appairez d\'abord un serveur GeTech-SMS.',
+        icon: Icons.dns_outlined,
+        actionLabel: 'Appairer un serveur',
+        onAction: () => context.push('/connections'),
+      );
+    }
+    if (conn.isChecking) {
+      return EmptyState(
+        title: 'Connexion au serveur…',
+        message: 'Vérification de la liaison en cours. La saisie des présences '
+            'sera proposée dès que la connexion sera établie.',
+        icon: Icons.wifi_find,
+        actionLabel: 'Revérifier',
+        onAction: () => ref.read(connectionProvider.notifier).checkStatus(),
+      );
+    }
+    return EmptyState(
+      title: 'Hors-ligne',
+      message: conn.forceOffline
+          ? 'Le mode hors-ligne est activé. La présence ne peut être saisie '
+              'qu\'en connexion au serveur — désactivez le mode hors-ligne '
+              'pour saisir les absences et le cahier de texte.'
+          : 'Serveur injoignable. La présence ne peut être saisie qu\'en '
+              'connexion au serveur. Vérifiez que le serveur GeTech-SMS est '
+              'démarré et joignable, puis réessayez.',
+      icon: Icons.cloud_off,
+      actionLabel: 'Réessayer',
+      onAction: () => ref.read(connectionProvider.notifier).checkStatus(),
     );
   }
 
@@ -227,9 +671,9 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
     return names[d.weekday] ?? '—';
   }
 
-  /// Sélecteur de cours (dérivé de l'emploi du temps du jour) + bouton
-  /// « Démarrer la session ».
-  Widget _courseSelector(BuildContext context) {
+  /// Sélecteur de cours (flux ADMIN) : dérivé de l'emploi du temps du jour
+  /// de la classe sélectionnée + bouton « Démarrer la session ».
+  Widget _courseSelector(BuildContext context, WeekType effectiveWeek) {
     if (_classroomId == null) {
       return const EmptyState(
         title: 'Sélectionnez une classe',
@@ -245,10 +689,14 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
       );
     }
     return ref
-        .watch(weeklyScheduleProvider(ScheduleQuery(
-          classroomId: _classroomId!,
-          weekType: _weekType,
-        )))
+        .watch(
+          weeklyScheduleProvider(
+            ScheduleQuery(
+              classroomId: _classroomId!,
+              weekType: effectiveWeek,
+            ),
+          ),
+        )
         .when(
           data: (list) {
             final dayCourses = list
@@ -259,49 +707,68 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
               return EmptyState(
                 title: 'Aucun cours ce jour',
                 message:
-                    'Aucun cours programmé le ${_weekdayLabel(_date)} (semaine ${_weekType == WeekType.a ? 'A' : 'B'}).',
+                    'Aucun cours programmé le ${_weekdayLabel(_date)} (semaine ${effectiveWeek == WeekType.a ? 'A' : 'B'}).',
                 icon: Icons.event_busy,
               );
             }
-            // [Fix-CONSECUTIVE-SLOTS] Un même cours programmé sur des
-            // créneaux CONSÉCUTIFS (ex. 08:00-09:00 + 09:00-10:00) est
-            // fusionné en une seule saisie « 08:00 – 10:00 » — avant, il
-            // fallait saisir la présence DEUX fois (retour terrain
-            // 2026-11-12).
-            final slots = _mergeConsecutiveSlots(dayCourses);
-            // Auto-sélection du 1er cours si vide ou invalide.
+            // [Présence-V9] Auto-sélection intelligente : créneau EN COURS
+            // ou À VENIR selon l'heure courante (aujourd'hui seulement) —
+            // sinon 1er cours de la journée.
             if (_selectedCourse == null ||
-                !slots.any((c) => c.id == _selectedCourse!.id)) {
-              _selectedCourse = slots.first;
+                !dayCourses.any((c) => c.id == _selectedCourse!.id)) {
+              _selectedCourse = smart.autoCourseFor(
+                dayCourses,
+                date: _date,
+                now: DateTime.now(),
+              );
             }
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                DropdownButtonFormField<_MergedCourse>(
-                  value: _selectedCourse,
+                DropdownButtonFormField<WeeklyScheduleDto>(
+                  initialValue: _selectedCourse,
+                  // [Fix-COURSE-OVERFLOW-152] isExpanded : la valeur
+                  // sélectionnée est contrainte à la largeur du champ.
+                  isExpanded: true,
                   decoration: const InputDecoration(
                     labelText: 'Cours',
                     border: OutlineInputBorder(),
                     isDense: true,
                   ),
-                  items: slots
-                      .map((c) => DropdownMenuItem(
-                            value: c,
-                            child: Text(
-                              '${c.startTime} – ${c.endTime} · '
-                              '${c.subjectName ?? 'Cours'}'
-                              '${c.teacherName != null ? ' (${c.teacherName})' : ''}',
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ))
+                  items: dayCourses
+                      .map(
+                        (c) => DropdownMenuItem(
+                          value: c,
+                          child: Text(
+                            '${c.startTime} – ${c.subjectName ?? 'Cours'}'
+                            '${c.teacherName != null ? ' (${c.teacherName})' : ''}',
+                            overflow: TextOverflow.ellipsis,
+                            maxLines: 1,
+                          ),
+                        ),
+                      )
                       .toList(),
                   onChanged: (c) => setState(() => _selectedCourse = c),
                 ),
                 const SizedBox(height: 16),
                 if (_selectedCourse != null)
                   FilledButton.icon(
-                    onPressed: _startSession,
-                    icon: const Icon(Icons.play_arrow),
+                    onPressed: _saving
+                        ? null
+                        : () {
+                            // admin : groupe simple d'un cours.
+                            final course = _selectedCourse;
+                            if (course != null) {
+                              _startSessionGroup(smart.CourseGroup([course]));
+                            }
+                          },
+                    icon: _saving
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.play_arrow),
                     label: const Text('Démarrer la session'),
                   ),
               ],
@@ -311,32 +778,78 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
               const AppLoading(label: 'Chargement de l\'emploi du temps…'),
           error: (e, _) => AppErrorWidget(
             message: e.toString(),
-            onRetry: () => ref.invalidate(weeklyScheduleProvider(ScheduleQuery(
-              classroomId: _classroomId!,
-              weekType: _weekType,
-            ))),
+            onRetry: () => ref.invalidate(
+              weeklyScheduleProvider(
+                ScheduleQuery(
+                  classroomId: _classroomId!,
+                  weekType: effectiveWeek,
+                ),
+              ),
+            ),
           ),
         );
   }
 
-  Future<void> _startSession() async {
-    if (_classroomId == null || _selectedCourse == null) return;
-    final course = _selectedCourse!;
+  // ---------------------------------------------------------------------------
+  // Démarrage de session(s) — [Présence-V10] groupe (classes jumelées)
+  // ---------------------------------------------------------------------------
+
+  /// Démarre UNE session par classe du groupe (chevauchement = classes
+  /// jumelées : l'appel couvre l'ensemble des élèves des deux classes).
+  Future<void> _startSessionGroup(smart.CourseGroup group) async {
     setState(() => _saving = true);
     try {
-      final session = await ref.read(attendanceControllerProvider).startSession(
-            classroomId: _classroomId!,
+      final controller = ref.read(attendanceControllerProvider);
+      final sessions = <CourseSessionDto>[];
+      // [Fix-CONSECUTIVE-SLOTS] Le groupe peut désormais contenir le MÊME
+      // cours sur des créneaux consécutifs (ex. Maths 08:00-09:00 +
+      // 09:00-10:00) : une SEULE session par classe, couvrant tout le
+      // bloc — du début du premier créneau à la fin du dernier.
+      final courseByClassroom = <int, WeeklyScheduleDto>{};
+      String? groupStart;
+      String? groupEnd;
+      for (final course in group.courses) {
+        final cid = course.classroomId;
+        if (cid == null) continue;
+        courseByClassroom.putIfAbsent(cid, () => course);
+        if (groupStart == null || course.startTime.compareTo(groupStart) < 0) {
+          groupStart = course.startTime;
+        }
+        if (groupEnd == null || course.endTime.compareTo(groupEnd) > 0) {
+          groupEnd = course.endTime;
+        }
+      }
+      for (final entry in courseByClassroom.entries) {
+        final course = entry.value;
+        sessions.add(
+          await controller.startSession(
+            classroomId: entry.key,
             weeklyScheduleId: course.id,
             subjectId: course.subjectId,
             teacherId: course.teacherId,
+            // [Présence-V10] Flux enseignant : _date = aujourd'hui (jamais
+            // modifiable). Flux admin : date choisie (rattrapage possible).
             date: _date,
-            startTime: course.startTime,
-            endTime: course.endTime,
-          );
+            startTime: groupStart ?? course.startTime,
+            endTime: groupEnd ?? course.endTime,
+          ),
+        );
+      }
+      if (sessions.isEmpty) {
+        throw const ApiException(
+          'Impossible de démarrer : aucune classe associée à ce cours.',
+        );
+      }
       setState(() {
-        _activeSession = session;
+        _activeSessions = sessions;
+        _activeGroup = group;
         _absencesDrafts.clear();
         _lessonLoaded = false;
+        _lessonRecordIds = {};
+        // [Présence-V9] Le cahier de texte repart replié (fin de cours)
+        // sauf rattrapage : l'état d'expansion suit à nouveau l'heure.
+        _cahierUserToggled = false;
+        _cahierExpanded = false;
       });
       // [Fix-DRAFT-PERSISTENCE] La saisie démarre : on l'ancre tout de
       // suite pour qu'elle survive à une sortie de l'interface.
@@ -344,20 +857,70 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
     } on ApiException catch (e) {
       _showError(e.message);
     } catch (e) {
-      _showError('Erreur : $e');
+      _showError(AppErrorWidget.humanize(e.toString()));
     } finally {
       if (mounted) setState(() => _saving = false);
     }
   }
 
-  /// Vue active une fois la session démarrée : badge d'état, liste des
-  /// élèves avec case « Absent », cahier de texte, bouton « Enregistrer ».
-  Widget _activeSessionView(BuildContext context) {
+  /// [Présence-V9] Heure de fin du cours actif (null si inconnue) :
+  /// celle du créneau du groupe actif, sinon celle renvoyée par la session.
+  /// La date de référence est celle de la saisie ([_date] : aujourd'hui en
+  /// flux enseignant, date choisie en flux admin).
+  DateTime? _courseEndDateTime() {
+    final group = _activeGroup;
+    if (group != null && group.courses.isNotEmpty) {
+      final end = smart.parseHm(
+        group.courses
+            .map((c) => c.endTime)
+            .reduce((a, b) => a.compareTo(b) > 0 ? a : b),
+      );
+      if (end != null) {
+        return DateTime(
+          _date.year,
+          _date.month,
+          _date.day,
+          end.$1,
+          end.$2,
+        );
+      }
+    }
+    final end = _activeSession?.endTime;
+    final hm = smart.parseHm(end);
+    if (hm == null) return null;
+    return DateTime(_date.year, _date.month, _date.day, hm.$1, hm.$2);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Vue session active (appel + cahier de texte)
+  // ---------------------------------------------------------------------------
+
+  Widget _activeSessionView(BuildContext context, WeekType effectiveWeek) {
     final session = _activeSession!;
-    final studentsAsync =
-        ref.watch(classStudentsProvider(session.classroomId ?? _classroomId!));
-    final absencesAsync = ref.watch(sessionAbsencesProvider(session.id));
+    final group = _activeGroup;
+    final merged = group != null && group.isMerged;
+
+    // [Présence-V10] Élèves FUSIONNÉS des classes du groupe (jumelées).
+    final classroomIds = (group?.courses
+            .map((c) => c.classroomId)
+            .whereType<int>()
+            .toSet()
+            .toList() ??
+        [session.classroomId ?? _classroomId!])
+      ..sort();
+    final studentsAsync = ref
+        .watch(mergedClassStudentsProvider(MergedStudentsQuery(classroomIds)));
+
+    // Cahier de texte : la fiche de la session principale pré-remplit le
+    // formulaire (les classes jumelées partagent le même contenu).
     final lessonAsync = ref.watch(lessonRecordProvider(session.id));
+    // Absences déjà enregistrées : sessions du groupe.
+    final absencesAsync = _activeSessions.length == 1
+        ? ref.watch(sessionAbsencesProvider(session.id))
+        : null;
+
+    // [Présence-V9] Justification réservée à l'administration.
+    final canJustify = ref.watch(authProvider).isAdminOrHeadmaster;
 
     // Initialisation paresseuse du cahier de texte (une seule fois).
     if (lessonAsync is AsyncData<LessonRecordDto?> && !_lessonLoaded) {
@@ -368,17 +931,48 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
         if (record != null) {
           _lessonContentCtrl.text = record.content;
           _lessonHomeworkCtrl.text = record.homework ?? '';
-          _lessonRecordId = record.id;
+          _lessonRecordIds[session.id] = record.id ?? 0;
         }
       });
     }
 
-    // Initialisation paresseuse des brouillons d'absences (idempotent).
-    if (absencesAsync is AsyncData<List<StudentAbsenceDto>>) {
+    // Initialisation paresseuse des brouillons d'absences (idempotent) :
+    // pour un groupe jumelé, on fusionne les absences des sessions.
+    if (absencesAsync != null &&
+        absencesAsync is AsyncData<List<StudentAbsenceDto>>) {
       for (final a in absencesAsync.value) {
         _absencesDrafts.putIfAbsent(a.studentId, () => a);
       }
+    } else {
+      for (final s in _activeSessions) {
+        final async = ref.read(sessionAbsencesProvider(s.id)).valueOrNull;
+        if (async == null) continue;
+        for (final a in async) {
+          _absencesDrafts.putIfAbsent(a.studentId, () => a);
+        }
+      }
     }
+
+    // [Présence-V9] Deux temps de saisie :
+    // - appel : DÉBUT du cours (visible d'emblée) ;
+    // - cahier de texte : FIN du cours — replié tant que le créneau
+    //   dure, déplié automatiquement à/après l'heure de fin.
+    final courseEnd = _courseEndDateTime();
+    final now = DateTime.now();
+    final courseEnded = courseEnd != null && now.isAfter(courseEnd);
+    final lessonHasContent =
+        _lessonContentCtrl.text.trim().isNotEmpty && _lessonLoaded;
+    final cahierExpanded = _cahierUserToggled
+        ? _cahierExpanded
+        : (courseEnded || lessonHasContent);
+    final remaining = courseEnd?.difference(now);
+    final cahierSubtitle = courseEnd == null
+        ? 'À remplir en fin de cours (horaire de fin inconnu).'
+        : courseEnded
+            ? 'Le cours est terminé — pensez à compléter le cahier de texte.'
+            : 'À remplir en fin de cours (fin à ${_fmtHm(courseEnd)}'
+                '${remaining != null && remaining.inMinutes < 120 ? ', dans ${remaining.inMinutes} min' : ''})'
+                '. Ouvert à tout moment (rattrapage).';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -394,9 +988,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                   children: [
                     Expanded(
                       child: Text(
-                        _selectedCourse?.subjectName ??
-                            session.subjectName ??
-                            'Cours',
+                        group?.subjectLabel ?? session.subjectName ?? 'Cours',
                         style: Theme.of(context).textTheme.titleMedium,
                       ),
                     ),
@@ -406,14 +998,18 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                 const SizedBox(height: 4),
                 Text(
                   '${_weekdayLabel(_date)} ${DateFormatter.date(_date)} • '
-                  '${session.startTime ?? _selectedCourse?.startTime ?? ''}'
-                  '${(session.endTime ?? _selectedCourse?.endTime) != null ? ' – ${session.endTime ?? _selectedCourse?.endTime}' : ''}',
+                  '${group != null ? '${_fmtMinutes(group.startMinutes)} – ${_fmtMinutes(group.endMinutes)}' : (session.startTime ?? '')}',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
-                if (_selectedCourse?.teacherName != null) ...[
+                if (merged) ...[
                   const SizedBox(height: 2),
-                  Text('Ens. ${_selectedCourse!.teacherName}',
-                      style: Theme.of(context).textTheme.bodySmall),
+                  Text(
+                    '${group.classroomLabel} — classes jumelées (un appel '
+                    'pour l\'ensemble)',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                  ),
                 ],
               ],
             ),
@@ -421,10 +1017,10 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
         ),
         const SizedBox(height: 16),
 
-        // --- Liste des élèves ---
-        SectionHeader(
-          title: 'Élèves',
-          icon: Icons.group,
+        // --- 1er temps : APPEL (début de cours) — liste des élèves ---
+        const SectionHeader(
+          title: 'Appel — début de cours',
+          icon: Icons.fact_check_outlined,
           subtitle:
               'Cochez les absents. Par défaut, tous les élèves sont présents.',
         ),
@@ -438,6 +1034,30 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                 icon: Icons.group_off,
               );
             }
+            // [Présence-V10] Association élève → session de sa classe
+            // (sauvegarde des absences vers la bonne session).
+            final classByStudent = <int, String>{};
+            for (final course
+                in group?.courses ?? const <WeeklyScheduleDto>[]) {
+              final cid = course.classroomId;
+              if (cid == null) continue;
+              final label = course.classroomName ?? 'Classe $cid';
+              final inClass = ref.read(classStudentsProvider(cid)).valueOrNull;
+              for (final s in inClass ?? const <StudentDto>[]) {
+                classByStudent[s.id] = label;
+              }
+            }
+            final sessionByStudent = <int, int>{};
+            for (final s in _activeSessions) {
+              final cid = s.classroomId;
+              if (cid == null) continue;
+              final inClass = ref.read(classStudentsProvider(cid)).valueOrNull;
+              for (final st in inClass ?? const <StudentDto>[]) {
+                sessionByStudent[st.id] = s.id;
+              }
+            }
+            _sessionByStudent = sessionByStudent;
+
             return Column(
               children: [
                 // En-tête résumé
@@ -446,7 +1066,8 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                   child: Row(
                     children: [
                       Text(
-                        '${students.length} élève(s)',
+                        '${students.length} élève(s)'
+                        '${merged ? ' · ${classroomIds.length} classes' : ''}',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                       const Spacer(),
@@ -463,23 +1084,28 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
                   ),
                 ),
                 const SizedBox(height: 8),
-                ...students.map((s) => _StudentAbsenceRow(
-                      student: s,
-                      absence: _absencesDrafts[s.id],
-                      onChanged: (absent, draft) {
-                        setState(() {
-                          if (absent && draft != null) {
-                            _absencesDrafts[s.id] = draft;
-                          } else {
-                            _absencesDrafts.remove(s.id);
-                          }
-                        });
-                        // [Fix-DRAFT-PERSISTENCE] Chaque geste est
-                        // sauvegardé : quitte l'interface et reviens, la
-                        // saisie est intacte.
-                        _persistPendingSession();
-                      },
-                    )),
+                ...students.map(
+                  (s) => _StudentAbsenceRow(
+                    student: s,
+                    absence: _absencesDrafts[s.id],
+                    classLabel: merged ? classByStudent[s.id] : null,
+                    // [Présence-V9] Justification réservée à l'admin.
+                    canJustify: canJustify,
+                    onChanged: (absent, draft) {
+                      setState(() {
+                        if (absent && draft != null) {
+                          _absencesDrafts[s.id] = draft;
+                        } else {
+                          _absencesDrafts.remove(s.id);
+                        }
+                      });
+                      // [Fix-DRAFT-PERSISTENCE] Chaque geste est
+                      // sauvegardé : quitte l'interface et reviens, la
+                      // saisie est intacte.
+                      _persistPendingSession();
+                    },
+                  ),
+                ),
               ],
             );
           },
@@ -487,38 +1113,100 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
           error: (e, _) => AppErrorWidget(
             message: e.toString(),
             onRetry: () => ref.invalidate(
-                classStudentsProvider(session.classroomId ?? _classroomId!)),
+              mergedClassStudentsProvider(MergedStudentsQuery(classroomIds)),
+            ),
           ),
         ),
         const SizedBox(height: 16),
 
-        // --- Cahier de texte ---
-        SectionHeader(
-          title: 'Cahier de texte',
-          icon: Icons.menu_book_outlined,
-          subtitle: 'Contenu du cours et devoirs à faire.',
-        ),
-        const SizedBox(height: 8),
-        TextField(
-          controller: _lessonContentCtrl,
-          decoration: const InputDecoration(
-            labelText: 'Contenu du cours',
-            border: OutlineInputBorder(),
-            alignLabelWithHint: true,
+        // --- 2e temps : CAHIER DE TEXTE (fin de cours) ---
+        // [Présence-V9] Section repliable : repliée tant que le créneau
+        // dure (l'appel est la priorité), dépliée automatiquement quand
+        // l'heure de fin arrive (horloge 30 s) ; l'en-tête reste tappable
+        // à tout moment pour anticiper ou rattraper la saisie.
+        Card(
+          margin: EdgeInsets.zero,
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            children: [
+              InkWell(
+                onTap: () => setState(() {
+                  _cahierUserToggled = true;
+                  _cahierExpanded = !cahierExpanded;
+                }),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.menu_book_outlined,
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Cahier de texte — fin de cours',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .titleSmall
+                                  ?.copyWith(fontWeight: FontWeight.bold),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              cahierSubtitle,
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
+                        ),
+                      ),
+                      Icon(
+                        cahierExpanded ? Icons.expand_less : Icons.expand_more,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              AnimatedCrossFade(
+                duration: const Duration(milliseconds: 200),
+                crossFadeState: cahierExpanded
+                    ? CrossFadeState.showSecond
+                    : CrossFadeState.showFirst,
+                firstChild: const SizedBox(width: double.infinity),
+                secondChild: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      TextField(
+                        controller: _lessonContentCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Contenu du cours',
+                          border: OutlineInputBorder(),
+                          alignLabelWithHint: true,
+                        ),
+                        minLines: 3,
+                        maxLines: 5,
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: _lessonHomeworkCtrl,
+                        decoration: const InputDecoration(
+                          labelText: 'Devoirs',
+                          border: OutlineInputBorder(),
+                          alignLabelWithHint: true,
+                        ),
+                        minLines: 2,
+                        maxLines: 4,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
-          minLines: 3,
-          maxLines: 5,
-        ),
-        const SizedBox(height: 8),
-        TextField(
-          controller: _lessonHomeworkCtrl,
-          decoration: const InputDecoration(
-            labelText: 'Devoirs',
-            border: OutlineInputBorder(),
-            alignLabelWithHint: true,
-          ),
-          minLines: 2,
-          maxLines: 4,
         ),
         const SizedBox(height: 24),
 
@@ -539,19 +1227,24 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
           OutlinedButton.icon(
             onPressed: _saving ? null : _markCompleted,
             icon: const Icon(Icons.check_circle_outline),
-            label: const Text('Marquer la session comme terminée'),
+            label: Text(
+              _activeSessions.length > 1
+                  ? 'Marquer les sessions comme terminées'
+                  : 'Marquer la session comme terminée',
+            ),
           ),
         const SizedBox(height: 8),
         TextButton.icon(
           onPressed: _saving
               ? null
               : () => setState(() {
-                    _activeSession = null;
+                    _activeSessions = const [];
+                    _activeGroup = null;
                     _selectedCourse = null;
                     _absencesDrafts.clear();
                     _lessonContentCtrl.clear();
                     _lessonHomeworkCtrl.clear();
-                    _lessonRecordId = null;
+                    _lessonRecordIds = {};
                     _lessonLoaded = false;
                     // [Fix-DRAFT-PERSISTENCE] Fermeture volontaire : on
                     // abandonne la saisie (et sa persistance).
@@ -564,67 +1257,100 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
     );
   }
 
+  /// [Présence-V9] « HH:mm » lisible (DateTime → « 14:30 »).
+  static String _fmtHm(DateTime d) =>
+      '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+
   Future<void> _saveAll() async {
-    final session = _activeSession;
-    if (session == null) return;
+    if (!_hasActiveSession) return;
     setState(() => _saving = true);
     try {
-      // 1) Cahier de texte (si contenu non vide).
+      // 1) Cahier de texte (si contenu non vide) — [Présence-V10] le même
+      // contenu est enregistré sur CHAQUE session du groupe (classes
+      // jumelées : un seul cours, un seul cahier de texte).
       final content = _lessonContentCtrl.text.trim();
       if (content.isNotEmpty) {
-        await ref.read(attendanceControllerProvider).saveLessonRecord(
-              sessionId: session.id,
-              content: content,
-              homework: _lessonHomeworkCtrl.text.trim().isEmpty
-                  ? null
-                  : _lessonHomeworkCtrl.text.trim(),
-              recordId: _lessonRecordId,
-            );
+        for (final session in _activeSessions) {
+          final saved =
+              await ref.read(attendanceControllerProvider).saveLessonRecord(
+                    sessionId: session.id,
+                    content: content,
+                    homework: _lessonHomeworkCtrl.text.trim().isEmpty
+                        ? null
+                        : _lessonHomeworkCtrl.text.trim(),
+                    recordId: _lessonRecordIds[session.id],
+                  );
+          _lessonRecordIds[session.id] = saved.id ?? 0;
+        }
       }
-      // 2) Absences.
-      final absences = _absencesDrafts.values
-          .map((a) => StudentAbsenceDto(
+      // 2) Absences — [Présence-V10] réparties par session : chaque élève
+      // est enregistré sur la session de SA classe (groupes jumelés).
+      // [Présence-V9] L'enseignant MARQUE l'absence (absent + motif) ; le
+      // statut « Justifié » envoyé tel quel est IGNORÉ par le serveur pour
+      // un non-admin ([Fix-JUSTIFY-ADMIN]) : l'état serveur fait foi.
+      final bySession = <int, List<StudentAbsenceDto>>{};
+      for (final a in _absencesDrafts.values) {
+        final sessionId =
+            _sessionByStudent[a.studentId] ?? _activeSessions.first.id;
+        bySession.putIfAbsent(sessionId, () => []).add(
+              StudentAbsenceDto(
                 id: a.id,
-                courseSessionId: session.id,
+                courseSessionId: sessionId,
                 studentId: a.studentId,
                 studentName: a.studentName,
                 matricule: a.matricule,
                 isJustified: a.isJustified,
                 reason: a.reason,
-              ))
-          .toList();
-      await ref.read(attendanceControllerProvider).saveAbsences(
-            session.id,
-            absences,
-          );
+              ),
+            );
+      }
+      for (final session in _activeSessions) {
+        // Chaque session reçoit SA liste (vide = tous présents), comme
+        // dans le flux historique mono-classe.
+        await ref.read(attendanceControllerProvider).saveAbsences(
+              session.id,
+              bySession[session.id] ?? const <StudentAbsenceDto>[],
+            );
+      }
       // [Fix-DRAFT-PERSISTENCE] Enregistré = plus rien en attente.
       await _clearPendingSession();
       if (mounted) {
+        final total = _absencesDrafts.length;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-                'Enregistré : ${absences.length} absent(s), cahier de texte ${content.isEmpty ? 'ignoré' : 'mis à jour'}.'),
+              'Enregistré : $total absent(s), cahier de texte ${content.isEmpty ? 'ignoré' : 'mis à jour'}.',
+            ),
           ),
         );
       }
     } on ApiException catch (e) {
       _showError(e.message);
     } catch (e) {
-      _showError('Erreur : $e');
+      _showError(AppErrorWidget.humanize(e.toString()));
     } finally {
       if (mounted) setState(() => _saving = false);
     }
   }
 
   Future<void> _markCompleted() async {
-    final session = _activeSession;
-    if (session == null) return;
+    if (!_hasActiveSession) return;
     setState(() => _saving = true);
     try {
-      final updated = await ref
-          .read(attendanceControllerProvider)
-          .markSessionState(session.id, CourseSessionState.completed.code);
-      setState(() => _activeSession = updated);
+      // [Présence-V10] Toutes les sessions du groupe passent à TERMINÉE.
+      final updated = <CourseSessionDto>[];
+      for (final session in _activeSessions) {
+        if (session.state != CourseSessionState.pending) {
+          updated.add(session);
+          continue;
+        }
+        updated.add(
+          await ref
+              .read(attendanceControllerProvider)
+              .markSessionState(session.id, CourseSessionState.completed.code),
+        );
+      }
+      setState(() => _activeSessions = updated);
       // [Fix-DRAFT-PERSISTENCE] L'état change, les brouillons restent.
       _persistPendingSession();
       if (mounted) {
@@ -635,7 +1361,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
     } on ApiException catch (e) {
       _showError(e.message);
     } catch (e) {
-      _showError('Erreur : $e');
+      _showError(AppErrorWidget.humanize(e.toString()));
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -645,39 +1371,66 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
   // [Fix-DRAFT-PERSISTENCE] Persistance de la feuille en cours.
   // ─────────────────────────────────────────────────────────────────────
 
+  static const _kPendingAttendance = 'attendance_pending_session';
+
   Future<void> _persistPendingSession() async {
-    final session = _activeSession;
-    if (session == null) return;
+    if (_activeSessions.isEmpty) return;
     try {
       final prefs = await SharedPreferences.getInstance();
-      final drafts = <String, Map<String, dynamic>>{
-        for (final e in _absencesDrafts.entries)
-          '${e.key}': {
-            'studentName': e.value.studentName,
-            'matricule': e.value.matricule,
-            'isJustified': e.value.isJustified,
-            'reason': e.value.reason,
-          },
-      };
       await prefs.setString(
-        _kPendingSession,
+        _kPendingAttendance,
         jsonEncode({
-          'session': {
-            'id': session.id,
-            'weeklyScheduleId': session.weeklyScheduleId,
-            'classroomId': session.classroomId,
-            'classroomName': session.classroomName,
-            'subjectId': session.subjectId,
-            'subjectName': session.subjectName,
-            'teacherId': session.teacherId,
-            'teacherName': session.teacherName,
-            'date': session.date.toIso8601String(),
-            'startTime': session.startTime,
-            'endTime': session.endTime,
-            'state': session.state.code,
-            'lessonRecordId': session.lessonRecordId,
+          'sessions': [
+            for (final s in _activeSessions)
+              {
+                'id': s.id,
+                'weeklyScheduleId': s.weeklyScheduleId,
+                'classroomId': s.classroomId,
+                'classroomName': s.classroomName,
+                'subjectId': s.subjectId,
+                'subjectName': s.subjectName,
+                'teacherId': s.teacherId,
+                'teacherName': s.teacherName,
+                'date': s.date.toIso8601String(),
+                'startTime': s.startTime,
+                'endTime': s.endTime,
+                'state': s.state.code,
+                'lessonRecordId': s.lessonRecordId,
+              },
+          ],
+          'group': [
+            for (final c in _activeGroup?.courses ?? const [])
+              {
+                'id': c.id,
+                'classroomId': c.classroomId,
+                'classroomName': c.classroomName,
+                'subjectId': c.subjectId,
+                'subjectName': c.subjectName,
+                'teacherId': c.teacherId,
+                'teacherName': c.teacherName,
+                'timeSlotId': c.timeSlotId,
+                'dayOfWeek': c.dayOfWeek,
+                'startTime': c.startTime,
+                'endTime': c.endTime,
+                'room': c.room,
+                'weekType': c.weekType == WeekType.b ? 'b' : 'a',
+              },
+          ],
+          'drafts': {
+            for (final e in _absencesDrafts.entries)
+              '${e.key}': {
+                'studentName': e.value.studentName,
+                'matricule': e.value.matricule,
+                'isJustified': e.value.isJustified,
+                'reason': e.value.reason,
+              },
           },
-          'drafts': drafts,
+          'sessionByStudent': {
+            for (final e in _sessionByStudent.entries) '${e.key}': e.value,
+          },
+          'lessonRecordIds': {
+            for (final e in _lessonRecordIds.entries) '${e.key}': e.value,
+          },
           'lessonContent': _lessonContentCtrl.text,
           'lessonHomework': _lessonHomeworkCtrl.text,
         }),
@@ -690,7 +1443,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
   Future<void> _clearPendingSession() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.remove(_kPendingSession);
+      await prefs.remove(_kPendingAttendance);
     } catch (_) {
       // Même politique : ne jamais gêner la saisie.
     }
@@ -699,29 +1452,59 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
   Future<void> _restorePendingSession() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_kPendingSession);
+      final raw = prefs.getString(_kPendingAttendance);
       if (raw == null || raw.isEmpty) return;
       final data = jsonDecode(raw);
       if (data is! Map) return;
-      final s = data['session'];
-      if (s is! Map) return;
-      final session = CourseSessionDto(
-        id: s['id'] as int,
-        weeklyScheduleId: s['weeklyScheduleId'] as int?,
-        classroomId: s['classroomId'] as int?,
-        classroomName: s['classroomName'] as String?,
-        subjectId: s['subjectId'] as int?,
-        subjectName: s['subjectName'] as String?,
-        teacherId: s['teacherId'] as int?,
-        teacherName: s['teacherName'] as String?,
-        date: DateTime.tryParse(s['date'] as String? ?? '') ??
-            DateTime.now(),
-        startTime: s['startTime'] as String?,
-        endTime: s['endTime'] as String?,
-        state: CourseSessionState.fromCode(s['state'] as String?) ??
-            CourseSessionState.pending,
-        lessonRecordId: s['lessonRecordId'] as int?,
-      );
+
+      final rawSessions = data['sessions'];
+      if (rawSessions is! List || rawSessions.isEmpty) return;
+      final sessions = <CourseSessionDto>[];
+      for (final item in rawSessions) {
+        if (item is! Map) continue;
+        sessions.add(CourseSessionDto(
+          id: item['id'] as int,
+          weeklyScheduleId: item['weeklyScheduleId'] as int?,
+          classroomId: item['classroomId'] as int?,
+          classroomName: item['classroomName'] as String?,
+          subjectId: item['subjectId'] as int?,
+          subjectName: item['subjectName'] as String?,
+          teacherId: item['teacherId'] as int?,
+          teacherName: item['teacherName'] as String?,
+          date: DateTime.tryParse(item['date'] as String? ?? '') ??
+              DateTime.now(),
+          startTime: item['startTime'] as String?,
+          endTime: item['endTime'] as String?,
+          state: CourseSessionState.fromCode(item['state'] as String?) ??
+              CourseSessionState.pending,
+          lessonRecordId: item['lessonRecordId'] as int?,
+        ));
+      }
+
+      final groupCourses = <WeeklyScheduleDto>[];
+      final rawGroup = data['group'];
+      if (rawGroup is List) {
+        for (final item in rawGroup) {
+          if (item is! Map) continue;
+          groupCourses.add(WeeklyScheduleDto(
+            id: item['id'] as int,
+            classroomId: item['classroomId'] as int?,
+            classroomName: item['classroomName'] as String?,
+            subjectId: item['subjectId'] as int?,
+            subjectName: item['subjectName'] as String?,
+            teacherId: item['teacherId'] as int?,
+            teacherName: item['teacherName'] as String?,
+            timeSlotId: item['timeSlotId'] as int? ?? 0,
+            dayOfWeek: item['dayOfWeek'] as int? ?? 1,
+            startTime: item['startTime'] as String? ?? '',
+            endTime: item['endTime'] as String? ?? '',
+            room: item['room'] as String?,
+            weekType:
+                item['weekType'] == 'b' ? WeekType.b : WeekType.a,
+          ));
+        }
+      }
+
       final drafts = <int, StudentAbsenceDto>{};
       final rawDrafts = data['drafts'];
       if (rawDrafts is Map) {
@@ -731,7 +1514,7 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
           if (sid == null || d is! Map) continue;
           drafts[sid] = StudentAbsenceDto(
             id: 0,
-            courseSessionId: session.id,
+            courseSessionId: sessions.first.id,
             studentId: sid,
             studentName: d['studentName'] as String? ?? '',
             matricule: d['matricule'] as String?,
@@ -740,15 +1523,40 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
           );
         }
       }
+
+      final byStudent = <int, int>{};
+      final rawByStudent = data['sessionByStudent'];
+      if (rawByStudent is Map) {
+        for (final e in rawByStudent.entries) {
+          final sid = int.tryParse('${e.key}');
+          final sessionId = e.value is int ? e.value as int : null;
+          if (sid != null && sessionId != null) byStudent[sid] = sessionId;
+        }
+      }
+
+      final lessonIds = <int, int>{};
+      final rawLessonIds = data['lessonRecordIds'];
+      if (rawLessonIds is Map) {
+        for (final e in rawLessonIds.entries) {
+          final key = int.tryParse('${e.key}');
+          final value = e.value is int ? e.value as int : null;
+          if (key != null && value != null) lessonIds[key] = value;
+        }
+      }
+
       if (!mounted) return;
       setState(() {
-        _activeSession = session;
+        _activeSessions = sessions;
+        _activeGroup = groupCourses.isEmpty
+            ? null
+            : smart.CourseGroup(groupCourses);
         _absencesDrafts
           ..clear()
           ..addAll(drafts);
+        _sessionByStudent = byStudent;
+        _lessonRecordIds = lessonIds;
         _lessonContentCtrl.text = data['lessonContent'] as String? ?? '';
         _lessonHomeworkCtrl.text = data['lessonHomework'] as String? ?? '';
-        _lessonRecordId = session.lessonRecordId;
         // Ne pas laisser l'init paresseuse du cahier écraser le texte
         // restauré.
         _lessonLoaded = true;
@@ -762,6 +1570,43 @@ class _AttendancePageState extends ConsumerState<AttendancePage> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(msg), backgroundColor: Colors.red.shade700),
+    );
+  }
+}
+
+/// [Présence-V10] Champ verrouillé en lecture seule : la valeur suit
+/// l'emploi du temps et l'heure courante — aucun choix manuel.
+class _LockedField extends StatelessWidget {
+  const _LockedField({
+    required this.label,
+    required this.value,
+    required this.icon,
+  });
+
+  final String label;
+  final String value;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return InputDecorator(
+      decoration: InputDecoration(
+        labelText: label,
+        border: const OutlineInputBorder(),
+        isDense: true,
+        // [Fix-OVERFLOW] valeur contrainte à la largeur du champ.
+        suffixIcon: Icon(
+          icon,
+          size: 18,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+      ),
+      child: Text(
+        value,
+        overflow: TextOverflow.ellipsis,
+        maxLines: 1,
+        style: Theme.of(context).textTheme.bodyMedium,
+      ),
     );
   }
 }
@@ -793,20 +1638,35 @@ class _StateBadge extends StatelessWidget {
 }
 
 /// Ligne d'un élève avec case « Absent » et, si cochée, champ « Motif » +
-/// interrupteur « Justifié ».
+/// statut de justification.
 ///
-/// Le [TextEditingController] du motif est géré dans un [State] dédié pour
-/// conserver la position du curseur entre les rebuilds et nettoyer le champ
-/// quand l'élève repasse à « présent ».
+/// [Présence-V10] [classLabel] : badge de classe (groupes jumelés).
+///
+/// [Présence-V9] **Justification réservée à l'administration** : seul un
+/// admin ([canJustify]) voit l'interrupteur « Justifié ». L'enseignant
+/// MARQUE l'absence (case + motif d'observation) ; le statut de
+/// justification vient du serveur (badge lecture seule « Justifiée
+/// (administration) » si l'admin l'a posée) et une invite rappelle la
+/// règle.
 class _StudentAbsenceRow extends StatefulWidget {
   const _StudentAbsenceRow({
     required this.student,
     required this.absence,
     required this.onChanged,
+    this.canJustify = false,
+    this.classLabel,
   });
 
   final StudentDto student;
   final StudentAbsenceDto? absence;
+
+  /// Vrai pour un admin (superuser / ADMIN / HEADMASTER) : seule personne
+  /// autorisée à justifier une absence.
+  final bool canJustify;
+
+  /// [Présence-V10] Badge « 6A » quand plusieurs classes sont jumelées.
+  final String? classLabel;
+
   final void Function(bool absent, StudentAbsenceDto? draft) onChanged;
 
   @override
@@ -876,13 +1736,50 @@ class _StudentAbsenceRowState extends State<_StudentAbsenceRow> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(widget.student.fullName,
-                          style: Theme.of(context).textTheme.titleSmall,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis),
-                      if (widget.student.matricule.isNotEmpty)
-                        Text(widget.student.matricule,
-                            style: Theme.of(context).textTheme.bodySmall),
+                      Text(
+                        widget.student.fullName,
+                        style: Theme.of(context).textTheme.titleSmall,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      Row(
+                        children: [
+                          if (widget.classLabel != null) ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 1,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .secondaryContainer,
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                widget.classLabel!,
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .labelSmall
+                                    ?.copyWith(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .onSecondaryContainer,
+                                    ),
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                          ],
+                          if (widget.student.matricule.isNotEmpty)
+                            Flexible(
+                              child: Text(
+                                widget.student.matricule,
+                                style: Theme.of(context).textTheme.bodySmall,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                      ),
                     ],
                   ),
                 ),
@@ -909,8 +1806,10 @@ class _StudentAbsenceRowState extends State<_StudentAbsenceRow> {
                   },
                 ),
                 const SizedBox(width: 4),
-                Text('Absent',
-                    style: Theme.of(context).textTheme.labelMedium),
+                Text(
+                  'Absent',
+                  style: Theme.of(context).textTheme.labelMedium,
+                ),
               ],
             ),
             if (isAbsent) ...[
@@ -924,27 +1823,73 @@ class _StudentAbsenceRowState extends State<_StudentAbsenceRow> {
                 ),
               ),
               const SizedBox(height: 8),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                dense: true,
-                title: const Text('Justifié'),
-                value: widget.absence!.isJustified,
-                onChanged: (v) {
-                  final a = widget.absence!;
-                  widget.onChanged(
-                    true,
-                    StudentAbsenceDto(
-                      id: a.id,
-                      courseSessionId: a.courseSessionId,
-                      studentId: a.studentId,
-                      studentName: a.studentName,
-                      matricule: a.matricule,
-                      isJustified: v,
-                      reason: a.reason,
+              // [Présence-V9] Justification : admin → interrupteur ;
+              // enseignant → information (le serveur garantit la règle).
+              if (widget.canJustify)
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: const Text('Justifié'),
+                  value: widget.absence!.isJustified,
+                  onChanged: (v) {
+                    final a = widget.absence!;
+                    widget.onChanged(
+                      true,
+                      StudentAbsenceDto(
+                        id: a.id,
+                        courseSessionId: a.courseSessionId,
+                        studentId: a.studentId,
+                        studentName: a.studentName,
+                        matricule: a.matricule,
+                        isJustified: v,
+                        reason: a.reason,
+                      ),
+                    );
+                  },
+                )
+              else if (widget.absence!.isJustified)
+                Row(
+                  children: [
+                    Icon(
+                      Icons.verified,
+                      size: 16,
+                      color: Colors.green.shade700,
                     ),
-                  );
-                },
-              ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'Justifiée (administration) — statut non modifiable '
+                        'par un enseignant.',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(color: Colors.green.shade700),
+                      ),
+                    ),
+                  ],
+                )
+              else
+                Row(
+                  children: [
+                    Icon(
+                      Icons.info_outline,
+                      size: 16,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'La justification d\'une absence est réservée à '
+                        'l\'administration.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                      ),
+                    ),
+                  ],
+                ),
             ],
           ],
         ),
@@ -970,59 +1915,4 @@ class _DisabledField extends StatelessWidget {
       ),
     );
   }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// [Fix-CONSECUTIVE-SLOTS] Fusion des créneaux consécutifs d'un même cours.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Créneau affiché dans le sélecteur : un cours de l'emploi du temps, ou
-/// la FUSION de créneaux consécutifs du même cours (même matière + même
-/// enseignant, horaires jointifs). La saisie de présence se fait alors en
-/// UNE session couvrant tout le bloc (ex. 08:00 – 10:00).
-class _MergedCourse {
-  final WeeklyScheduleDto first;
-  final WeeklyScheduleDto last;
-  const _MergedCourse(this.first, this.last);
-
-  int get id => first.id;
-  int? get subjectId => first.subjectId;
-  int? get teacherId => first.teacherId;
-  String? get subjectName => first.subjectName;
-  String? get teacherName => first.teacherName;
-  String get startTime => first.startTime;
-  String get endTime => last.endTime;
-}
-
-int _hhmmToMinutes(String s) {
-  final parts = s.split(':');
-  if (parts.length < 2) return -1;
-  final h = int.tryParse(parts[0]) ?? 0;
-  final m = int.tryParse(parts[1]) ?? 0;
-  return h * 60 + m;
-}
-
-/// Fusionne une liste TRIÉE par heure de début : deux créneaux voisins
-/// sont fusionnés si même matière + même enseignant et si la fin de l'un
-/// rejoint le début du suivant (tolérance 5 minutes).
-List<_MergedCourse> _mergeConsecutiveSlots(List<WeeklyScheduleDto> sorted) {
-  final merged = <_MergedCourse>[];
-  for (final c in sorted) {
-    if (merged.isNotEmpty) {
-      final prev = merged.last;
-      final sameCourse = prev.subjectId == c.subjectId &&
-          prev.teacherId == c.teacherId;
-      final prevEnd = _hhmmToMinutes(prev.last.endTime);
-      final nextStart = _hhmmToMinutes(c.startTime);
-      final jointif = prevEnd >= 0 &&
-          nextStart >= 0 &&
-          (nextStart - prevEnd).abs() <= 5;
-      if (sameCourse && jointif) {
-        merged[merged.length - 1] = _MergedCourse(prev.first, c);
-        continue;
-      }
-    }
-    merged.add(_MergedCourse(c, c));
-  }
-  return merged;
 }

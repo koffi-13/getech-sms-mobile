@@ -1,15 +1,21 @@
 /// Page « Saisie des notes » : sélection classe → période → matière (cascade),
 /// liste des évaluations (avec progress + maxScore), création d'évaluation
-/// (GRADE_EDIT, type via [CommonAssessmentTypes.defaults]), saisie des notes
-/// par élève ([GradeEntryDto]) avec champ absent + commentaire + **verrouillage**
-/// (is_locked) : si la note est verrouillée, l'input et la case « Absent » sont
-/// désactivés et un badge « Verrouillée » s'affiche. Le serveur ignore les
-/// notes verrouillées dans le bulk_save (skipped_count).
+/// (GRADE_EDIT ou enseignant détecté ; compositions/examens — catégorie
+/// EXAM — réservés aux administrateurs), saisie des notes par élève
+/// ([GradeEntryDto]) avec champ absent + commentaire.
+///
+/// [Grade-Validation] La modification d'une note EXISTANTE par un enseignant
+/// devient une PROPOSITION (file grade_modifications) : l'admin accorde ou
+/// rejette ; tant qu'elle n'est pas accordée, le bulletin utilise l'ancienne
+/// note. Les lignes portent une marque de statut (_GradeMarkChip).
 ///
 /// RBAC :
-/// - GRADE_READ  → lecture seule (sheet ouverte en consultation, bouton
-///   « Enregistrer » masqué).
-/// - GRADE_EDIT  → création / suppression d'évaluations + saisie des notes.
+/// - GRADE_READ (ou enseignant détecté) → consultation.
+/// - GRADE_EDIT (ou enseignant détecté — [Fix-TEACHER-GRADE-ENTRY]) →
+///   création d'évaluations + saisie des notes ; le serveur reste
+///   l'autorité finale.
+/// - Suppression d'une évaluation → administrateurs uniquement (miroir du
+///   serveur : « Only admins can delete assessments »).
 ///
 /// Aligné sur le contrat desktop :
 /// - Évaluations : `GET /grades/assessments?class_subject_id=&period_id=`
@@ -18,11 +24,13 @@
 library;
 
 import 'package:collection/collection.dart'; // firstOrNull
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/auth/auth_state.dart';
+import '../../core/auth/teacher_scope.dart';
 import '../../core/config/constants.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/utils/formatters.dart';
@@ -41,9 +49,16 @@ class GradeEntryPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(authProvider);
     final perms = auth.permissions;
-    final conn = ref.watch(connectionProvider);
 
     final canRead = hasPermission(perms, RbacPermissions.gradeRead);
+    // [Fix-TEACHER-GUARD] Repli enseignant (miroir de la barre de
+    // navigation) : un enseignant dont le RBAC serveur est incomplet
+    // garde accès à la saisie de notes — sinon il voyait l'onglet mais
+    // se heurtait à « Permission insuffisante ».
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final teacherish = auth.hasDeclaredTeacherRole ||
+        scopeAsync.maybeWhen(data: (s) => s.isTeacher, orElse: () => false);
+    final canUse = canRead || teacherish || auth.isSuperuser;
 
     return Scaffold(
       appBar: AppBar(
@@ -52,25 +67,22 @@ class GradeEntryPage extends ConsumerWidget {
           IconButton(
             tooltip: 'Classement',
             icon: const Icon(Icons.leaderboard_outlined),
-            onPressed: canRead
-                ? () => context.push('/grades/ranking')
-                : null,
+            onPressed: canUse ? () => context.push('/grades/ranking') : null,
           ),
         ],
       ),
-      body: !canRead
+      body: !canUse
           ? const EmptyState(
               title: 'Permission insuffisante',
-              message: 'Vous n\'avez pas accès à la saisie des notes (GRADE_READ).',
+              message:
+                  'Vous n\'avez pas accès à la saisie des notes (GRADE_READ).',
               icon: Icons.lock_outline,
             )
-          : (!conn.canReachServer
-              ? const EmptyState(
-                  title: 'Hors-ligne',
-                  message: 'La saisie des notes nécessite une connexion au serveur.',
-                  icon: Icons.cloud_off,
-                )
-              : const _GradeEntryBody()),
+          // [Fix-OFFLINE] Plus de garde hors-ligne bloquante : la saisie
+          // est TOUJOURS possible. Hors-ligne, la page lit le cache Drift
+          // (+ soumissions en attente) et l'enregistrement part dans
+          // l'outbox — synchronisé à la prochaine connexion.
+          : const _GradeEntryBody(),
     );
   }
 }
@@ -90,10 +102,57 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
   @override
   Widget build(BuildContext context) {
     final auth = ref.watch(authProvider);
-    final canEdit = hasPermission(auth.permissions, RbacPermissions.gradeEdit);
+    // [Fix-TEACHER-GRADE-ENTRY] La saisie des notes n'est PLUS en lecture
+    // seule pour un enseignant dont la liste RBAC est incomplète : le repli
+    // « enseignant détecté » (rôle déclaré OU relations du périmètre, miroir
+    // de la barre de navigation) ouvre l'édition — le serveur reste
+    // l'autorité finale (403 explicite si le compte est vraiment refusé).
+    // Retour utilisateur : « la notation des élèves est en lecture seule,
+    // il faut permettre la notation des élèves aux enseignants ».
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final teacherish = !auth.isAdminOrHeadmaster &&
+        (auth.hasDeclaredTeacherRole ||
+            scopeAsync.maybeWhen(
+              data: (s) => s.isTeacher,
+              orElse: () => false,
+            ));
+    final canEdit =
+        hasPermission(auth.permissions, RbacPermissions.gradeEdit) ||
+            teacherish;
+    // Les admins (superuser / ADMIN / HEADMASTER) ne sont PAS soumis au
+    // verrouillage des notes déjà saisies (is_locked) — ils peuvent corriger
+    // une note existante (miroir de l'upsert admin du desktop).
+    final isAdmin = auth.isAdminOrHeadmaster;
 
     final classrooms = ref.watch(classroomsForGradesProvider);
-    final periods = ref.watch(periodsProvider);
+
+    // Auto-sélection de la première classe (miroir Ranking/Bulletin).
+    final classroomList = classrooms.valueOrNull ?? const <ClassroomDto>[];
+    if (_classroomId == null && classroomList.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _classroomId == null) {
+          setState(() => _classroomId = classroomList.first.id);
+        }
+      });
+    }
+
+    // Périodes filtrées par le CYCLE de la classe sélectionnée — corrige le
+    // mélange lycée/collège dans le champ « Période ».
+    final periods = _classroomId == null
+        ? const AsyncValue<List<PeriodDto>>.data([])
+        : ref.watch(periodsForClassroomProvider(_classroomId!));
+
+    // Auto-sélection de la période ACTIVE du jour (miroir
+    // GradeService.get_active_period), sinon la première.
+    final periodList = periods.valueOrNull ?? const <PeriodDto>[];
+    if (_classroomId != null && _periodId == null && periodList.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _periodId == null) {
+          final active = activePeriodOf(periodList);
+          if (active != null) setState(() => _periodId = active.id);
+        }
+      });
+    }
 
     final query = (_classSubjectId != null && _periodId != null)
         ? AssessmentsQuery(
@@ -113,8 +172,48 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          // [Fix-OFFLINE] Bandeau d'information (jamais bloquant) : la
+          // saisie reste possible, l'enregistrement part dans l'outbox.
+          Consumer(
+            builder: (context, ref, _) {
+              final conn = ref.watch(connectionProvider);
+              final offline = !conn.canReachServer && !conn.isChecking;
+              if (!offline) return const SizedBox.shrink();
+              return Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.tertiaryContainer,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.cloud_off_outlined,
+                      size: 18,
+                      color: Theme.of(context).colorScheme.onTertiaryContainer,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Mode hors-ligne : consultation et saisie sur le cache '
+                        'local. L\'enregistrement sera synchronisé à la prochaine '
+                        'connexion.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onTertiaryContainer,
+                            ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
           // --- Sélecteurs en cascade ---
-          SectionHeader(
+          const SectionHeader(
             title: 'Filtres',
             icon: Icons.filter_list,
             subtitle: 'Sélectionnez une classe, une période et une matière.',
@@ -137,6 +236,9 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
               setState(() {
                 _classroomId = c?.id;
                 _classSubjectId = null;
+                // Reset de la période : elle sera re-filtrée par le cycle de
+                // la nouvelle classe puis auto-sélectionnée (période active).
+                _periodId = null;
               });
             },
             labelOf: (c) => c.name,
@@ -144,6 +246,13 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
           const SizedBox(height: 12),
           _DropdownField<PeriodDto>(
             label: 'Période',
+            // [Fix-PERIOD-NOTES-EMPTY] Plus de second filtrage local :
+            // periodsForClassroomProvider filtre DÉJÀ par le cycle de la
+            // classe AVEC repli sur la liste complète si le filtre est vide.
+            // L'ancien double filtrage (_filterPeriodsByCycle, sans repli)
+            // vidait le dropdown « Période » de Notes dès que la classe
+            // n'avait aucune période de son cycle — alors que Classement
+            // (qui ne re-filtre pas) affichait bien les périodes.
             value: periods.maybeWhen(
               data: (list) =>
                   list.where((p) => p.id == _periodId).firstOrNull ??
@@ -154,9 +263,13 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
               data: (list) => list,
               orElse: () => const [],
             ),
-            enabled: periods is AsyncData,
+            enabled: periods is AsyncData && _classroomId != null,
             onChanged: (p) => setState(() => _periodId = p?.id),
-            labelOf: (p) => p.name,
+            labelOf: (p) =>
+                p.cycleName == null ? p.name : '${p.name} (${p.cycleName})',
+            hint: _classroomId == null
+                ? 'Sélectionnez une classe d\'abord'
+                : null,
           ),
           const SizedBox(height: 12),
           _ClassSubjectField(
@@ -194,14 +307,20 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
                     }
                     return Column(
                       children: list
-                          .map((a) => _AssessmentCard(
-                                assessment: a,
-                                canEdit: canEdit,
-                                onTap: () => _openGradeEntry(a, canEdit),
-                                onDelete: canEdit
-                                    ? () => _confirmDelete(a)
-                                    : null,
-                              ))
+                          .map(
+                            (a) => _AssessmentCard(
+                              assessment: a,
+                              canEdit: canEdit,
+                              onTap: () => _openGradeEntry(a, canEdit, isAdmin),
+                              // [Fix-TEACHER-ASSESSMENT] La suppression
+                              // d'une évaluation est réservée aux ADMIN
+                              // côté serveur (« Only admins can delete
+                              // assessments ») — ne plus proposer le
+                              // bouton à un enseignant (403 inévitable).
+                              onDelete:
+                                  isAdmin ? () => _confirmDelete(a) : null,
+                            ),
+                          )
                           .toList(),
                     );
                   },
@@ -219,6 +338,28 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
 
   void _showCreateAssessmentSheet() {
     if (_classSubjectId == null || _periodId == null) return;
+
+    // [Fix-ASSESSMENT-FORM] Libellés réels transmis au formulaire.
+    final classroomList = ref.read(classroomsForGradesProvider).valueOrNull ??
+        const <ClassroomDto>[];
+    // [Fix-PERIOD-NOTES-EMPTY] Le provider filtre déjà par cycle (avec
+    // repli) — pas de second filtrage local (voyait le dropdown Période
+    // vide dans Notes alors que Classement fonctionnait).
+    final periodList = (_classroomId == null)
+        ? const <PeriodDto>[]
+        : (ref.read(periodsForClassroomProvider(_classroomId!)).valueOrNull ??
+            const <PeriodDto>[]);
+    final classroomName =
+        classroomList.where((c) => c.id == _classroomId).firstOrNull?.name;
+    final periodDto = periodList.where((p) => p.id == _periodId).firstOrNull;
+    final subjectName = (_classroomId == null)
+        ? null
+        : (ref.read(classSubjectsProvider(_classroomId!)).valueOrNull ??
+                const <ClassSubjectDto>[])
+            .where((s) => s.id == _classSubjectId)
+            .firstOrNull
+            ?.subjectName;
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -226,11 +367,19 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
       builder: (_) => _CreateAssessmentSheet(
         classSubjectId: _classSubjectId!,
         periodId: _periodId!,
+        classroomName: classroomName,
+        subjectName: subjectName,
+        periodName: periodDto?.name,
+        periodStart: periodDto?.startDate,
+        periodEnd: periodDto?.endDate,
+        // [Fix-TEACHER-ASSESSMENT] Compositions et examens (catégorie
+        // EXAM) : création réservée aux administrateurs.
+        isAdmin: ref.read(authProvider).isAdminOrHeadmaster,
       ),
     );
   }
 
-  void _openGradeEntry(AssessmentDto assessment, bool canEdit) {
+  void _openGradeEntry(AssessmentDto assessment, bool canEdit, bool isAdmin) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -238,6 +387,14 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
       builder: (_) => _GradeEntrySheet(
         assessment: assessment,
         canEdit: canEdit,
+        // Admin : le verrouillage is_locked est ignoré (notes modifiables).
+        isAdmin: isAdmin,
+        // [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : indices matière + période
+        // pour la reconstruction hors-ligne (répare les caches
+        // classSubjectId=0 / periodId null).
+        classSubjectId: _classSubjectId,
+        periodId: _periodId,
+        classroomId: _classroomId,
       ),
     );
   }
@@ -248,7 +405,8 @@ class _GradeEntryBodyState extends ConsumerState<_GradeEntryBody> {
       builder: (ctx) => AlertDialog(
         title: const Text('Supprimer l\'évaluation'),
         content: Text(
-            'Supprimer « ${assessment.name} » ? Les notes saisies seront perdues.'),
+          'Supprimer « ${assessment.name} » ? Les notes saisies seront perdues.',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
@@ -297,6 +455,7 @@ class _DropdownField<T> extends StatelessWidget {
     required this.onChanged,
     required this.labelOf,
     this.enabled = true,
+    this.hint,
   });
 
   final String label;
@@ -305,6 +464,7 @@ class _DropdownField<T> extends StatelessWidget {
   final ValueChanged<T?> onChanged;
   final String Function(T) labelOf;
   final bool enabled;
+  final String? hint;
 
   @override
   Widget build(BuildContext context) {
@@ -312,17 +472,27 @@ class _DropdownField<T> extends StatelessWidget {
     final effectiveValue =
         (value != null && items.any((e) => e == value)) ? value : null;
     return DropdownButtonFormField<T>(
-      value: effectiveValue,
+      initialValue: effectiveValue,
+      // [Fix-OVERFLOW] isExpanded : sans lui la valeur sélectionnée
+      // déborde à droite (~45 px) quand le libellé est long.
+      isExpanded: true,
       decoration: InputDecoration(
         labelText: label,
+        hintText: hint,
         border: const OutlineInputBorder(),
         isDense: true,
       ),
       items: items
-          .map((e) => DropdownMenuItem<T>(
-                value: e,
-                child: Text(labelOf(e), overflow: TextOverflow.ellipsis),
-              ))
+          .map(
+            (e) => DropdownMenuItem<T>(
+              value: e,
+              child: Text(
+                labelOf(e),
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
+              ),
+            ),
+          )
           .toList(),
       onChanged: enabled ? onChanged : null,
     );
@@ -345,7 +515,9 @@ class _ClassSubjectField extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     if (classroomId == null) {
       return const _DisabledField(
-          label: 'Matière', hint: 'Sélectionnez une classe d\'abord.');
+        label: 'Matière',
+        hint: 'Sélectionnez une classe d\'abord.',
+      );
     }
     final async = ref.watch(classSubjectsProvider(classroomId!));
     return async.when(
@@ -359,20 +531,26 @@ class _ClassSubjectField extends ConsumerWidget {
           });
         }
         return DropdownButtonFormField<ClassSubjectDto>(
-          value: selected,
+          initialValue: selected,
+          // [Fix-OVERFLOW] le libellé « Matière (coef. X) » déborde sans
+          // isExpanded.
+          isExpanded: true,
           decoration: const InputDecoration(
             labelText: 'Matière',
             border: OutlineInputBorder(),
             isDense: true,
           ),
           items: list
-              .map((c) => DropdownMenuItem(
-                    value: c,
-                    child: Text(
-                      '${c.subjectName} (coef. ${c.coefficient})',
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ))
+              .map(
+                (c) => DropdownMenuItem(
+                  value: c,
+                  child: Text(
+                    '${c.subjectName} (coef. ${c.coefficient})',
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                  ),
+                ),
+              )
               .toList(),
           onChanged: (c) => onChanged(c?.id),
         );
@@ -450,9 +628,7 @@ class _AssessmentCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      assessment.name.isEmpty
-                          ? '(sans nom)'
-                          : assessment.name,
+                      assessment.name.isEmpty ? '(sans nom)' : assessment.name,
                       style: theme.textTheme.titleSmall,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -467,8 +643,11 @@ class _AssessmentCard extends StatelessWidget {
                         _Chip('Max ${assessment.maxScore.toStringAsFixed(0)}'),
                         if (assessment.dateTaken != null &&
                             assessment.dateTaken!.isNotEmpty)
-                          _Chip(DateFormatter.date(
-                              DateFormatter.parse(assessment.dateTaken))),
+                          _Chip(
+                            DateFormatter.date(
+                              DateFormatter.parse(assessment.dateTaken),
+                            ),
+                          ),
                         _Chip(
                           '${assessment.gradesEnteredCount}/${assessment.totalStudents} saisies',
                         ),
@@ -494,12 +673,17 @@ class _AssessmentCard extends StatelessWidget {
                 IconButton(
                   tooltip: 'Supprimer',
                   visualDensity: VisualDensity.compact,
-                  icon: Icon(Icons.delete_outline,
-                      size: 20, color: Colors.red.shade400),
+                  icon: Icon(
+                    Icons.delete_outline,
+                    size: 20,
+                    color: Colors.red.shade400,
+                  ),
                   onPressed: onDelete,
                 ),
-              Icon(Icons.chevron_right,
-                  color: theme.colorScheme.onSurfaceVariant),
+              Icon(
+                Icons.chevron_right,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ],
           ),
         ),
@@ -536,27 +720,78 @@ class _Chip extends StatelessWidget {
 /// Le type d'évaluation est choisi parmi [CommonAssessmentTypes.defaults]
 /// (aucun endpoint REST ne liste les types pour le moment — réf. serveur).
 /// La note maximale est pré-remplie avec `type.defaultMaxScore`.
+///
+/// [Fix-ASSESSMENT-FORM] Contraintes (miroir du serveur — retour V9
+/// « parfaire le formulaire d'ajout d'évaluations sans oublier les
+/// contraintes ») :
+/// - nom requis, ≤ 255 caractères, sans doublon connu (409 serveur) ;
+/// - date bornée à la période sélectionnée [periodStart, periodEnd] ;
+/// - note maximale entre 1 et 100 ;
+/// - libellés RÉELS (classe • matière • période) au lieu des ids
+///   techniques, et plus aucun texte destiné aux développeurs.
 class _CreateAssessmentSheet extends ConsumerStatefulWidget {
   const _CreateAssessmentSheet({
     required this.classSubjectId,
     required this.periodId,
+    this.classroomName,
+    this.subjectName,
+    this.periodName,
+    this.periodStart,
+    this.periodEnd,
+    this.isAdmin = false,
   });
 
   final int classSubjectId;
   final int periodId;
+  final String? classroomName;
+  final String? subjectName;
+  final String? periodName;
+
+  /// Bornes ISO (YYYY-MM-DD) de la période — contraignent le calendrier.
+  final String? periodStart;
+  final String? periodEnd;
+
+  /// [Fix-TEACHER-ASSESSMENT] Faux pour un enseignant simple : les types
+  /// de catégorie EXAM (compositions, examens) sont filtrés du dropdown —
+  /// leur création est réservée aux administrateurs (appliqué aussi côté
+  /// serveur, 403).
+  final bool isAdmin;
 
   @override
   ConsumerState<_CreateAssessmentSheet> createState() =>
       _CreateAssessmentSheetState();
 }
 
-class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> {
+class _CreateAssessmentSheetState
+    extends ConsumerState<_CreateAssessmentSheet> {
+  static const int _maxNameLength = 255;
+
   final _formKey = GlobalKey<FormState>();
   final _nameCtrl = TextEditingController();
-  AssessmentTypeInfo? _type = CommonAssessmentTypes.defaults.first;
+  AssessmentTypeInfo? _type;
   DateTime? _date = DateTime.now();
-  double _maxScore = CommonAssessmentTypes.defaults.first.defaultMaxScore.toDouble();
+  double _maxScore = 20;
   bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // [Fix-ASSESSMENT-FORM] Date initiale bornée à la période (aujourd'hui
+    // si possible, sinon le début de période).
+    final start = DateTime.tryParse(widget.periodStart ?? '');
+    final end = DateTime.tryParse(widget.periodEnd ?? '');
+    final now = DateTime.now();
+    if (start != null && now.isBefore(start)) {
+      _date = start;
+    } else if (end != null && now.isAfter(end)) {
+      _date = end;
+    } else {
+      _date = now;
+    }
+    if (_date != null) {
+      _date = DateTime(_date!.year, _date!.month, _date!.day);
+    }
+  }
 
   @override
   void dispose() {
@@ -576,6 +811,89 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
 
   @override
   Widget build(BuildContext context) {
+    // Types d'évaluation : endpoint dédié (patch serveur) avec replis —
+    // 1) GET /grades/assessment-types ; 2) types déduits des évaluations
+    // existantes de la matière (assessment_type_id/name dénormalisés) ;
+    // 3) valeurs par défaut.
+    final typesAsync = ref.watch(assessmentTypesProvider);
+    final existingAsync = ref.watch(
+      assessmentsProvider(
+        AssessmentsQuery(
+          classSubjectId: widget.classSubjectId,
+          periodId: widget.periodId,
+        ),
+      ),
+    );
+
+    final serverTypes = typesAsync.value ?? CommonAssessmentTypes.defaults;
+    var types = serverTypes;
+    if (identical(types, CommonAssessmentTypes.defaults)) {
+      final derived = <int, AssessmentTypeInfo>{};
+      for (final a in existingAsync.valueOrNull ?? const <AssessmentDto>[]) {
+        if (a.assessmentTypeId > 0 && a.assessmentTypeName.isNotEmpty) {
+          derived.putIfAbsent(
+            a.assessmentTypeId,
+            () => AssessmentTypeInfo(
+              id: a.assessmentTypeId,
+              name: a.assessmentTypeName,
+              code: a.assessmentTypeName.toUpperCase(),
+              category: a.assessmentTypeCategory.toUpperCase() == 'EXAM'
+                  ? AssessmentCategory.examen
+                  : AssessmentCategory.classe,
+            ),
+          );
+        }
+      }
+      if (derived.isNotEmpty) types = derived.values.toList();
+    }
+
+    // [Fix-TEACHER-ASSESSMENT] Enseignant simple : masquer les types de
+    // catégorie EXAM (compositions et examens) — création réservée aux
+    // administrateurs, appliquée aussi côté serveur (403).
+    final examTypesHidden = !widget.isAdmin &&
+        types.any((t) => t.category == AssessmentCategory.examen);
+    if (examTypesHidden) {
+      types =
+          types.where((t) => t.category != AssessmentCategory.examen).toList();
+    }
+
+    // [Fix-DROPDOWN-ASSERT] La valeur d'un DropdownButton DOIT être un
+    // élément de la liste affichée. On RÉ-ANCRE donc _type sur l'instance
+    // de la liste courante (même id) : l'ancien code ne testait que
+    // l'appartenance PAR ID et conservait une instance issue d'une liste
+    // périmée (défauts serveur puis types déduits) → assertion Flutter
+    // « There should be exactly one item with [DropdownButton]'s value:
+    // Instance of 'AssessmentTypeInfo' » au clic sur « Nouvelle
+    // évaluation ». (Ceinture + bretelles : AssessmentTypeInfo définit
+    // désormais ==/hashCode.)
+    var typeChanged = false;
+    if (_type != null) {
+      final match = types.where((t) => t.id == _type!.id).toList();
+      if (match.isNotEmpty) {
+        if (!identical(_type, match.first)) {
+          _type = match.first;
+          typeChanged = true;
+        }
+      } else if (types.isNotEmpty) {
+        _type = types.first;
+        _maxScore = types.first.defaultMaxScore.toDouble();
+        typeChanged = true;
+      } else {
+        _type = null;
+        typeChanged = true;
+      }
+    } else if (types.isNotEmpty) {
+      // Auto-sélection du premier type.
+      _type = types.first;
+      _maxScore = types.first.defaultMaxScore.toDouble();
+      typeChanged = true;
+    }
+    if (typeChanged) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() {});
+      });
+    }
+
     return Padding(
       padding: EdgeInsets.fromLTRB(
         16,
@@ -590,16 +908,28 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text('Nouvelle évaluation',
-                  style: Theme.of(context).textTheme.titleLarge),
-              const SizedBox(height: 4),
               Text(
-                'class_subject #${widget.classSubjectId} • période #${widget.periodId}',
+                'Nouvelle évaluation',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 4),
+              // [Fix-ASSESSMENT-FORM] Libellés réels (classe • matière •
+              // période) au lieu des identifiants techniques.
+              Text(
+                [
+                  if (widget.classroomName != null) widget.classroomName!,
+                  if (widget.subjectName != null &&
+                      widget.subjectName!.isNotEmpty)
+                    widget.subjectName!,
+                  if (widget.periodName != null)
+                    'Période : ${widget.periodName}',
+                ].join(' • '),
                 style: Theme.of(context).textTheme.bodySmall,
               ),
               const SizedBox(height: 16),
               TextFormField(
                 controller: _nameCtrl,
+                maxLength: _maxNameLength,
                 decoration: const InputDecoration(
                   labelText: 'Nom *',
                   hintText: 'ex : Devoir 1',
@@ -607,53 +937,98 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
                   isDense: true,
                 ),
                 textCapitalization: TextCapitalization.sentences,
-                validator: (v) =>
-                    (v == null || v.trim().isEmpty) ? 'Nom requis' : null,
+                validator: (v) {
+                  final t = (v ?? '').trim();
+                  if (t.isEmpty) return 'Nom requis';
+                  if (t.length > _maxNameLength) {
+                    return 'Le nom ne doit pas dépasser $_maxNameLength caractères';
+                  }
+                  return null;
+                },
               ),
               const SizedBox(height: 12),
-              DropdownButtonFormField<AssessmentTypeInfo>(
-                value: _type,
-                decoration: const InputDecoration(
-                  labelText: 'Type d\'évaluation *',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-                items: CommonAssessmentTypes.defaults
-                    .map((t) => DropdownMenuItem(
+              if (types.isEmpty)
+                const Text(
+                  'Aucun type d\'évaluation n\'est configuré pour ce '
+                  'serveur. Contactez l\'administrateur de l\'établissement.',
+                  style: TextStyle(fontStyle: FontStyle.italic),
+                )
+              else
+                DropdownButtonFormField<AssessmentTypeInfo>(
+                  initialValue: _type,
+                  // [Fix-OVERFLOW] voir _DropdownField.
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Type d\'évaluation *',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  items: types
+                      .map(
+                        (t) => DropdownMenuItem(
                           value: t,
                           child: Text(
                             '${t.name} (${t.category.label})',
                             overflow: TextOverflow.ellipsis,
+                            maxLines: 1,
                           ),
-                        ))
-                    .toList(),
-                onChanged: _onTypeChanged,
-              ),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: _onTypeChanged,
+                  // [Fix-ASSESSMENT-FORM] Type obligatoire (miroir serveur).
+                  validator: (t) =>
+                      t == null ? 'Sélectionnez un type d\'évaluation' : null,
+                ),
               const SizedBox(height: 8),
-              Text(
-                'Astuce : les types d\'évaluation sont gérés côté desktop. '
-                'Si l\'ID attendu par le serveur diffère, la création renverra une erreur.',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              // [Fix-TEACHER-ASSESSMENT] Note explicite pour l'enseignant :
+              // compositions et examens restent créés par l'administration.
+              if (examTypesHidden)
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.info_outline,
+                      size: 16,
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
-              ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'Compositions et examens : créés par '
+                        'l\'administration uniquement.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                      ),
+                    ),
+                  ],
+                ),
+              // [Fix-ERROR-DEV-INFO] Plus d'« astuce » technique sur les
+              // patches serveur : information neutre uniquement.
               const SizedBox(height: 12),
+              // [Fix-ASSESSMENT-FORM] Calendrier borné à la période.
               InkWell(
                 onTap: () async {
+                  final bounds = _periodBounds();
                   final picked = await showDatePicker(
                     context: context,
-                    initialDate: _date ?? DateTime.now(),
-                    firstDate:
-                        DateTime(DateTime.now().year - 2, 1, 1),
-                    lastDate: DateTime(DateTime.now().year + 2, 12, 31),
+                    initialDate:
+                        _clampedToPeriod(_date ?? DateTime.now(), bounds),
+                    firstDate: bounds.start,
+                    lastDate: bounds.end,
+                    helpText: 'Date de l\'évaluation',
                   );
                   if (picked != null) setState(() => _date = picked);
                 },
                 child: InputDecorator(
-                  decoration: const InputDecoration(
-                    labelText: 'Date de l\'évaluation',
-                    border: OutlineInputBorder(),
+                  decoration: InputDecoration(
+                    labelText: 'Date de l\'évaluation *',
+                    border: const OutlineInputBorder(),
                     isDense: true,
+                    helperText: _periodRangeLabel(),
                   ),
                   child: Text(DateFormatter.date(_date)),
                 ),
@@ -669,7 +1044,9 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
               ),
               const SizedBox(height: 20),
               FilledButton.icon(
-                onPressed: _saving ? null : _submit,
+                // [Fix-ASSESSMENT-FORM] Impossible de créer sans type
+                // (le serveur répondrait 404).
+                onPressed: (_saving || types.isEmpty) ? null : _submit,
                 icon: _saving
                     ? const SizedBox(
                         width: 18,
@@ -686,9 +1063,50 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
     );
   }
 
+  /// Bornes de sélection de date : la période si connue, sinon ± 1 an.
+  ({DateTime start, DateTime end}) _periodBounds() {
+    final now = DateTime.now();
+    final start = DateTime.tryParse(widget.periodStart ?? '') ??
+        DateTime(now.year - 1, 1, 1);
+    var end = DateTime.tryParse(widget.periodEnd ?? '') ??
+        DateTime(now.year + 1, 12, 31);
+    if (!end.isAfter(start)) end = start.add(const Duration(days: 1));
+    return (start: start, end: end);
+  }
+
+  /// Bornne [d] à l'intérieur de la période (le DatePicker exige une
+  /// date initiale comprise entre firstDate et lastDate).
+  DateTime _clampedToPeriod(
+    DateTime d,
+    ({DateTime start, DateTime end}) b,
+  ) {
+    if (d.isBefore(b.start)) return b.start;
+    if (d.isAfter(b.end)) return b.end;
+    return d;
+  }
+
+  /// Libellé « du … au … » de la période (contrainte affichée).
+  String? _periodRangeLabel() {
+    final start = DateTime.tryParse(widget.periodStart ?? '');
+    final end = DateTime.tryParse(widget.periodEnd ?? '');
+    if (start == null || end == null) return null;
+    return 'Période : du ${DateFormatter.date(start)} '
+        'au ${DateFormatter.date(end)}';
+  }
+
   Future<void> _submit() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
-    if (_type == null) return;
+    // [Fix-ASSESSMENT-FORM] Feedback explicite si aucun type n'est
+    // disponible/sélectionné (bouton normalement désactivé).
+    if (_type == null) {
+      _showError('Sélectionnez un type d\'évaluation.');
+      return;
+    }
+    // [Fix-ASSESSMENT-FORM] Contrainte client miroir du serveur.
+    if (_maxScore < 1 || _maxScore > 100) {
+      _showError('La note maximale doit être comprise entre 1 et 100.');
+      return;
+    }
     setState(() => _saving = true);
     try {
       await ref.read(gradeControllerProvider).createAssessment(
@@ -708,9 +1126,11 @@ class _CreateAssessmentSheetState extends ConsumerState<_CreateAssessmentSheet> 
         );
       }
     } on ApiException catch (e) {
-      _showError(e.message);
+      // [Fix-ERROR-DEV-INFO] Message serveur humanisé (409 doublon, 400
+      // date hors période… déjà rédigés en français côté serveur).
+      _showError(AppErrorWidget.humanize(e.message));
     } catch (e) {
-      _showError('Erreur : $e');
+      _showError(AppErrorWidget.humanize('Erreur : $e'));
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -757,7 +1177,8 @@ class _NumberStepper extends StatelessWidget {
             icon: const Icon(Icons.remove_circle_outline),
             onPressed: value > min
                 ? () => onChanged(
-                    GradeFormatter.snap((value - step).clamp(min, max)))
+                      GradeFormatter.snap((value - step).clamp(min, max)),
+                    )
                 : null,
           ),
           Expanded(
@@ -772,7 +1193,8 @@ class _NumberStepper extends StatelessWidget {
             icon: const Icon(Icons.add_circle_outline),
             onPressed: value < max
                 ? () => onChanged(
-                    GradeFormatter.snap((value + step).clamp(min, max)))
+                      GradeFormatter.snap((value + step).clamp(min, max)),
+                    )
                 : null,
           ),
         ],
@@ -796,10 +1218,33 @@ class _NumberStepper extends StatelessWidget {
 /// {student_id, student_name, student_matricule, grade_id, value, is_absent,
 /// comment, is_locked}.
 class _GradeEntrySheet extends ConsumerStatefulWidget {
-  const _GradeEntrySheet({required this.assessment, required this.canEdit});
+  const _GradeEntrySheet({
+    required this.assessment,
+    required this.canEdit,
+    this.isAdmin = false,
+    this.classSubjectId,
+    this.periodId,
+    this.classroomId,
+  });
 
   final AssessmentDto assessment;
   final bool canEdit;
+
+  /// Vrai pour les admins (superuser / ADMIN / HEADMASTER) : le verrouillage
+  /// `is_locked` est ignoré — les notes déjà saisies restent modifiables
+  /// (miroir de l'upsert admin du desktop ; nécessite le patch serveur pour
+  /// persister côté API, sinon le serveur compte les existantes en `skipped`).
+  final bool isAdmin;
+
+  /// [Fix-OFFLINE-GRADES-SUBJECT-ID] V10 : matière sélectionnée dans la
+  /// page — sert d'indice à la reconstruction hors-ligne quand l'évaluation
+  /// en cache porte classSubjectId=0 (serveur sans le patch V10).
+  final int? classSubjectId;
+
+  /// Période sélectionnée dans la page — même rôle que
+  /// [classSubjectId] (le filtre de la liste hors-ligne en dépend).
+  final int? periodId;
+  final int? classroomId;
 
   @override
   ConsumerState<_GradeEntrySheet> createState() => _GradeEntrySheetState();
@@ -814,7 +1259,16 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
 
   @override
   Widget build(BuildContext context) {
-    final async = ref.watch(assessmentGradesProvider(widget.assessment.id));
+    final async = ref.watch(
+      assessmentGradesProvider(
+        (
+          assessmentId: widget.assessment.id,
+          classSubjectId: widget.classSubjectId,
+          periodId: widget.periodId,
+          classroomId: widget.classroomId,
+        ),
+      ),
+    );
     final maxHeight = MediaQuery.of(context).size.height * 0.85;
 
     return ConstrainedBox(
@@ -864,8 +1318,11 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.visibility_outlined,
-                        size: 14, color: Colors.blueGrey.shade700),
+                    Icon(
+                      Icons.visibility_outlined,
+                      size: 14,
+                      color: Colors.blueGrey.shade700,
+                    ),
                     const SizedBox(width: 6),
                     Text(
                       'Lecture seule (GRADE_READ)',
@@ -880,7 +1337,13 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
             ],
             const Divider(height: 24),
             Expanded(
+              // [Fix-HEARTBEAT-REBUILD] skipLoadingOnReload : pendant un
+              // re-fetch (invalidation, heartbeat), on garde la liste
+              // précédente affichée au lieu de la remplacer par un spinner —
+              // sinon les lignes étaient disposées et les saisies en cours
+              // (contrôleurs, focus, clavier) réinitialisées.
               child: async.when(
+                skipLoadingOnReload: true,
                 data: (grades) {
                   // Initialise paresseusement les brouillons sans écraser
                   // les modifications déjà effectuées par l'utilisateur.
@@ -904,18 +1367,26 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
                         grade: draft,
                         maxScore: widget.assessment.maxScore,
                         editable: widget.canEdit,
+                        isAdmin: widget.isAdmin,
                         onChanged: (g) =>
                             setState(() => _drafts[original.studentId] = g),
                       );
                     },
                   );
                 },
-                loading: () =>
-                    const AppLoading(label: 'Chargement des notes…'),
+                loading: () => const AppLoading(label: 'Chargement des notes…'),
                 error: (e, _) => AppErrorWidget(
                   message: e.toString(),
                   onRetry: () => ref.invalidate(
-                      assessmentGradesProvider(widget.assessment.id)),
+                    assessmentGradesProvider(
+                      (
+                        assessmentId: widget.assessment.id,
+                        classSubjectId: widget.classSubjectId,
+                        periodId: widget.periodId,
+                        classroomId: widget.classroomId,
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -948,19 +1419,35 @@ class _GradeEntrySheetState extends ConsumerState<_GradeEntrySheet> {
           .saveGrades(widget.assessment.id, grades);
       if (mounted) {
         Navigator.of(context).pop();
+        String msg;
+        if (resp.offlineQueued) {
+          msg = 'Enregistré hors-ligne — la synchronisation aura lieu à la '
+              'prochaine connexion au serveur.';
+        } else if (resp.queuedCount > 0) {
+          msg = '${resp.savedCount} note(s) enregistrée(s) ; '
+              '${resp.queuedCount} modification(s) en attente de validation '
+              'admin.';
+        } else if (resp.skippedCount > 0) {
+          msg = '${resp.savedCount} note(s) enregistrée(s), '
+              '${resp.skippedCount} inchangée(s).';
+        } else {
+          msg = '${resp.savedCount} note(s) enregistrée(s).';
+        }
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              resp.skippedCount > 0
-                  ? '${resp.savedCount} note(s) enregistrée(s), '
-                      '${resp.skippedCount} ignorée(s) (verrouillées).'
-                  : '${resp.savedCount} note(s) enregistrée(s).',
-            ),
-          ),
+          SnackBar(content: Text(msg), duration: const Duration(seconds: 4)),
         );
       }
     } on ApiException catch (e) {
       _showError(e.message);
+    } on DioException catch (e) {
+      // [Fix-OFFLINE-GRADES-NETWORK] V15 : les pannes RÉSEAU basculent déjà
+      // vers l'outbox dans le contrôleur (plus jamais de saisie perdue) —
+      // il ne reste ici que des erreurs serveur réelles (403, 409, 422…) :
+      // message humanisé au lieu d'un « DioException » brut.
+      final api = (e.error is ApiException)
+          ? e.error as ApiException
+          : dioErrorToApiException(e);
+      _showError(api.message);
     } catch (e) {
       _showError('Erreur : $e');
     } finally {
@@ -991,11 +1478,15 @@ class _GradeRow extends StatefulWidget {
     required this.maxScore,
     required this.editable,
     required this.onChanged,
+    this.isAdmin = false,
   });
 
   final GradeEntryDto grade;
   final double maxScore;
   final bool editable;
+
+  /// Admin : le verrou `is_locked` n'est pas appliqué (notes modifiables).
+  final bool isAdmin;
   final ValueChanged<GradeEntryDto> onChanged;
 
   @override
@@ -1043,15 +1534,10 @@ class _GradeRowState extends State<_GradeRow> {
     bool? isAbsent,
     String? comment,
   }) =>
-      GradeEntryDto(
-        studentId: widget.grade.studentId,
-        studentName: widget.grade.studentName,
-        studentMatricule: widget.grade.studentMatricule,
-        gradeId: widget.grade.gradeId,
+      widget.grade.copyWith(
         value: value,
-        isAbsent: isAbsent ?? widget.grade.isAbsent,
-        comment: comment ?? widget.grade.comment,
-        isLocked: widget.grade.isLocked,
+        isAbsent: isAbsent,
+        comment: comment,
       );
 
   @override
@@ -1076,9 +1562,12 @@ class _GradeRowState extends State<_GradeRow> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final locked = widget.grade.isLocked;
+    // [Grade-Validation] Fin du verrouillage des notes existantes : les
+    // champs restent éditables (enseignant : la modification devient une
+    // proposition à valider/rejeter par un admin ; admin : application
+    // directe). La ligne porte une MARQUE de statut (voir _GradeMarkChip).
     final readOnly = !widget.editable;
-    final disabled = locked || readOnly;
+    final disabled = readOnly;
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
       child: Padding(
@@ -1102,57 +1591,53 @@ class _GradeRowState extends State<_GradeRow> {
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                          if (locked)
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: Colors.orange.shade50,
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(Icons.lock,
-                                      size: 11, color: Colors.orange.shade700),
-                                  const SizedBox(width: 2),
-                                  Text(
-                                    'Verrouillée',
-                                    style: theme.textTheme.labelSmall?.copyWith(
-                                      color: Colors.orange.shade700,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          if (readOnly && !locked)
-                            Padding(
-                              padding: const EdgeInsets.only(left: 4),
-                              child: Icon(Icons.visibility_outlined,
-                                  size: 14,
-                                  color: theme.colorScheme.onSurfaceVariant),
+                          if (readOnly)
+                            Icon(
+                              Icons.visibility_outlined,
+                              size: 14,
+                              color: theme.colorScheme.onSurfaceVariant,
                             ),
                         ],
                       ),
                       if (widget.grade.studentMatricule.isNotEmpty)
-                        Text(widget.grade.studentMatricule,
-                            style: theme.textTheme.bodySmall),
+                        Text(
+                          widget.grade.studentMatricule,
+                          style: theme.textTheme.bodySmall,
+                        ),
+                      // [Fix-GRADE-CHIP-OVERFLOW] La marque de statut passe
+                      // sur sa PROPRE ligne (largeur bornée par la colonne,
+                      // texte sur 2 lignes max) : l'ancienne position — dans
+                      // la Row du nom, sans contrainte — débordait de 88 px
+                      // (« En attente de validation (14 → 16) ») et MASQUAIT
+                      // le nom de l'élève et le champ de la note.
+                      _GradeMarkChip(grade: widget.grade),
                     ],
                   ),
                 ),
                 const SizedBox(width: 8),
+                // [Fix-GRADE-INPUT] Le « / 20 » était en PRÉFIXE à l'intérieur
+                // d'un champ de 90 px : la zone de frappe réelle ne laissait
+                // voir qu'un caractère et le « /20 » apparaissait AVANT la
+                // note. On passe le barème en SUFFIXE et on élargit le champ.
                 SizedBox(
-                  width: 90,
+                  width: 118,
                   child: TextField(
                     controller: _valueCtrl,
                     keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true),
+                      decimal: true,
+                    ),
                     enabled: !widget.grade.isAbsent && !disabled,
                     decoration: InputDecoration(
-                      prefixText: '/ ${widget.maxScore.toStringAsFixed(0)}  ',
+                      suffixText: '/ ${widget.maxScore.toStringAsFixed(0)}',
+                      suffixStyle: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
                       isDense: true,
                       border: const OutlineInputBorder(),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 10,
+                      ),
                     ),
                     textAlign: TextAlign.center,
                   ),
@@ -1171,9 +1656,12 @@ class _GradeRowState extends State<_GradeRow> {
                               // arrière (décocher « Absent » restaure la note
                               // saisie). Si on coche Absent, value=null côté
                               // serveur.
-                              widget.onChanged(_copyWith(
+                              widget.onChanged(
+                                _copyWith(
                                   value: absent ? null : widget.grade.value,
-                                  isAbsent: absent));
+                                  isAbsent: absent,
+                                ),
+                              );
                             },
                     ),
                     const Text('Abs', style: TextStyle(fontSize: 11)),
@@ -1185,19 +1673,116 @@ class _GradeRowState extends State<_GradeRow> {
             TextField(
               controller: _commentCtrl,
               enabled: !disabled,
-              decoration: InputDecoration(
+              decoration: const InputDecoration(
                 isDense: true,
                 hintText: 'Commentaire (optionnel)',
-                border: const OutlineInputBorder(),
-                prefixIcon: const Icon(Icons.comment_outlined, size: 18),
-                contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 10, vertical: 10),
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.comment_outlined, size: 18),
+                contentPadding: EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 10,
+                ),
               ),
               style: theme.textTheme.bodySmall,
               maxLines: 1,
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// [Grade-Validation] Badge de marque d'une note :
+///   - 'pending_sync' (saisie hors-ligne) : « Sera synchronisée » ;
+///   - 'PENDING' (serveur) : « X → Y · en attente de validation » ;
+///   - 'APPROVED' : « Modification validée » ;
+///   - 'REJECTED' : « Modifiée — rejetée (valeur actuelle conservée) » ;
+///   - sinon : pas de badge (note ordinaire).
+class _GradeMarkChip extends StatelessWidget {
+  const _GradeMarkChip({required this.grade});
+
+  final GradeEntryDto grade;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final status = grade.modificationStatus ??
+        (grade.localSyncMark == 'pending_sync' ? 'pending_sync' : null);
+    if (status == null) return const SizedBox.shrink();
+
+    String label;
+    Color fg;
+    Color bg;
+    IconData icon;
+    switch (status) {
+      case 'pending_sync':
+        label = 'Sera synchronisée';
+        fg = Colors.blue.shade800;
+        bg = Colors.blue.shade50;
+        icon = Icons.sync_outlined;
+        break;
+      case 'PENDING':
+        final oldV = grade.modification?.oldValue;
+        final newV = grade.modification?.newValue ??
+            grade.value; // hors-ligne : valeur proposée affichée
+        label = oldV != null
+            ? 'En attente de validation (${oldV.toStringAsFixed(oldV.truncateToDouble() == oldV ? 0 : 1)} → ${newV?.toStringAsFixed(newV.truncateToDouble() == newV ? 0 : 1) ?? '?'})'
+            : 'En attente de validation';
+        fg = Colors.orange.shade800;
+        bg = Colors.orange.shade50;
+        icon = Icons.hourglass_top_outlined;
+        break;
+      case 'APPROVED':
+        label = 'Modification validée';
+        fg = Colors.green.shade800;
+        bg = Colors.green.shade50;
+        icon = Icons.check_circle_outline;
+        break;
+      case 'REJECTED':
+        label = 'Modifiée — rejetée (ancienne valeur conservée)';
+        fg = Colors.red.shade700;
+        bg = Colors.red.shade50;
+        icon = Icons.block_outlined;
+        break;
+      default:
+        return const SizedBox.shrink();
+    }
+
+    // [Fix-GRADE-CHIP-OVERFLOW] Le conteneur est désormais placé SOUS le
+    // nom (largeur bornée par la colonne parente) : la Row interne reçoit
+    // des contraintes finies, son Flexible peut rétrécir et le texte se
+    // replie sur 2 lignes au lieu de déborder de 88/13 px.
+    return Container(
+      margin: const EdgeInsets.only(top: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Icon(icon, size: 12, color: fg),
+          ),
+          const SizedBox(width: 4),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              softWrap: true,
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: fg,
+                fontWeight: FontWeight.w600,
+                height: 1.2,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

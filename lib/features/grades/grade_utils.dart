@@ -14,8 +14,6 @@ library;
 
 import 'package:flutter/material.dart';
 
-import '../../core/config/constants.dart';
-
 /// Calcul des mentions et couleurs associées (miroir de grade_service.py).
 class MentionHelper {
   MentionHelper._();
@@ -41,7 +39,8 @@ class MentionHelper {
   }
 
   /// Retourne la couleur de fond (clair) pour un badge de mention.
-  static Color backgroundColor(double? average) => color(average).withValues(alpha: 0.12);
+  static Color backgroundColor(double? average) =>
+      color(average).withValues(alpha: 0.12);
 
   /// Indique si la moyenne est de réussite (≥ 10).
   static bool isPassing(double? average) => average != null && average >= 10;
@@ -49,9 +48,11 @@ class MentionHelper {
 
 /// Type d'évaluation (AssessmentType côté desktop).
 ///
-/// ⚠️ Aucun endpoint REST ne liste les types d'évaluation pour le moment.
-/// Ces valeurs sont codées en dur en attendant l'endpoint `/assessment-types`.
-/// Les IDs doivent correspondre aux IDs de la table `assessment_types` côté serveur.
+/// Chargeable dynamiquement via `GET /grades/assessment-types` (patch serveur
+/// GeTech-SMS — [assessmentTypesProvider]) avec repli sur
+/// [CommonAssessmentTypes.defaults]. Les types peuvent aussi être déduits
+/// des évaluations existantes (`assessment_type_id`/`assessment_type_name`
+/// dénormalisés dans `AssessmentResponse`).
 class AssessmentTypeInfo {
   final int id;
   final String name;
@@ -66,6 +67,34 @@ class AssessmentTypeInfo {
     required this.category,
     this.defaultMaxScore = 20,
   });
+
+  factory AssessmentTypeInfo.fromJson(Map<String, dynamic> j) {
+    final code = j['code'] as String? ?? '';
+    final categoryCode = (j['category'] as String?)?.toUpperCase() ?? 'CLASS';
+    return AssessmentTypeInfo(
+      id: (j['id'] as num?)?.toInt() ?? 0,
+      name: j['name'] as String? ?? code,
+      code: code,
+      category: categoryCode == 'EXAM'
+          ? AssessmentCategory.examen
+          : AssessmentCategory.classe,
+      defaultMaxScore: (j['default_max_score'] as num?)?.toInt() ?? 20,
+    );
+  }
+
+  /// [Fix-DROPDOWN-ASSERT] Égalité par (id, code) : DropdownButton compare
+  /// les éléments par `==` — sans cette redéfinition, deux instances
+  /// distinctes décrivant le MÊME type (liste serveur rafraîchie vs
+  /// sélection précédente) faisaient échouer l'assertion
+  /// « There should be exactly one item with [DropdownButton]'s value »
+  /// au clic sur « Nouvelle évaluation ».
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AssessmentTypeInfo && other.id == id && other.code == code;
+
+  @override
+  int get hashCode => Object.hash(id, code);
 }
 
 /// Catégorie d'évaluation (AssessmentCategory côté desktop).
@@ -86,8 +115,10 @@ enum AssessmentCategory {
 class CommonAssessmentTypes {
   CommonAssessmentTypes._();
 
-  /// Types d'évaluation prédéfinis (IDs typiques).
-  /// En production, ces IDs doivent correspondre à la table `assessment_types`.
+  /// Types d'évaluation prédéfinis (repli — IDs typiques du seed de
+  /// développement). En production, `GET /grades/assessment-types` (patch
+  /// serveur) fournit les IDs réels ; à défaut, les types sont déduits des
+  /// évaluations existantes de la matière.
   static const List<AssessmentTypeInfo> defaults = [
     AssessmentTypeInfo(
       id: 1,
@@ -104,7 +135,7 @@ class CommonAssessmentTypes {
     AssessmentTypeInfo(
       id: 3,
       name: 'Composition',
-      code: 'COMPOSITION',
+      code: 'COMPO',
       category: AssessmentCategory.examen,
     ),
   ];

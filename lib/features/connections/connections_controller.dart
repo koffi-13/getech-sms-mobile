@@ -6,11 +6,12 @@
 library;
 
 import 'dart:io' show Platform;
-import 'dart:math' show Random;
 
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart' as log_pkg;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../core/auth/secure_storage.dart';
 import '../../core/network/api_endpoints.dart';
@@ -19,6 +20,7 @@ import '../../core/network/dio_client.dart';
 import '../../core/sync/sync_engine.dart';
 import '../../shared/models/auth_dto.dart';
 import 'connection_state.dart';
+import 'server_profiles.dart';
 
 final log_pkg.Logger _log = log_pkg.Logger(
   printer: log_pkg.PrettyPrinter(noBoxingByDefault: true),
@@ -49,16 +51,70 @@ class ConnectionsController {
   Dio get _dio => _ref.read(dioProvider);
   SecureStorage get _storage => _ref.read(secureStorageProvider);
 
+  /// [Fix-BAD-LAN-IP] Candidates de l'appairage en cours (toutes les URLs
+  /// du QR) : persistées comme replis du profil au moment du succès.
+  List<String>? _pairingCandidateUrls;
+
+  /// Replis en attente de persistance post-completePairing.
+  List<String>? _pendingAltUrls;
+
   /// Appairage à partir d'un payload QR code (`{ip, port, establishment_code, pairing_token}`).
   ///
   /// Construit l'URL serveur `http://<ip>:<port>/api/v1` et délègue à [_doPair].
   Future<PairDeviceResponse> pairWithPayload(PairingPayload payload, {bool tolerateClockSkew = true}) {
-    return _doPair(
-      serverUrl: payload.serverUrl,
+    // [Fix-BAD-LAN-IP] Le QR transporte désormais TOUTES les IPs LAN du
+    // poste (ips[]) : la route par défaut du desktop désigne souvent un
+    // adaptateur virtuel (vEthernet Hyper-V/WSL, VPN, pont Docker)
+    // injoignable depuis le téléphone — au lieu de s'enliser 8 s en timeout
+    // sur la première IP, on essaie chaque candidate AVANT le repli
+    // résilient. Une candidate qui répond donne un appairage réel.
+    final urls = payload.serverUrls;
+    _pairingCandidateUrls = urls;
+    return _pairOverCandidates(
+      urls: urls,
       establishmentCode: payload.establishmentCode,
       pairingToken: payload.pairingToken,
       tolerateClockSkew: tolerateClockSkew,
     );
+  }
+
+  /// Essaie chaque URL candidate ; ne bascule en repli résilient qu'après
+  /// épuisement de la liste.
+  Future<PairDeviceResponse> _pairOverCandidates({
+    required List<String> urls,
+    required String establishmentCode,
+    required String pairingToken,
+    bool tolerateClockSkew = true,
+  }) async {
+    Object? lastError;
+    for (var i = 0; i < urls.length; i++) {
+      final isLast = i == urls.length - 1;
+      try {
+        return await _doPair(
+          serverUrl: urls[i],
+          establishmentCode: establishmentCode,
+          pairingToken: pairingToken,
+          tolerateClockSkew: tolerateClockSkew,
+        );
+      } on PairingException catch (e) {
+        // Une erreur métier (token refusé, 404 module absent, 422…)
+        // ne dépend PAS de l'adresse : inutile d'essayer les autres.
+        if (e.statusCode != null && e.statusCode! < 500) {
+          rethrow;
+        }
+        lastError = e;
+        _log.w('Appairage : candidate ${urls[i]} en échec ($e)'
+            '${isLast ? '' : ' — essai suivant'}');
+      } catch (e) {
+        lastError = e;
+        _log.w('Appairage : candidate ${urls[i]} en échec ($e)'
+            '${isLast ? '' : ' — essai suivant'}');
+      }
+    }
+    if (lastError is PairingException) {
+      throw lastError;
+    }
+    throw PairingException('Échec de l\'appairage : $lastError');
   }
 
   /// Appairage manuel : [serverUrl] doit déjà contenir le préfixe
@@ -105,14 +161,50 @@ class ConnectionsController {
       final data = resp.data is Map ? resp.data as Map<String, dynamic> : <String, dynamic>{};
       final pairResp = PairDeviceResponse.fromJson(data);
 
-      // Succès immédiat : Persiste l'état de connexion normal.
-      await _ref.read(connectionProvider.notifier).configure(
+      // [Fix-BAD-LAN-IP] Persiste les URLs de repli reçues du QR (autres
+      // IPs LAN du poste) pour le profil actif : le heartbeat les pinguera
+      // si l'URL principale timeout (adaptateur virtuel du desktop).
+      // ⚠ AVANT completePairing : au retour, le profil est déjà appliqué
+      // et les replis doivent être relus par _applyProfile.
+      try {
+        final candidateUrls = <String>[serverUrl];
+        for (final u in _pairingCandidateUrls ?? const <String>[]) {
+          if (u.isNotEmpty && u != serverUrl) candidateUrls.add(u);
+        }
+        final prefs = await SharedPreferences.getInstance();
+        // Le profil n'existe pas encore : la clé est dérivée du serverUrl
+        // (id de profil = hash stable de l'URL, cf. upsertFromPairing).
+        // On écrit donc APRÈS completePairing via l'id actif.
+        _pendingAltUrls = candidateUrls;
+      } catch (_) {/* non bloquant */}
+
+      // [Multi-serveurs] L'appairage réussi est enregistré dans le registre
+      // (nouveau profil ou re-appairage du même serveur) et devient actif.
+      await _ref
+          .read(multiServerControllerProvider)
+          .completePairing(
             serverUrl: serverUrl,
             establishmentCode: establishmentCode,
             deviceToken: pairResp.deviceToken,
             deviceId: pairResp.deviceId.toString(),
-            tolerateClockSkew: tolerateClockSkew,
           );
+
+      // [Fix-BAD-LAN-IP] Maintenant le profil est actif : persister les
+      // replis sous sa clé ET les injecter dans l'état de connexion.
+      try {
+        final activeId = _ref.read(activeProfileIdProvider);
+        if (activeId != null && _pendingAltUrls != null) {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setStringList(
+            'profile_${activeId}_alt_urls',
+            _pendingAltUrls!,
+          );
+          _ref
+              .read(connectionProvider.notifier)
+              .setAlternateServerUrls(_pendingAltUrls!);
+        }
+      } catch (_) {/* non bloquant */}
+      _pendingAltUrls = null;
 
       // Invalide les caches dépendant de l'appairage.
       _ref.invalidate(serverInfoProvider);
@@ -133,16 +225,24 @@ class ConnectionsController {
       final isClockSkewSuspect = e.response?.statusCode == 400;
 
       if (isNetworkError || isClockSkewSuspect) {
-        // On configure en mode "Force Offline" pour permettre l'accès à l'app
-        // en attendant la synchro.
-        await _ref.read(connectionProvider.notifier).configure(
+        // Mode résilient : le serveur est injoignable ou le token est
+        // rejeté (décalage d'horloge). On enregistre quand même le serveur
+        // dans le registre (token d'appairage temporaire) en mode forcé
+        // hors-ligne — l'accès à l'app reste possible en attendant.
+        await _ref
+            .read(multiServerControllerProvider)
+            .completePairing(
               serverUrl: serverUrl,
               establishmentCode: establishmentCode,
-              deviceToken: pairingToken.trim(), // On utilise le pairing token comme token temporaire
-              deviceId: 'pending',
-              forceOffline: true,
-              tolerateClockSkew: tolerateClockSkew,
+              deviceToken: pairingToken.trim(),
             );
+        // [Fix-PAIRING-STUCK-OFFLINE] V26 — mode « appairage différé » :
+        // transitoire et non persisté (l'ancien setForceOffline(true)
+        // verrouillait l'app « hors ligne » sans qu'aucun mécanisme ne le
+        // relâche — heartbeat, retour réseau et checkStatus sont tous
+        // conditionnés à !forceOffline). Ici le heartbeat continue de
+        // pinger et le mode est relâché dès que le serveur répond.
+        _ref.read(connectionProvider.notifier).setPairingForcedOffline();
 
         return PairDeviceResponse(
           deviceToken: pairingToken.trim(),
@@ -177,13 +277,14 @@ class ConnectionsController {
             'correcte. Le pare-feu du desktop doit autoriser le port.';
       case DioExceptionType.connectionError:
         return 'Connexion refusée ou serveur injoignable. Vérifiez l\'IP et '
-            'le port. Assurez-vous que l\'endpoint /api/v1/devices/pair '
-            'existe sur le serveur desktop.';
+            'le port, et que le serveur desktop est démarré.';
       case DioExceptionType.badResponse:
         final code = e.response?.statusCode;
         if (code == 404) {
-          return 'Endpoint /devices/pair introuvable (404). '
-              'Le serveur desktop doit implémenter cet endpoint.';
+          // [Fix-ERROR-DEV-INFO] pas de jargon d'endpoint côté utilisateur.
+          return 'La fonctionnalité d\'appairage n\'est pas disponible sur '
+              'ce serveur. Mettez le serveur GeTech-SMS à jour puis '
+              'réessayez.';
         }
         if (code == 400) return 'Token d\'appairage invalide ou expiré.';
         if (code == 422) {
@@ -199,17 +300,45 @@ class ConnectionsController {
   /// Récupère ou génère un UUID d'appareil persistant (Keystore/Keychain).
   Future<String> _ensureDeviceUuid() async {
     final existing = await _storage.getDeviceId();
-    if (existing != null && existing.isNotEmpty) return existing;
+    if (existing != null && existing.isNotEmpty) {
+      // [Fix-SYNC-IDEMPOTENCE] Migration : les anciens device_uuid au format
+      // 'mobile-<ms>-<randhex>' sont remplacés par un UUID v4 standard
+      // pour assurer la compatibilité avec le serveur (qui attend un UUID
+      // canonique pour les contraintes d'unicité).
+      if (_isLegacyDeviceUuid(existing)) {
+        final newUuid = _generateDeviceUuid();
+        await _storage.saveDeviceId(newUuid);
+        _log.i('device_uuid migré : $existing → $newUuid');
+        return newUuid;
+      }
+      return existing;
+    }
     final uuid = _generateDeviceUuid();
     await _storage.saveDeviceId(uuid);
     return uuid;
   }
 
-  /// Génère un UUID pseudo-aléatoire : `mobile-<ms>-<randhex>`.
+  /// Détecte les anciens device_uuid au format pseudo-UUID.
+  /// Format legacy : 'mobile-<ms>-<randhex>' (ex: 'mobile-1725900000000-a3f2c1d0').
+  /// Format UUID v4 canonique : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.
+  static bool _isLegacyDeviceUuid(String uuid) {
+    if (uuid.startsWith('mobile-')) return true;
+    // Vérifier le format UUID v4 canonique (8-4-4-4-12 hex digits).
+    final uuidV4Regex = RegExp(
+      r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+      caseSensitive: false,
+    );
+    return !uuidV4Regex.hasMatch(uuid);
+  }
+
+  /// Génère un UUID v4 standard via le package `uuid`.
+  ///
+  /// [Fix-SYNC-IDEMPOTENCE] Avant : format pseudo-UUID 'mobile-<ms>-<randhex>'
+  /// qui n'était pas canonique et pouvait causer des problèmes de tri/unicité
+  /// côté serveur. Maintenant : UUID v4 RFC 4122 standard, universellement
+  /// reconnu par toutes les plateformes et bases de données.
   static String _generateDeviceUuid() {
-    final ms = DateTime.now().millisecondsSinceEpoch;
-    final rand = Random.secure().nextInt(1 << 32).toRadixString(16).padLeft(8, '0');
-    return 'mobile-$ms-$rand';
+    return const Uuid().v4();
   }
 
   /// Nom d'appareil affiché côté serveur.

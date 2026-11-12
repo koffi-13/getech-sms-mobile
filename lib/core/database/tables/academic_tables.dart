@@ -4,6 +4,11 @@ library;
 import 'package:drift/drift.dart';
 
 /// Classe.
+///
+/// Colonnes dénormalisées (headTeacherName, levelName, cycleName, cycleId,
+/// seriesName, currentStudentsCount) persistées depuis `ClassroomResponse`
+/// afin que le titulaire, le niveau et l'effectif restent affichables
+/// hors-ligne (le cache Drift est la source de repli de la liste Classes).
 class Classrooms extends Table {
   IntColumn get id => integer().autoIncrement()();
   TextColumn get name => text().withLength(min: 1, max: 128)();
@@ -14,6 +19,14 @@ class Classrooms extends Table {
   IntColumn get teacherId => integer().nullable()();
   IntColumn get capacity => integer().withDefault(const Constant(0))();
   IntColumn get schoolYearId => integer().nullable()();
+  IntColumn get establishmentId => integer().nullable()();
+  TextColumn get headTeacherName => text().nullable()();
+  TextColumn get levelName => text().nullable()();
+  TextColumn get cycleName => text().nullable()();
+  IntColumn get cycleId => integer().nullable()();
+  TextColumn get seriesName => text().nullable()();
+  IntColumn get currentStudentsCount => integer().nullable()();
+  BoolColumn get isActive => boolean().withDefault(const Constant(true))();
   DateTimeColumn get syncedAt => dateTime().nullable()();
   BoolColumn get isDirty => boolean().withDefault(const Constant(false))();
   BoolColumn get isDeleted => boolean().withDefault(const Constant(false))();
@@ -41,6 +54,24 @@ class ClassSubjects extends Table {
   BoolColumn get isDeleted => boolean().withDefault(const Constant(false))();
 }
 
+/// Référentiel des types d'évaluation (miroir serveur `assessment_types`).
+///
+/// [Fix-RANKING-OFFLINE] V22 — la catégorie (CLASS / EXAM) est la donnée
+/// clé de la formule du classement côté serveur :
+///   moyenne_matière = (moyenne_classe + note_composition) / 2
+/// Sans cette table locale, le classement hors-ligne ne pouvait pas
+/// distinguer devoirs/interros (CLASS) des compositions (EXAM) et aurait
+/// calculé des moyennes différentes de l'affichage en ligne.
+class AssessmentTypes extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  TextColumn get code => text().withLength(min: 1, max: 32)();
+  TextColumn get name => text().nullable()();
+  TextColumn get category => text().withDefault(const Constant('CLASS'))();
+  DateTimeColumn get syncedAt => dateTime().nullable()();
+  BoolColumn get isDirty => boolean().withDefault(const Constant(false))();
+  BoolColumn get isDeleted => boolean().withDefault(const Constant(false))();
+}
+
 /// Évaluation.
 class Assessments extends Table {
   IntColumn get id => integer().autoIncrement()();
@@ -48,6 +79,9 @@ class Assessments extends Table {
   IntColumn get periodId => integer().nullable()();
   TextColumn get title => text().withLength(min: 1, max: 255)();
   TextColumn get type => text().withDefault(const Constant('DEVOIR'))();
+  // [Fix-RANKING-OFFLINE] V22 — FK vers le référentiel local
+  // assessment_types : catégorie CLASS/EXAM pour le calcul hors-ligne.
+  IntColumn get assessmentTypeId => integer().nullable()();
   DateTimeColumn get date => dateTime().nullable()();
   RealColumn get maxScore => real().withDefault(const Constant(20.0))();
   RealColumn get coefficient => real().withDefault(const Constant(1.0))();
@@ -67,4 +101,26 @@ class Grades extends Table {
   DateTimeColumn get syncedAt => dateTime().nullable()();
   BoolColumn get isDirty => boolean().withDefault(const Constant(false))();
   BoolColumn get isDeleted => boolean().withDefault(const Constant(false))();
+
+  // [Fix-SYNC-IDEMPOTENCE] Champs pour la synchronisation offline-first.
+  // idempotency_key : UUID v4 unique par écriture — permet au serveur de
+  //   détecter les doublons en cas de retry réseau (coupure, timeout).
+  // device_uuid : identifie l'appareil ayant créé/modifié l'enregistrement.
+  // sync_version : horloge logique incrémentée à chaque modification locale.
+  TextColumn get idempotencyKey => text().nullable()();
+  TextColumn get deviceUuid => text().nullable()();
+  IntColumn get syncVersion => integer().withDefault(const Constant(0))();
+
+  // [Grade-Validation] (schéma v3) — marques de la file de validation :
+  // syncStatus : null (synchrone) | 'queued' (proposition envoyée, en
+  // attente de validation admin) | 'rejected' (proposition rejetée,
+  // l'ancienne valeur est conservée).
+  TextColumn get syncStatus => text().nullable()();
+
+  // Valeur PROPOSÉE (différée) : ce que l'utilisateur a saisi/veut voir
+  // appliqué une fois validé par un admin. La colonne `value` reste la
+  // valeur SERVEUR actuelle.
+  RealColumn get proposedValue => real().nullable()();
+  BoolColumn get proposedIsAbsent => boolean().nullable()();
+  TextColumn get proposedComments => text().nullable()();
 }

@@ -17,8 +17,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/auth/auth_state.dart';
+import '../../core/auth/teacher_scope.dart';
 import '../../core/config/constants.dart';
-import '../../core/utils/formatters.dart';
 import '../../core/utils/permissions.dart';
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/classroom_dto.dart';
@@ -33,7 +33,15 @@ class RankingPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(authProvider);
-    if (!hasPermission(auth.permissions, RbacPermissions.gradeRead)) {
+    final canRead = hasPermission(auth.permissions, RbacPermissions.gradeRead);
+    // [Fix-TEACHER-GUARD] Repli enseignant (miroir de la saisie des notes) :
+    // un enseignant dont le RBAC serveur est incomplet garde accès au
+    // classement — sinon il voyait l'onglet mais se heurtait à « Permission
+    // insuffisante ».
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final teacherish = auth.hasDeclaredTeacherRole ||
+        scopeAsync.maybeWhen(data: (s) => s.isTeacher, orElse: () => false);
+    if (!canRead && !teacherish && !auth.isSuperuser) {
       return Scaffold(
         appBar: AppBar(title: const Text('Classement')),
         body: const EmptyState(
@@ -63,13 +71,31 @@ class _RankingBodyState extends ConsumerState<_RankingBody> {
   @override
   Widget build(BuildContext context) {
     final conn = ref.watch(connectionProvider);
+    final auth = ref.watch(authProvider);
     final classrooms = ref.watch(classroomsForGradesProvider);
-    final periods = ref.watch(periodsProvider);
+    // Périodes filtrées par le cycle de la classe sélectionnée (corrige le
+    // mélange collège/lycée — miroir du desktop).
+    final periods = _classroomId == null
+        ? const AsyncValue<List<PeriodDto>>.data([])
+        : ref.watch(periodsForClassroomProvider(_classroomId!));
     final subjects = _classroomId == null
         ? null
         : ref.watch(classSubjectsProvider(_classroomId!));
 
-    // Auto-sélection de la première classe/période si non choisie.
+    // [Fix-RANKING-TEACHER] Règles d'accès au classement :
+    // - admin / headmaster : tous les modes, toutes les classes ;
+    // - prof principal (titulaire) de la classe : classement par matière
+    //   (TOUTES les matières de la classe) ET moyenne globale ;
+    // - enseignant simple : classement UNIQUEMENT par les matières qu'il
+    //   enseigne dans la classe.
+    final userId = auth.user?.id;
+    final isHeadOfClassroom = _classroomId != null &&
+        userId != null &&
+        (classrooms.valueOrNull ?? const <ClassroomDto>[])
+            .any((c) => c.id == _classroomId && c.headTeacherId == userId);
+    final canUseGlobalRanking = auth.isAdminOrHeadmaster || isHeadOfClassroom;
+
+    // Auto-sélection de la première classe, puis de la période active.
     classrooms.whenData((list) {
       if (_classroomId == null && list.isNotEmpty) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -79,13 +105,21 @@ class _RankingBodyState extends ConsumerState<_RankingBody> {
     });
     periods.whenData((list) {
       if (_periodId == null && list.isNotEmpty) {
-        final active =
-            list.firstWhereOrNull((p) => p.isActive) ?? list.first;
+        final active = list.firstWhereOrNull((p) => p.isActive) ?? list.first;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) setState(() => _periodId = active.id);
         });
       }
     });
+
+    // Un enseignant simple ne peut pas rester en mode « Moyenne globale ».
+    if (!canUseGlobalRanking && _mode == RankingMode.period) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _mode == RankingMode.period) {
+          setState(() => _mode = RankingMode.subject);
+        }
+      });
+    }
 
     final query = (_classroomId != null && _periodId != null)
         ? RankingQuery(
@@ -98,81 +132,117 @@ class _RankingBodyState extends ConsumerState<_RankingBody> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('Classement')),
-      body: !conn.canReachServer
-          ? const EmptyState(
-              title: 'Hors-ligne',
-              message: 'Le classement nécessite une connexion au serveur.',
-              icon: Icons.cloud_off,
-            )
-          : ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                _FiltersCard(
-                  classrooms: classrooms,
-                  periods: periods,
-                  subjects: subjects,
-                  classroomId: _classroomId,
-                  periodId: _periodId,
-                  mode: _mode,
-                  subjectId: _subjectId,
-                  onClassroomChanged: (id) => setState(() {
-                    _classroomId = id;
-                    _subjectId = null;
-                  }),
-                  onPeriodChanged: (id) => setState(() => _periodId = id),
-                  onModeChanged: (m) => setState(() => _mode = m),
-                  onSubjectChanged: (id) => setState(() => _subjectId = id),
-                ),
-                const SizedBox(height: 16),
-                if (query == null)
-                  const EmptyState(
-                    title: 'Sélectionnez une classe et une période',
-                    icon: Icons.filter_list,
-                  )
-                else if (_mode == RankingMode.subject && _subjectId == null)
-                  const EmptyState(
-                    title: 'Sélectionnez une matière',
-                    message:
-                        'Le mode SUBJECT nécessite une matière spécifique.',
-                    icon: Icons.book_outlined,
-                  )
-                else
-                  ref.watch(rankingProvider(query)).when(
-                        data: (rows) {
-                          if (rows.isEmpty) {
-                            return const EmptyState(
-                              title: 'Aucun élève classé',
-                              message:
-                                  'Aucune note n\'a été saisie pour cette classe/période.',
-                              icon: Icons.leaderboard_outlined,
-                            );
-                          }
-                          return Column(
-                            children: [
-                              _RankingSummary(rows: rows),
-                              const SizedBox(height: 16),
-                              ...rows
-                                  .asMap()
-                                  .entries
-                                  .map((entry) => _RankingRow(
-                                        row: entry.value,
-                                        rank: entry.key + 1,
-                                        classroomId: _classroomId!,
-                                        periodId: _periodId!,
-                                      ))
-                                  .toList(),
-                            ],
-                          );
-                        },
-                        loading: () => const AppLoading(
-                            label: 'Calcul du classement…'),
-                        error: (e, _) => AppErrorWidget(
-                          message: e.toString(),
-                          onRetry: () => ref.invalidate(rankingProvider(query)),
-                        ),
-                      ),
-              ],
+      // [Fix-RANKING-OFFLINE] V15 — plus de garde bloquante « Hors-ligne » :
+      // le classement consulté en ligne est servi depuis le cache local
+      // (rankingProvider), et s'actualise automatiquement à la reconnexion
+      // (le provider surveille la transition + la génération de synchro).
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          // [Fix-RANKING-OFFLINE] Bandeau informatif (jamais bloquant).
+          if (!conn.canReachServer && !conn.isChecking)
+            Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 10,
+              ),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.tertiaryContainer,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.cloud_off_outlined,
+                    size: 18,
+                    color: Theme.of(context).colorScheme.onTertiaryContainer,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Mode hors-ligne — classement issu du cache local. '
+                      'Il sera actualisé automatiquement à la reconnexion.',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .onTertiaryContainer,
+                          ),
+                    ),
+                  ),
+                ],
+              ),
             ),
+          _FiltersCard(
+            classrooms: classrooms,
+            periods: periods,
+            subjects: subjects,
+            classroomId: _classroomId,
+            periodId: _periodId,
+            mode: _mode,
+            subjectId: _subjectId,
+            canUseGlobalRanking: canUseGlobalRanking,
+            onClassroomChanged: (id) => setState(() {
+              _classroomId = id;
+              _subjectId = null;
+              // La période sera re-filtrée par le cycle de la nouvelle
+              // classe puis auto-sélectionnée (période active).
+              _periodId = null;
+            }),
+            onPeriodChanged: (id) => setState(() => _periodId = id),
+            onModeChanged: (m) => setState(() => _mode = m),
+            onSubjectChanged: (id) => setState(() => _subjectId = id),
+          ),
+          const SizedBox(height: 16),
+          if (query == null)
+            const EmptyState(
+              title: 'Sélectionnez une classe et une période',
+              icon: Icons.filter_list,
+            )
+          else if (_mode == RankingMode.subject && _subjectId == null)
+            const EmptyState(
+              title: 'Sélectionnez une matière',
+              message: 'Le mode SUBJECT nécessite une matière spécifique.',
+              icon: Icons.book_outlined,
+            )
+          else
+            ref.watch(rankingProvider(query)).when(
+                  data: (rows) {
+                    if (rows.isEmpty) {
+                      return const EmptyState(
+                        title: 'Aucun élève classé',
+                        message:
+                            'Aucune note n\'a été saisie pour cette classe/période.',
+                        icon: Icons.leaderboard_outlined,
+                      );
+                    }
+                    return Column(
+                      children: [
+                        _RankingSummary(rows: rows),
+                        const SizedBox(height: 16),
+                        ...rows.asMap().entries.map(
+                              (entry) => _RankingRow(
+                                row: entry.value,
+                                rank: entry.value.rank != 0
+                                    ? entry.value.rank
+                                    : entry.key + 1,
+                                classroomId: _classroomId!,
+                                periodId: _periodId!,
+                              ),
+                            ),
+                      ],
+                    );
+                  },
+                  loading: () => const AppLoading(
+                    label: 'Calcul du classement…',
+                  ),
+                  error: (e, _) => AppErrorWidget(
+                    message: e.toString(),
+                    onRetry: () => ref.invalidate(rankingProvider(query)),
+                  ),
+                ),
+        ],
+      ),
     );
   }
 }
@@ -185,14 +255,12 @@ class _RankingSummary extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final averages =
-        rows.map((r) => r.average).whereType<double>().toList();
+    final averages = rows.map((r) => r.average).whereType<double>().toList();
     final classAvg = averages.isEmpty
         ? null
         : averages.reduce((a, b) => a + b) / averages.length;
     final passing = averages.where((a) => a >= 10).length;
-    final passRate =
-        averages.isEmpty ? 0.0 : (passing / averages.length) * 100;
+    final passRate = averages.isEmpty ? 0.0 : (passing / averages.length) * 100;
 
     return Card(
       child: Padding(
@@ -208,22 +276,23 @@ class _RankingSummary extends StatelessWidget {
               ),
             ),
             Container(
-                width: 1,
-                height: 40,
-                color: theme.dividerColor.withValues(alpha: 0.5)),
+              width: 1,
+              height: 40,
+              color: theme.dividerColor.withValues(alpha: 0.5),
+            ),
             Expanded(
               child: _SummaryStat(
                 icon: Icons.insights,
                 label: 'Moy. classe',
-                value:
-                    classAvg == null ? '—' : classAvg.toStringAsFixed(2),
+                value: classAvg == null ? '—' : classAvg.toStringAsFixed(2),
                 color: MentionHelper.color(classAvg),
               ),
             ),
             Container(
-                width: 1,
-                height: 40,
-                color: theme.dividerColor.withValues(alpha: 0.5)),
+              width: 1,
+              height: 40,
+              color: theme.dividerColor.withValues(alpha: 0.5),
+            ),
             Expanded(
               child: _SummaryStat(
                 icon: Icons.check_circle_outline,
@@ -283,6 +352,10 @@ class _SummaryStat extends StatelessWidget {
 }
 
 /// Carte des filtres : classe + période + mode + matière (si SUBJECT).
+///
+/// [Fix-OVERFLOW] Classe et période sont empilées verticalement (plus de
+/// côte-à-côte qui débordait sur les petits écrans) et les dropdowns sont
+/// `isExpanded` (texte long tronqué proprement, flèche toujours visible).
 class _FiltersCard extends StatelessWidget {
   const _FiltersCard({
     required this.classrooms,
@@ -292,6 +365,7 @@ class _FiltersCard extends StatelessWidget {
     required this.periodId,
     required this.mode,
     required this.subjectId,
+    required this.canUseGlobalRanking,
     required this.onClassroomChanged,
     required this.onPeriodChanged,
     required this.onModeChanged,
@@ -305,6 +379,12 @@ class _FiltersCard extends StatelessWidget {
   final int? periodId;
   final RankingMode mode;
   final int? subjectId;
+
+  /// Vrai pour admin/headmaster et prof principal de la classe sélectionnée
+  /// ([Fix-RANKING-TEACHER]) — sinon seul le classement par matière est
+  /// proposé (matières enseignées).
+  final bool canUseGlobalRanking;
+
   final ValueChanged<int?> onClassroomChanged;
   final ValueChanged<int?> onPeriodChanged;
   final ValueChanged<RankingMode> onModeChanged;
@@ -318,37 +398,43 @@ class _FiltersCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: _buildClassroomField(),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _buildPeriodField(),
-                ),
-              ],
-            ),
+            _buildClassroomField(),
             const SizedBox(height: 12),
-            SegmentedButton<RankingMode>(
-              segments: const [
-                ButtonSegment(
-                  value: RankingMode.period,
-                  label: Text('Moyenne globale'),
-                  icon: Icon(Icons.calendar_view_week, size: 16),
-                ),
-                ButtonSegment(
-                  value: RankingMode.subject,
-                  label: Text('Par matière'),
-                  icon: Icon(Icons.book, size: 16),
-                ),
-              ],
-              selected: {mode},
-              onSelectionChanged: (s) => onModeChanged(s.first),
-            ),
-            if (mode == RankingMode.subject) ...[
+            _buildPeriodField(),
+            const SizedBox(height: 12),
+            if (canUseGlobalRanking) ...[
+              SegmentedButton<RankingMode>(
+                segments: const [
+                  ButtonSegment(
+                    value: RankingMode.period,
+                    label: Text('Moyenne globale'),
+                    icon: Icon(Icons.calendar_view_week, size: 16),
+                  ),
+                  ButtonSegment(
+                    value: RankingMode.subject,
+                    label: Text('Par matière'),
+                    icon: Icon(Icons.book, size: 16),
+                  ),
+                ],
+                selected: {mode},
+                onSelectionChanged: (s) => onModeChanged(s.first),
+              ),
               const SizedBox(height: 12),
+            ],
+            if (mode == RankingMode.subject) ...[
               _buildSubjectField(),
+              if (!canUseGlobalRanking)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    'Classement limité aux matières que vous enseignez dans '
+                    'cette classe. Les profs principaux voient toutes les '
+                    'matières et la moyenne globale.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                  ),
+                ),
             ],
           ],
         ),
@@ -365,17 +451,26 @@ class _FiltersCard extends StatelessWidget {
         final selected =
             list.firstWhereOrNull((c) => c.id == classroomId) ?? list.first;
         return DropdownButtonFormField<ClassroomDto>(
-          value: selected,
+          initialValue: selected,
+          // [Fix-OVERFLOW] isExpanded contraint la valeur sélectionnée à la
+          // largeur du champ (sinon « RIGHT OVERFLOWED BY ~45 PIXELS »).
+          isExpanded: true,
           decoration: const InputDecoration(
             labelText: 'Classe',
             border: OutlineInputBorder(),
             isDense: true,
           ),
           items: list
-              .map((c) => DropdownMenuItem(
-                    value: c,
-                    child: Text(c.name, overflow: TextOverflow.ellipsis),
-                  ))
+              .map(
+                (c) => DropdownMenuItem(
+                  value: c,
+                  child: Text(
+                    c.name,
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                  ),
+                ),
+              )
               .toList(),
           onChanged: (c) => onClassroomChanged(c?.id),
         );
@@ -394,17 +489,25 @@ class _FiltersCard extends StatelessWidget {
         final selected =
             list.firstWhereOrNull((p) => p.id == periodId) ?? list.first;
         return DropdownButtonFormField<PeriodDto>(
-          value: selected,
+          initialValue: selected,
+          // [Fix-OVERFLOW] voir _buildClassroomField.
+          isExpanded: true,
           decoration: const InputDecoration(
             labelText: 'Période',
             border: OutlineInputBorder(),
             isDense: true,
           ),
           items: list
-              .map((p) => DropdownMenuItem(
-                    value: p,
-                    child: Text(p.name, overflow: TextOverflow.ellipsis),
-                  ))
+              .map(
+                (p) => DropdownMenuItem(
+                  value: p,
+                  child: Text(
+                    p.name,
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                  ),
+                ),
+              )
               .toList(),
           onChanged: (p) => onPeriodChanged(p?.id),
         );
@@ -418,13 +521,17 @@ class _FiltersCard extends StatelessWidget {
     final async = subjects;
     if (async == null || classroomId == null) {
       return const _DisabledField(
-          label: 'Matière', hint: 'Sélectionnez une classe d\'abord.');
+        label: 'Matière',
+        hint: 'Sélectionnez une classe d\'abord.',
+      );
     }
     return async.when(
       data: (list) {
         if (list.isEmpty) {
           return const _DisabledField(
-              label: 'Matière', hint: 'Aucune matière');
+            label: 'Matière',
+            hint: 'Aucune matière',
+          );
         }
         final selected =
             list.firstWhereOrNull((s) => s.id == subjectId) ?? list.first;
@@ -435,25 +542,34 @@ class _FiltersCard extends StatelessWidget {
           });
         }
         return DropdownButtonFormField<ClassSubjectDto>(
-          value: selected,
+          initialValue: selected,
+          // [Fix-OVERFLOW] voir _buildClassroomField — le libellé
+          // « Matière (coef. X) » déborde sans isExpanded.
+          isExpanded: true,
           decoration: const InputDecoration(
             labelText: 'Matière',
             border: OutlineInputBorder(),
             isDense: true,
           ),
           items: list
-              .map((s) => DropdownMenuItem(
-                    value: s,
-                    child: Text('${s.subjectName} (coef. ${s.coefficient})',
-                        overflow: TextOverflow.ellipsis),
-                  ))
+              .map(
+                (s) => DropdownMenuItem(
+                  value: s,
+                  child: Text(
+                    '${s.subjectName} (coef. ${s.coefficient})',
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                  ),
+                ),
+              )
               .toList(),
           onChanged: (s) => onSubjectChanged(s?.id),
         );
       },
-      loading: () =>
-          const Padding(padding: EdgeInsets.symmetric(vertical: 8),
-              child: LinearProgressIndicator()),
+      loading: () => const Padding(
+        padding: EdgeInsets.symmetric(vertical: 8),
+        child: LinearProgressIndicator(),
+      ),
       error: (e, _) => _DisabledField(label: 'Matière', hint: 'Erreur : $e'),
     );
   }
@@ -552,7 +668,7 @@ class _RankingRowState extends State<_RankingRow> {
                     child: _medal != null
                         ? Text(_medal!, style: const TextStyle(fontSize: 20))
                         : Text(
-                            '${widget.rank}',
+                            widget.row.rankLabel ?? '${widget.rank}',
                             style: theme.textTheme.titleMedium?.copyWith(
                               fontWeight: FontWeight.w800,
                               color: rankColor,
@@ -575,17 +691,17 @@ class _RankingRowState extends State<_RankingRow> {
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                            if (row.sexe != null &&
-                                row.sexe!.isNotEmpty) ...[
+                            if (row.sexe != null && row.sexe!.isNotEmpty) ...[
                               const SizedBox(width: 6),
                               _SexeBadge(sexe: row.sexe!),
                             ],
                           ],
                         ),
-                        if (row.matricule != null &&
-                            row.matricule!.isNotEmpty)
-                          Text(row.matricule!,
-                              style: theme.textTheme.bodySmall),
+                        if (row.matricule != null && row.matricule!.isNotEmpty)
+                          Text(
+                            row.matricule!,
+                            style: theme.textTheme.bodySmall,
+                          ),
                         if (row.classAvg != null) ...[
                           const SizedBox(height: 2),
                           Text(
@@ -669,12 +785,13 @@ class _RankingRowState extends State<_RankingRow> {
                     const Spacer(),
                     if (hasPrevious)
                       InkWell(
-                        onTap: () =>
-                            setState(() => _expanded = !_expanded),
+                        onTap: () => setState(() => _expanded = !_expanded),
                         borderRadius: BorderRadius.circular(6),
                         child: Padding(
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 4, vertical: 2),
+                            horizontal: 4,
+                            vertical: 2,
+                          ),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
@@ -719,8 +836,7 @@ class _SexeBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isMale = sexe.toUpperCase() == 'M';
-    final color =
-        isMale ? const Color(0xFF3B82F6) : const Color(0xFFEC4899);
+    final color = isMale ? const Color(0xFF3B82F6) : const Color(0xFFEC4899);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       decoration: BoxDecoration(
@@ -784,27 +900,36 @@ class _PreviousPeriodsList extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: sorted
-            .map((e) => Padding(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 4, vertical: 2),
-                  child: Row(
-                    children: [
-                      Icon(Icons.history,
-                          size: 12, color: theme.colorScheme.onSurfaceVariant),
-                      const SizedBox(width: 6),
-                      Text('Période #${e.key}',
-                          style: theme.textTheme.bodySmall),
-                      const Spacer(),
-                      Text(
-                        e.value.toStringAsFixed(2),
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          fontWeight: FontWeight.w600,
-                          color: MentionHelper.color(e.value),
-                        ),
+            .map(
+              (e) => Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 4,
+                  vertical: 2,
+                ),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.history,
+                      size: 12,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Période #${e.key}',
+                      style: theme.textTheme.bodySmall,
+                    ),
+                    const Spacer(),
+                    Text(
+                      e.value.toStringAsFixed(2),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: MentionHelper.color(e.value),
                       ),
-                    ],
-                  ),
-                ))
+                    ),
+                  ],
+                ),
+              ),
+            )
             .toList(),
       ),
     );

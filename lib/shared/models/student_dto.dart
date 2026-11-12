@@ -72,13 +72,15 @@ class StudentDto {
     this.guardians = const [],
   });
 
+  /// Nom complet au format « NOM Prénoms » (convention scolaire : le nom de
+  /// famille d'abord, comme dans la version desktop).
   String get fullName =>
-      [prenoms, nom].whereType<String>().where((s) => s.isNotEmpty).join(' ');
+      [nom, prenoms].whereType<String>().where((s) => s.isNotEmpty).join(' ');
 
   String get displayInitials {
-    final p = prenoms?.isNotEmpty == true ? prenoms![0] : '';
     final n = (nom?.isNotEmpty == true) ? nom![0] : '';
-    return '$p$n'.toUpperCase();
+    final p = prenoms?.isNotEmpty == true ? prenoms![0] : '';
+    return '$n$p'.toUpperCase();
   }
 
   factory StudentDto.fromJson(Map<String, dynamic> j) => StudentDto(
@@ -102,9 +104,19 @@ class StudentDto {
         birthCountry: j['birth_country'] as String?,
         groupe: j['groupe'] as String?,
         classroomId: (j['classroom_id'] as num?)?.toInt(),
-        status: StudentStatus.fromCode(j['status'] as String?),
-        inscriptionType:
-            InscriptionType.fromCode(j['inscription_type'] as String?),
+        // Le serveur ne renvoie que les labels (« Nouveau », « Ancien »…).
+        // On tente d'abord les codes (patch serveur / détail enrichi), puis
+        // on résout par label — enfin on retombe sur student_status_label /
+        // inscription_type_label si présents.
+        status: StudentStatus.fromCode(j['status'] as String?) ??
+            StudentStatus.fromCode(j['student_status'] as String?) ??
+            StudentStatus.fromLabel(j['student_status_label'] as String?),
+        inscriptionType: InscriptionType.fromCode(
+              j['inscription_type'] as String?,
+            ) ??
+            InscriptionType.fromLabel(
+              j['inscription_type_label'] as String?,
+            ),
         contact: j['contact'] == null
             ? null
             : StudentContactDto.fromJson(j['contact'] as Map<String, dynamic>),
@@ -114,9 +126,12 @@ class StudentDto {
         scholastic: j['scholastic'] == null
             ? null
             : StudentScholasticDto.fromJson(
-                j['scholastic'] as Map<String, dynamic>),
+                j['scholastic'] as Map<String, dynamic>,
+              ),
         parents: (j['parents'] as List?)
-                ?.map((e) => StudentParentDto.fromJson(e as Map<String, dynamic>))
+                ?.map(
+                  (e) => StudentParentDto.fromJson(e as Map<String, dynamic>),
+                )
                 .toList() ??
             const [],
         guardians: (j['guardians'] as List?)
@@ -179,9 +194,16 @@ class StudentContactDto {
   final String? address;
   final String? city;
 
-  const StudentContactDto({this.id, this.phone, this.email, this.address, this.city});
+  const StudentContactDto({
+    this.id,
+    this.phone,
+    this.email,
+    this.address,
+    this.city,
+  });
 
-  factory StudentContactDto.fromJson(Map<String, dynamic> j) => StudentContactDto(
+  factory StudentContactDto.fromJson(Map<String, dynamic> j) =>
+      StudentContactDto(
         id: (j['id'] as num?)?.toInt(),
         phone: j['phone'] as String?,
         email: j['email'] as String?,
@@ -204,26 +226,78 @@ class StudentMedicalDto {
   final String? allergies;
   final String? doctor;
 
-  const StudentMedicalDto({this.id, this.bloodType, this.allergies, this.doctor});
+  const StudentMedicalDto({
+    this.id,
+    this.bloodType,
+    this.allergies,
+    this.doctor,
+  });
 
-  factory StudentMedicalDto.fromJson(Map<String, dynamic> j) => StudentMedicalDto(
+  factory StudentMedicalDto.fromJson(Map<String, dynamic> j) =>
+      StudentMedicalDto(
         id: (j['id'] as num?)?.toInt(),
+        // [Fix-BLOODTYPE] Le serveur stocke le CODE ('A+', 'O-'…) et non le
+        // nom d'enum Dart ('aPlus'). L'ancien matching par nom ne matchait
+        // JAMAIS → fallback BloodType.inconnu → assertion DropdownButton
+        // « There should be exactly one item with value: BloodType.inconnu »
+        // à l'ouverture du formulaire de modification.
         bloodType: j['blood_type'] == null
             ? null
-            : BloodType.values.firstWhere(
-                (b) => b.name == j['blood_type'],
-                orElse: () => BloodType.inconnu,
-              ),
+            : bloodTypeFromCode(j['blood_type'] as String?),
         allergies: j['allergies'] as String?,
         doctor: j['doctor'] as String?,
       );
 
   Map<String, dynamic> toJson() => {
         'id': id,
-        'blood_type': bloodType?.name,
+        // [Fix-BLOODTYPE] Round-trip symétrique par code.
+        'blood_type': bloodTypeToCode(bloodType),
         'allergies': allergies,
         'doctor': doctor,
       };
+}
+
+/// Parse un groupe sanguin serveur ('A+', 'AB-'…) ou historique ('aPlus').
+/// Retourne null si inconnu/vide — JAMAIS BloodType.inconnu (qui n'existe
+/// pas dans les items du dropdown du formulaire).
+BloodType? bloodTypeFromCode(String? raw) {
+  final v = raw?.trim();
+  if (v == null || v.isEmpty) return null;
+  const byCode = {
+    'A+': BloodType.aPlus,
+    'A-': BloodType.aMoins,
+    'B+': BloodType.bPlus,
+    'B-': BloodType.bMoins,
+    'AB+': BloodType.abPlus,
+    'AB-': BloodType.abMoins,
+    'O+': BloodType.oPlus,
+    'O-': BloodType.oMoins,
+  };
+  final code = byCode[v.toUpperCase()];
+  if (code != null) return code;
+  // Compat : anciens enregistrements locaux stockés par nom d'enum.
+  for (final b in BloodType.values) {
+    if (b.name.toLowerCase() == v.toLowerCase()) {
+      return b == BloodType.inconnu ? null : b;
+    }
+  }
+  return null;
+}
+
+/// Sérialise un groupe sanguin en code serveur ('A+'…), null si inconnu.
+String? bloodTypeToCode(BloodType? t) {
+  if (t == null || t == BloodType.inconnu) return null;
+  const map = {
+    BloodType.aPlus: 'A+',
+    BloodType.aMoins: 'A-',
+    BloodType.bPlus: 'B+',
+    BloodType.bMoins: 'B-',
+    BloodType.abPlus: 'AB+',
+    BloodType.abMoins: 'AB-',
+    BloodType.oPlus: 'O+',
+    BloodType.oMoins: 'O-',
+  };
+  return map[t];
 }
 
 class StudentScholasticDto {
@@ -264,8 +338,10 @@ class StudentParentDto {
     this.profession,
   });
 
+  /// Nom complet au format « NOM Prénoms » (convention scolaire : le nom de
+  /// famille d'abord, comme dans la version desktop).
   String get fullName =>
-      [prenoms, nom].whereType<String>().where((s) => s.isNotEmpty).join(' ');
+      [nom, prenoms].whereType<String>().where((s) => s.isNotEmpty).join(' ');
 
   factory StudentParentDto.fromJson(Map<String, dynamic> j) => StudentParentDto(
         id: (j['id'] as num?)?.toInt(),
@@ -303,8 +379,10 @@ class GuardianDto {
     this.relation,
   });
 
+  /// Nom complet au format « NOM Prénoms » (convention scolaire : le nom de
+  /// famille d'abord, comme dans la version desktop).
   String get fullName =>
-      [prenoms, nom].whereType<String>().where((s) => s.isNotEmpty).join(' ');
+      [nom, prenoms].whereType<String>().where((s) => s.isNotEmpty).join(' ');
 
   factory GuardianDto.fromJson(Map<String, dynamic> j) => GuardianDto(
         id: (j['id'] as num?)?.toInt(),

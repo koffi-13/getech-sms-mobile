@@ -10,6 +10,12 @@ class Users extends Table {
   TextColumn get username => text().withLength(min: 1, max: 64)();
   TextColumn get firstName => text().nullable()();
   TextColumn get lastName => text().nullable()();
+  // [Fix-EDT-TEACHERS-OFFLINE] V22 — rôle principal de l'utilisateur
+  // (miroir de `users.role` du registre de synchro) : permet au dropdown
+  // « Par enseignant » de l'EDT et à la consultation des présences de
+  // filtrer les enseignants HORS-LIGNE (le GET /users?role=teacher du
+  // serveur n'étant pas joignable).
+  TextColumn get role => text().nullable()();
   TextColumn get email => text().nullable()();
   TextColumn get phone => text().nullable()();
   TextColumn get photoPath => text().nullable()();

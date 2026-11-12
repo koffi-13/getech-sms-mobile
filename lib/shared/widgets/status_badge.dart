@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
 
-import '../../features/connections/connection_state.dart'
-    show ServerStatus;
+import '../../features/connections/connection_state.dart' show ServerStatus;
 
 /// Badge de statut coloré (en ligne / hors-ligne / etc.).
+///
+/// [Fix-FONT-SCALE-OVERFLOW] V17 — en grande taille de police, le libellé
+/// du badge (Row sans contrainte) faisait déborder les en-têtes et les
+/// ListTile qui l'incorporent. Le texte passe désormais sur 2 lignes max
+/// avec ellipsis et le Row est contraint par un Flexible.
 class StatusBadge extends StatelessWidget {
   const StatusBadge({
     super.key,
@@ -69,12 +73,16 @@ class StatusBadge extends StatelessWidget {
             Icon(icon, size: 14, color: color),
             const SizedBox(width: 4),
           ],
-          Text(
-            label,
-            style: TextStyle(
-              color: color,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: color,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ),
         ],

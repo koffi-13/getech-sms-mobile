@@ -14,6 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../app.dart';
 import '../../core/auth/auth_state.dart';
 import '../../core/config/app_config.dart';
+import '../../core/notifications/notification_service.dart';
 import '../connections/connection_state.dart';
 import '../connections/connections_controller.dart' show serverInfoProvider;
 import '../../shared/models/classroom_dto.dart' show PeriodDto;
@@ -35,6 +36,8 @@ class SettingsPage extends ConsumerWidget {
           const _ProfileSection(),
           const SizedBox(height: 16),
           const _AppearanceSection(),
+          const SizedBox(height: 16),
+          const _NotificationsSection(),
           const SizedBox(height: 16),
           const _SyncSection(),
           const SizedBox(height: 16),
@@ -107,7 +110,10 @@ class _ProfileSection extends ConsumerWidget {
             title: Text(user?.fullName ?? 'Utilisateur'),
             subtitle: Text(user?.email ?? 'Aucun email'),
             trailing: const Icon(Icons.chevron_right),
-            onTap: () => context.push('/profile'),
+            // [Fix-PROFILE-ROUTE] V10 : la route du profil est
+            // '/settings/profile' — l'ancien '/profile' ouvrait « Page
+            // introuvable » (GoException: no routes for location: /profile).
+            onTap: () => context.push('/settings/profile'),
           ),
         ],
       ),
@@ -129,8 +135,10 @@ class _AppearanceSection extends ConsumerWidget {
         children: [
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text('Apparence',
-                style: TextStyle(fontWeight: FontWeight.bold)),
+            child: Text(
+              'Apparence',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
           ),
           ListTile(
             leading: const Icon(Icons.palette_outlined),
@@ -154,7 +162,11 @@ class _AppearanceSection extends ConsumerWidget {
     }
   }
 
-  void _showThemePicker(BuildContext context, WidgetRef ref, ThemeMode current) {
+  void _showThemePicker(
+    BuildContext context,
+    WidgetRef ref,
+    ThemeMode current,
+  ) {
     showModalBottomSheet(
       context: context,
       showDragHandle: true,
@@ -165,32 +177,130 @@ class _AppearanceSection extends ConsumerWidget {
             ListTile(
               leading: const Icon(Icons.brightness_auto_outlined),
               title: const Text('Système'),
-              trailing: current == ThemeMode.system ? const Icon(Icons.check) : null,
+              trailing:
+                  current == ThemeMode.system ? const Icon(Icons.check) : null,
               onTap: () {
-                ref.read(settingsProvider.notifier).setThemeMode(ThemeMode.system);
+                ref
+                    .read(settingsProvider.notifier)
+                    .setThemeMode(ThemeMode.system);
                 Navigator.pop(ctx);
               },
             ),
             ListTile(
               leading: const Icon(Icons.light_mode_outlined),
               title: const Text('Clair'),
-              trailing: current == ThemeMode.light ? const Icon(Icons.check) : null,
+              trailing:
+                  current == ThemeMode.light ? const Icon(Icons.check) : null,
               onTap: () {
-                ref.read(settingsProvider.notifier).setThemeMode(ThemeMode.light);
+                ref
+                    .read(settingsProvider.notifier)
+                    .setThemeMode(ThemeMode.light);
                 Navigator.pop(ctx);
               },
             ),
             ListTile(
               leading: const Icon(Icons.dark_mode_outlined),
               title: const Text('Sombre'),
-              trailing: current == ThemeMode.dark ? const Icon(Icons.check) : null,
+              trailing:
+                  current == ThemeMode.dark ? const Icon(Icons.check) : null,
               onTap: () {
-                ref.read(settingsProvider.notifier).setThemeMode(ThemeMode.dark);
+                ref
+                    .read(settingsProvider.notifier)
+                    .setThemeMode(ThemeMode.dark);
                 Navigator.pop(ctx);
               },
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Section Notifications : activation/désactivation des familles de
+/// notifications utiles (rappels de cours, suivi validation des notes,
+/// résultats de synchronisation).
+class _NotificationsSection extends ConsumerWidget {
+  const _NotificationsSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settingsAsync = ref.watch(notificationSettingsProvider);
+    final theme = Theme.of(context);
+
+    return Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Text(
+              'Notifications',
+              style: theme.textTheme.titleSmall
+                  ?.copyWith(fontWeight: FontWeight.bold),
+            ),
+          ),
+          settingsAsync.when(
+            data: (settings) => Column(
+              children: [
+                // [Notif-V8] Accès direct au centre (historique persisté).
+                ListTile(
+                  leading: const Icon(Icons.notifications_none),
+                  title: const Text('Centre de notifications'),
+                  subtitle: const Text(
+                    'Historique des notifications reçues, non lues',
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => context.push('/notifications'),
+                ),
+                SwitchListTile(
+                  secondary: const Icon(Icons.school_outlined),
+                  title: const Text('Rappels de cours'),
+                  subtitle: const Text(
+                      '2 min avant le début (appel) et 5 min avant la fin '
+                      '(cahier de texte)'),
+                  value: settings.courseReminders,
+                  onChanged: (v) async {
+                    await settings.save(courseReminders: v);
+                    ref.invalidate(notificationSettingsProvider);
+                  },
+                ),
+                SwitchListTile(
+                  secondary: const Icon(Icons.grading_outlined),
+                  title: const Text('Validation des notes'),
+                  subtitle: const Text(
+                    'Nouvelles propositions à valider, décisions reçues',
+                  ),
+                  value: settings.gradesValidation,
+                  onChanged: (v) async {
+                    await settings.save(gradesValidation: v);
+                    ref.invalidate(notificationSettingsProvider);
+                  },
+                ),
+                SwitchListTile(
+                  secondary: const Icon(Icons.sync_outlined),
+                  title: const Text('Résultats de synchronisation'),
+                  subtitle: const Text(
+                      'Désactivé par défaut (technique) — activez pour suivre '
+                      'les données reçues/envoyées'),
+                  value: settings.syncUpdates,
+                  onChanged: (v) async {
+                    await settings.save(syncUpdates: v);
+                    ref.invalidate(notificationSettingsProvider);
+                  },
+                ),
+              ],
+            ),
+            loading: () => const Padding(
+              padding: EdgeInsets.all(16),
+              child: Center(child: CircularProgressIndicator()),
+            ),
+            error: (_, __) => const ListTile(
+              leading: Icon(Icons.notifications_off_outlined),
+              title: Text('Notifications indisponibles'),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -210,13 +320,17 @@ class _SyncSection extends ConsumerWidget {
         children: [
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text('Synchronisation & Connexion',
-                style: TextStyle(fontWeight: FontWeight.bold)),
+            child: Text(
+              'Synchronisation & Connexion',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
           ),
           ListTile(
             leading: const Icon(Icons.wifi_tethering),
             title: const Text('Serveur local'),
-            subtitle: Text(conn.serverIp ?? conn.serverUrlOverride ?? 'Non configuré'),
+            subtitle: Text(
+              conn.serverIp ?? conn.serverUrlOverride ?? 'Non configuré',
+            ),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => context.push('/pairing'),
           ),
@@ -246,8 +360,10 @@ class _AboutSection extends StatelessWidget {
         children: [
           Padding(
             padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text('À propos',
-                style: TextStyle(fontWeight: FontWeight.bold)),
+            child: Text(
+              'À propos',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
           ),
           ListTile(
             leading: Icon(Icons.info_outline),

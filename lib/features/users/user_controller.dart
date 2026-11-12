@@ -1,24 +1,24 @@
 /// Contrôleur du module Utilisateurs : liste (recherche), détail, et
 /// repository (création / mise à jour / activation) offline-first.
 ///
-/// - En ligne (`connection.canReachServer`) : appels REST `/users/*` via
-///   [dioProvider] + [buildUrl]. Aucun cache Drift en V1 (les utilisateurs
-///   sont des données d'administration — surface de codegen limitée).
-/// - Hors-ligne : les écritures sont mises en file d'attente via
-///   [outboxProvider] pour être poussées ultérieurement par le [SyncEngine].
+/// - En ligne : appels REST `/users/*` et cache Drift des listes consultées.
+/// - Hors-ligne : lecture du cache local et écritures différées par outbox.
 ///
 /// RBAC : USER_READ pour la lecture, USER_MANAGE pour les écritures.
 library;
 
 import 'package:dio/dio.dart';
+import 'package:drift/drift.dart' as d;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:logger/logger.dart' as log_pkg;
 
 import '../../core/config/constants.dart';
+import '../../core/database/database.dart';
 import '../../core/network/api_endpoints.dart';
 import '../../core/network/api_exceptions.dart';
 import '../../core/network/dio_client.dart';
 import '../../core/sync/outbox.dart';
+import '../../core/sync/sync_engine.dart' show syncGenerationProvider;
 import '../../features/connections/connection_state.dart';
 import '../../shared/models/auth_dto.dart';
 
@@ -75,10 +75,25 @@ class UserWriteRequest {
 ///
 /// Renvoie une liste vide si le serveur est non appairé. Les erreurs 403
 /// (RBAC insuffisant) sont transformées en liste vide pour ne pas bloquer l'UI.
-final usersListProvider =
-    FutureProvider.autoDispose.family<List<UserDto>, String>((ref, search) async {
-  final conn = ref.watch(connectionProvider);
-  if (!conn.isPaired || conn.serverUrl == null) return const [];
+final usersListProvider = FutureProvider.autoDispose
+    .family<List<UserDto>, String>((ref, search) async {
+  ref.watch(syncGenerationProvider);
+  final conn = ref.watch(
+    connectionProvider.select(
+      (c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      ),
+    ),
+  );
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return _usersFromLocal(ref, search);
+  }
+  if (!conn.canReachServer && !conn.isChecking) {
+    return _usersFromLocal(ref, search);
+  }
 
   final dio = ref.watch(dioProvider);
   try {
@@ -89,19 +104,218 @@ final usersListProvider =
         'per_page': 100,
       },
     );
-    return _parseUserList(resp.data);
-  } on DioException catch (e) {
-    final api = (e.error is ApiException)
-        ? e.error as ApiException
-        : dioErrorToApiException(e);
+    final users = _parseUserList(resp.data);
+    await _cacheUsersFromDtos(ref, users);
+    return users;
+  } on ApiException catch (api) {
     if (api.statusCode == 403) return const [];
     _log.w('usersListProvider : ${api.message}');
+    if (api is NetworkException) {
+      return _usersFromLocal(ref, search);
+    }
+    rethrow;
+  } on DioException catch (e) {
+    final api = dioErrorToApiException(e);
+    if (api.statusCode == 403) return const [];
+    _log.w('usersListProvider : ${api.message}');
+    if (api is NetworkException) {
+      return _usersFromLocal(ref, search);
+    }
     rethrow;
   } catch (e) {
     _log.w('usersListProvider : $e');
     rethrow;
   }
 });
+
+Future<List<UserDto>> _usersFromLocal(Ref ref, String search) async {
+  final db = ref.read(databaseProvider);
+  final query = db.select(db.users)
+    ..where((t) => t.isDeleted.equals(false))
+    ..orderBy([(t) => d.OrderingTerm.asc(t.username)]);
+  final rows = await query.get();
+  final needle = search.trim().toLowerCase();
+  return rows
+      .where((user) {
+        if (needle.isEmpty) return true;
+        return [
+          user.username,
+          user.firstName ?? '',
+          user.lastName ?? '',
+          user.email ?? '',
+          user.phone ?? '',
+        ].any((field) => field.toLowerCase().contains(needle));
+      })
+      .map(
+        (user) => UserDto(
+          id: user.id,
+          username: user.username,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          email: user.email ?? '',
+          phone: user.phone,
+          photoPath: user.photoPath,
+          sexe: Sexe.fromCode(user.sexe),
+          isActive: user.isActive,
+          isSuperuser: user.isSuperuser,
+        ),
+      )
+      .toList();
+}
+
+Future<void> _cacheUsersFromDtos(Ref ref, List<UserDto> users) async {
+  if (users.isEmpty) return;
+  try {
+    final db = ref.read(databaseProvider);
+    final now = DateTime.now();
+    await db.batch((batch) {
+      for (final user in users) {
+        if (user.username.isEmpty) continue;
+        batch.insert(
+          db.users,
+          UsersCompanion.insert(
+            id: d.Value(user.id),
+            username: user.username,
+            firstName: d.Value(user.firstName),
+            lastName: d.Value(user.lastName),
+            email: d.Value(user.email.isEmpty ? null : user.email),
+            phone: d.Value(user.phone),
+            photoPath: d.Value(user.photoPath),
+            sexe: d.Value(user.sexe?.code),
+            isActive: d.Value(user.isActive),
+            isSuperuser: d.Value(user.isSuperuser),
+            syncedAt: d.Value(now),
+            isDirty: const d.Value(false),
+            isDeleted: const d.Value(false),
+          ),
+          mode: d.InsertMode.insertOrReplace,
+        );
+      }
+    });
+  } catch (e) {
+    _log.w('Cache local des utilisateurs indisponible : $e');
+  }
+}
+
+/// [Fix-TEACHERS-DROPDOWN] Liste CANONIQUE des enseignants :
+/// `GET /users?role=teacher` (endpoint dédié du serveur — filtre par rôle
+/// UserRole, indépendant du « rôle principal » sérialisé).
+///
+/// L'ancien filtrage client (rôle principal contenant « teacher ») ratait
+/// les enseignants dont le rôle principal affiché était un AUTRE rôle
+/// (multi-rôles) — d'où un dropdown « Enseignant » de l'EDT incomplet
+/// (« 3 chargés sur 7 »). Repli : filtrage client de la liste complète
+/// si le serveur ne supporte pas le paramètre `role`.
+/// [Fix-EDT-TEACHERS-OFFLINE] V22 — enseignants depuis le cache Drift
+/// (table `users`, colonne `role` répliquée par la synchro). Sert le
+/// dropdown « Par enseignant » de l'EDT et la consultation des présences
+/// quand le serveur ne répond pas — l'ancien comportement renvoyait une
+/// liste VIDE (plus aucun choix) dès la perte du réseau.
+Future<List<UserDto>> _teachersFromLocal(Ref ref) async {
+  try {
+    final db = ref.read(databaseProvider);
+    final rows = await (db.select(db.users)
+          ..where((t) => t.isDeleted.equals(false))
+          ..where((t) => t.isActive.equals(true)))
+        .get();
+    final teachers = rows
+        .where((u) {
+          final role = (u.role ?? '').toLowerCase();
+          return role.contains('teacher') || role.contains('enseignant');
+        })
+        .map(
+          (u) => UserDto(
+            id: u.id,
+            username: u.username,
+            firstName: u.firstName,
+            lastName: u.lastName,
+            email: u.email ?? '',
+            phone: u.phone,
+            photoPath: u.photoPath,
+            sexe: Sexe.fromCode(u.sexe),
+            isActive: u.isActive,
+            isSuperuser: u.isSuperuser,
+            role: u.role,
+          ),
+        )
+        .toList()
+      ..sort((a, b) => _teacherLabel(a).compareTo(_teacherLabel(b)));
+    return teachers;
+  } catch (_) {
+    return const [];
+  }
+}
+
+final teachersListProvider =
+    FutureProvider.autoDispose<List<UserDto>>((ref) async {
+  // [Fix-EDT-TEACHERS-OFFLINE] V22 — hors-ligne : cache Drift AVANT tout
+  // appel réseau (le GET /users?role=teacher n'est pas joignable).
+  final conn = ref.watch(
+    connectionProvider.select(
+      (c) => (
+        isPaired: c.isPaired,
+        serverUrl: c.serverUrl,
+        canReachServer: c.canReachServer,
+        isChecking: c.isChecking,
+      ),
+    ),
+  );
+  if (!conn.isPaired || conn.serverUrl == null) {
+    return _teachersFromLocal(ref);
+  }
+  if (!conn.canReachServer && !conn.isChecking) {
+    return _teachersFromLocal(ref);
+  }
+  // [Fix-AUTO-SYNC] rafraîchissement après chaque synchro utile (les
+  // rôles des utilisateurs répliqués peuvent avoir changé).
+  ref.watch(syncGenerationProvider);
+
+  final dio = ref.watch(dioProvider);
+  final url = buildUrl(conn.serverUrl!, ApiEndpoints.users);
+
+  List<UserDto> clientSideFilter(List<UserDto> users) => users
+      .where(
+        (u) =>
+            u.isActive &&
+            ((u.role ?? '').toLowerCase().contains('teacher') ||
+                (u.role ?? '').toLowerCase().contains('enseignant')),
+      )
+      .toList()
+    ..sort((a, b) => _teacherLabel(a).compareTo(_teacherLabel(b)));
+
+  try {
+    final resp = await dio.getJson<dynamic>(
+      url,
+      query: {
+        'role': 'teacher',
+        'per_page': 200,
+      },
+    );
+    final teachers = _parseUserList(resp.data)
+      ..sort((a, b) => _teacherLabel(a).compareTo(_teacherLabel(b)));
+    if (teachers.isNotEmpty) return teachers;
+
+    // Repli : serveur sans support du paramètre `role` (réponse = tous les
+    // utilisateurs, y compris non-enseignants) → filtrage client.
+    final all = await dio.getJson<dynamic>(url, query: {'per_page': 200});
+    return clientSideFilter(_parseUserList(all.data));
+  } on DioException catch (e) {
+    final api = (e.error is ApiException)
+        ? e.error as ApiException
+        : dioErrorToApiException(e);
+    if (api.statusCode == 403) return const [];
+    _log.w('teachersListProvider : ${api.message}');
+    // [Fix-EDT-TEACHERS-OFFLINE] réseau KO en cours de requête → cache.
+    if (api is NetworkException) return _teachersFromLocal(ref);
+    rethrow;
+  } catch (e) {
+    _log.w('teachersListProvider : $e');
+    rethrow;
+  }
+});
+
+/// Libellé de tri d'un enseignant (nom complet, sinon username).
+String _teacherLabel(UserDto u) => u.fullName.isEmpty ? u.username : u.fullName;
 
 /// Détail d'un utilisateur par ID : `GET /users/{id}`.
 final userDetailProvider =
@@ -139,8 +353,7 @@ class UserRepositoryException implements Exception {
   final int? statusCode;
 
   @override
-  String toString() =>
-      'UserRepositoryException(${statusCode ?? ''}): $message';
+  String toString() => 'UserRepositoryException(${statusCode ?? ''}): $message';
 }
 
 /// Repository des utilisateurs : gère les écritures distantes (POST/PATCH)

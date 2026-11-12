@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../core/auth/auth_state.dart';
+import '../core/auth/teacher_scope.dart';
 import '../core/config/constants.dart';
 import '../core/utils/permissions.dart';
 
@@ -24,41 +25,57 @@ class AppShell extends ConsumerWidget {
     final auth = ref.watch(authProvider);
     final perms = auth.permissions;
 
+    // [Fix-TEACHER-NAV] Repli enseignant : les modules Notes / Emploi du
+    // temps / Présence restent visibles pour un enseignant même si sa
+    // liste de permissions RBAC est incomplète côté serveur (rôle TEACHER
+    // déclaré OU relations de données détectées par le scope).
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final teacherish = auth.hasDeclaredTeacherRole ||
+        scopeAsync.maybeWhen(data: (s) => s.isTeacher, orElse: () => false);
+
     final destinations = <_NavDestination>[
-      _NavDestination(
+      const _NavDestination(
         icon: Icons.dashboard_outlined,
         activeIcon: Icons.dashboard,
         label: 'Accueil',
         route: '/dashboard',
       ),
-      _NavDestination(
+      const _NavDestination(
         icon: Icons.school_outlined,
         activeIcon: Icons.school,
         label: 'Classes',
         route: '/classrooms',
         permission: RbacPermissions.studentRead,
       ),
-      _NavDestination(
+      const _NavDestination(
         icon: Icons.people_outline,
         activeIcon: Icons.people,
         label: 'Élèves',
         route: '/students',
         permission: RbacPermissions.studentRead,
       ),
-      _NavDestination(
+      const _NavDestination(
         icon: Icons.grading_outlined,
         activeIcon: Icons.grading,
         label: 'Notes',
         route: '/grades',
         permission: RbacPermissions.gradeRead,
+        teacherVisible: true,
       ),
-      _NavDestination(
+      const _NavDestination(
         icon: Icons.more_horiz,
         activeIcon: Icons.more_horiz,
         label: 'Plus',
         route: '/more',
       ),
-    ].where((d) => d.permission == null || hasPermission(perms, d.permission!)).toList();
+    ]
+        .where(
+          (d) =>
+              d.permission == null ||
+              hasPermission(perms, d.permission!) ||
+              (teacherish && d.teacherVisible),
+        )
+        .toList();
 
     return Scaffold(
       body: child,
@@ -69,11 +86,13 @@ class AppShell extends ConsumerWidget {
           context.go(dest.route);
         },
         destinations: destinations
-            .map((d) => NavigationDestination(
-                  icon: Icon(d.icon),
-                  selectedIcon: Icon(d.activeIcon),
-                  label: d.label,
-                ))
+            .map(
+              (d) => NavigationDestination(
+                icon: Icon(d.icon),
+                selectedIcon: Icon(d.activeIcon),
+                label: d.label,
+              ),
+            )
             .toList(),
       ),
       drawer: const _AppDrawer(),
@@ -88,12 +107,17 @@ class _NavDestination {
     required this.label,
     required this.route,
     this.permission,
+    this.teacherVisible = false,
   });
   final IconData icon;
   final IconData activeIcon;
   final String label;
   final String route;
   final String? permission;
+
+  /// [Fix-TEACHER-NAV] Toujours visible pour un enseignant détecté
+  /// (rôle ou relations), même sans la permission RBAC correspondante.
+  final bool teacherVisible;
 }
 
 class _AppDrawer extends ConsumerWidget {
@@ -105,66 +129,73 @@ class _AppDrawer extends ConsumerWidget {
     final perms = auth.permissions;
     final theme = Theme.of(context);
 
+    // [Fix-TEACHER-NAV] Repli enseignant (même règle que la barre du bas).
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final teacherish = auth.hasDeclaredTeacherRole ||
+        scopeAsync.maybeWhen(data: (s) => s.isTeacher, orElse: () => false);
+
     final items = <_DrawerItem>[
-      _DrawerItem(
+      const _DrawerItem(
         icon: Icons.calendar_view_week_outlined,
         label: 'Emploi du temps',
         route: '/schedule',
         permission: RbacPermissions.studentRead,
+        teacherVisible: true,
       ),
-      _DrawerItem(
+      const _DrawerItem(
         icon: Icons.fact_check_outlined,
         label: 'Présence',
         route: '/attendance',
         permission: RbacPermissions.studentRead,
+        teacherVisible: true,
       ),
-      _DrawerItem(
+      const _DrawerItem(
         icon: Icons.leaderboard_outlined,
         label: 'Classement',
         route: '/grades/ranking',
         permission: RbacPermissions.gradeRead,
       ),
-      _DrawerItem(
+      const _DrawerItem(
         icon: Icons.menu_book_outlined,
         label: 'Matières',
         route: '/subjects',
         permission: RbacPermissions.gradeRead,
       ),
-      _DrawerItem(
+      const _DrawerItem(
         icon: Icons.payments_outlined,
         label: 'Paiements',
         route: '/finance',
         permission: RbacPermissions.paymentRead,
       ),
-      _DrawerItem(
+      const _DrawerItem(
         icon: Icons.account_balance_wallet_outlined,
         label: 'Soldes élèves',
         route: '/finance/balances',
         permission: RbacPermissions.paymentRead,
       ),
-      _DrawerItem(
+      const _DrawerItem(
         icon: Icons.manage_accounts_outlined,
         label: 'Utilisateurs',
         route: '/users',
         permission: RbacPermissions.userRead,
       ),
-      _DrawerItem(
+      const _DrawerItem(
         icon: Icons.upload_file_outlined,
         label: 'Importer des élèves',
         route: '/students/import',
         permission: RbacPermissions.studentCreate,
       ),
-      _DrawerItem(
+      const _DrawerItem(
         icon: Icons.domain_outlined,
         label: 'Établissements',
         route: '/establishments',
       ),
-      _DrawerItem(
+      const _DrawerItem(
         icon: Icons.link_outlined,
         label: 'Connexions',
         route: '/connections',
       ),
-      _DrawerItem(
+      const _DrawerItem(
         icon: Icons.settings_outlined,
         label: 'Paramètres',
         route: '/settings',
@@ -178,9 +209,9 @@ class _AppDrawer extends ConsumerWidget {
           children: [
             UserAccountsDrawerHeader(
               accountName: Text(auth.user?.fullName ?? 'Utilisateur'),
-              accountEmail: Text(auth.user?.email ??
-                  auth.user?.username ??
-                  'GeTech-SMS'),
+              accountEmail: Text(
+                auth.user?.email ?? auth.user?.username ?? 'GeTech-SMS',
+              ),
               currentAccountPicture: CircleAvatar(
                 backgroundColor: theme.colorScheme.primary,
                 child: Text(
@@ -189,7 +220,9 @@ class _AppDrawer extends ConsumerWidget {
                           : 'G')
                       .toUpperCase(),
                   style: TextStyle(
-                      fontSize: 24, color: theme.colorScheme.onPrimary),
+                    fontSize: 24,
+                    color: theme.colorScheme.onPrimary,
+                  ),
                 ),
               ),
               decoration: BoxDecoration(color: theme.colorScheme.primary),
@@ -197,17 +230,22 @@ class _AppDrawer extends ConsumerWidget {
             Expanded(
               child: ListView(
                 children: items
-                    .where((i) =>
-                        i.permission == null ||
-                        hasPermission(perms, i.permission!))
-                    .map((i) => ListTile(
-                          leading: Icon(i.icon),
-                          title: Text(i.label),
-                          onTap: () {
-                            Navigator.pop(context);
-                            context.go(i.route);
-                          },
-                        ))
+                    .where(
+                      (i) =>
+                          i.permission == null ||
+                          hasPermission(perms, i.permission!) ||
+                          (teacherish && i.teacherVisible),
+                    )
+                    .map(
+                      (i) => ListTile(
+                        leading: Icon(i.icon),
+                        title: Text(i.label),
+                        onTap: () {
+                          Navigator.pop(context);
+                          context.go(i.route);
+                        },
+                      ),
+                    )
                     .toList(),
               ),
             ),
@@ -234,9 +272,13 @@ class _DrawerItem {
     required this.label,
     required this.route,
     this.permission,
+    this.teacherVisible = false,
   });
   final IconData icon;
   final String label;
   final String route;
   final String? permission;
+
+  /// [Fix-TEACHER-NAV] Toujours visible pour un enseignant détecté.
+  final bool teacherVisible;
 }

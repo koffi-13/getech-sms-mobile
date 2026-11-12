@@ -7,6 +7,17 @@ library;
 import '../../core/config/constants.dart';
 import '../../core/utils/formatters.dart';
 
+/// [Fix-AUTH-2] Convertit une valeur JSON en String? de manière sûre.
+/// Si la valeur est un List (cas des erreurs FastAPI 422), joint les éléments.
+/// Si la valeur est null, retourne null.
+/// Sinon, retourne toString().
+String? _safeString(dynamic v) {
+  if (v == null) return null;
+  if (v is String) return v;
+  if (v is List) return v.map((e) => e.toString()).join(', ');
+  return v.toString();
+}
+
 /// Requête de connexion : `POST /auth/login`.
 class LoginRequest {
   final String username;
@@ -79,7 +90,8 @@ class LoginResponse {
         establishment: j['establishment'] == null
             ? null
             : EstablishmentDto.fromJson(
-                j['establishment'] as Map<String, dynamic>),
+                j['establishment'] as Map<String, dynamic>,
+              ),
       );
 }
 
@@ -107,7 +119,8 @@ class MeResponse {
         establishment: j['establishment'] == null
             ? null
             : EstablishmentDto.fromJson(
-                j['establishment'] as Map<String, dynamic>),
+                j['establishment'] as Map<String, dynamic>,
+              ),
       );
 }
 
@@ -148,24 +161,26 @@ class UserDto {
     this.sexe,
   });
 
-  String get fullName =>
-      [firstName, lastName].whereType<String>().where((s) => s.isNotEmpty).join(' ');
+  String get fullName => [firstName, lastName]
+      .whereType<String>()
+      .where((s) => s.isNotEmpty)
+      .join(' ');
 
   factory UserDto.fromJson(Map<String, dynamic> j) => UserDto(
         id: (j['id'] as num).toInt(),
-        publicId: j['public_id'] as String? ?? '',
-        username: j['username'] as String? ?? '',
-        email: j['email'] as String? ?? '',
-        firstName: j['first_name'] as String?,
-        lastName: j['last_name'] as String?,
+        publicId: _safeString(j['public_id']) ?? '',
+        username: _safeString(j['username']) ?? '',
+        email: _safeString(j['email']) ?? '',
+        firstName: _safeString(j['first_name']),
+        lastName: _safeString(j['last_name']),
         isActive: (j['is_active'] as bool?) ?? true,
         isSuperuser: (j['is_superuser'] as bool?) ?? false,
-        lastLoginAt: DateFormatter.parse(j['last_login_at'] as String?),
-        role: j['role'] as String?,
-        phone: j['phone'] as String?,
-        position: j['position'] as String?,
-        photoPath: j['photo_path'] as String?,
-        sexe: Sexe.fromCode(j['sexe'] as String?),
+        lastLoginAt: DateFormatter.parse(_safeString(j['last_login_at'])),
+        role: _safeString(j['role']),
+        phone: _safeString(j['phone']),
+        position: _safeString(j['position']),
+        photoPath: _safeString(j['photo_path']),
+        sexe: Sexe.fromCode(_safeString(j['sexe'])),
       );
 
   Map<String, dynamic> toJson() => {
@@ -265,18 +280,18 @@ class EstablishmentDto {
 
   factory EstablishmentDto.fromJson(Map<String, dynamic> j) => EstablishmentDto(
         id: (j['id'] as num).toInt(),
-        code: j['code'] as String? ?? '',
-        name: j['name'] as String? ?? '',
-        email: j['email'] as String?,
-        phone: j['phone'] as String?,
-        city: j['city'] as String?,
-        country: j['country'] as String?,
-        address: j['address'] as String?,
-        motto: j['motto'] as String?,
-        logoPath: j['logo_path'] as String?,
-        currency: (j['currency'] as String?) ?? defaultCurrency,
-        createdAt: DateFormatter.parse(j['created_at'] as String?),
-        updatedAt: DateFormatter.parse(j['updated_at'] as String?),
+        code: _safeString(j['code']) ?? '',
+        name: _safeString(j['name']) ?? '',
+        email: _safeString(j['email']),
+        phone: _safeString(j['phone']),
+        city: _safeString(j['city']),
+        country: _safeString(j['country']),
+        address: _safeString(j['address']),
+        motto: _safeString(j['motto']),
+        logoPath: _safeString(j['logo_path']),
+        currency: _safeString(j['currency']) ?? defaultCurrency,
+        createdAt: DateFormatter.parse(_safeString(j['created_at'])),
+        updatedAt: DateFormatter.parse(_safeString(j['updated_at'])),
       );
 
   Map<String, dynamic> toJson() => {
@@ -303,11 +318,16 @@ class ServerInfoDto {
   final String serverVersion;
   final String apiUrl;
 
+  /// [Fix-BAD-LAN-IP] URLs API candidates (toutes les IPs LAN du poste).
+  /// Vide pour un serveur plus ancien qui n'expose que `api_url`.
+  final List<String> apiUrls;
+
   const ServerInfoDto({
     required this.establishmentCode,
     required this.establishmentName,
     required this.serverVersion,
     required this.apiUrl,
+    this.apiUrls = const [],
   });
 
   factory ServerInfoDto.fromJson(Map<String, dynamic> j) => ServerInfoDto(
@@ -315,6 +335,10 @@ class ServerInfoDto {
         establishmentName: j['establishment_name'] as String? ?? '',
         serverVersion: j['server_version'] as String? ?? 'unknown',
         apiUrl: j['api_url'] as String? ?? '',
+        apiUrls: (j['api_urls'] as List?)
+                ?.whereType<String>()
+                .toList(growable: false) ??
+            const [],
       );
 }
 
@@ -325,24 +349,46 @@ class PairingPayload {
   final String establishmentCode;
   final String pairingToken;
 
+  /// [Fix-BAD-LAN-IP] Toutes les IPs LAN du poste envoyées par le QR.
+  /// Vide pour un desktop plus ancien (champ `ip` seul) : la liste vaut
+  /// alors `[ip]`.
+  final List<String> ips;
+
   const PairingPayload({
     required this.ip,
     required this.port,
     required this.establishmentCode,
     required this.pairingToken,
+    this.ips = const [],
   });
 
   String get serverUrl => 'http://$ip:$port/api/v1';
+
+  /// URLs candidates dérivées du QR : première = IP principale (comportement
+  /// historique), suivies des autres IPs LAN du poste.
+  List<String> get serverUrls {
+    final all = <String>[ip];
+    for (final other in ips) {
+      if (other.isNotEmpty && other != ip) all.add(other);
+    }
+    return [for (final a in all) 'http://$a:$port/api/v1'];
+  }
 
   factory PairingPayload.fromJson(Map<String, dynamic> j) => PairingPayload(
         ip: j['ip'] as String,
         port: (j['port'] as num).toInt(),
         establishmentCode: j['establishment_code'] as String,
         pairingToken: j['pairing_token'] as String,
+        ips: (j['ips'] as List?)
+                ?.whereType<String>()
+                .where((v) => v.isNotEmpty)
+                .toList(growable: false) ??
+            const [],
       );
 
   Map<String, dynamic> toJson() => {
         'ip': ip,
+        'ips': ips,
         'port': port,
         'establishment_code': establishmentCode,
         'pairing_token': pairingToken,

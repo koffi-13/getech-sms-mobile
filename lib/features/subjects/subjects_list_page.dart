@@ -28,6 +28,7 @@ class SubjectsListPage extends ConsumerStatefulWidget {
 class _SubjectsListPageState extends ConsumerState<SubjectsListPage> {
   /// Texte affiché dans la barre de recherche (mis à jour immédiatement).
   String _searchText = '';
+
   /// Requête réellement transmise au provider (mise à jour après debounce).
   String _searchQuery = '';
   DateTime? _lastSearchAt;
@@ -118,8 +119,10 @@ class _SubjectsListPageState extends ConsumerState<SubjectsListPage> {
                     color: Theme.of(context).colorScheme.primaryContainer,
                     elevation: 0,
                     child: ListTile(
-                      leading: Icon(Icons.assignment_ind_outlined,
-                          color: Theme.of(context).colorScheme.onPrimaryContainer),
+                      leading: Icon(
+                        Icons.assignment_ind_outlined,
+                        color: Theme.of(context).colorScheme.onPrimaryContainer,
+                      ),
                       title: Text(
                         'Affectations par classe',
                         style: TextStyle(
@@ -137,9 +140,10 @@ class _SubjectsListPageState extends ConsumerState<SubjectsListPage> {
                               .withValues(alpha: 0.85),
                         ),
                       ),
-                      trailing: Icon(Icons.chevron_right,
-                          color:
-                              Theme.of(context).colorScheme.onPrimaryContainer),
+                      trailing: Icon(
+                        Icons.chevron_right,
+                        color: Theme.of(context).colorScheme.onPrimaryContainer,
+                      ),
                       onTap: () => context.push('/subjects/class-subjects'),
                     ),
                   ),
@@ -207,9 +211,11 @@ class _OfflineBanner extends ConsumerWidget {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         child: Row(
           children: [
-            Icon(Icons.cloud_off,
-                size: 18,
-                color: Theme.of(context).colorScheme.onSecondaryContainer),
+            Icon(
+              Icons.cloud_off,
+              size: 18,
+              color: Theme.of(context).colorScheme.onSecondaryContainer,
+            ),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -288,8 +294,10 @@ class _SubjectTile extends StatelessWidget {
                 ),
               ),
               if (canManage)
-                Icon(Icons.chevron_right,
-                    color: theme.colorScheme.onSurfaceVariant),
+                Icon(
+                  Icons.chevron_right,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
             ],
           ),
         ),

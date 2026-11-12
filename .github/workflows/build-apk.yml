@@ -1,0 +1,66 @@
+name: Build APK (release, arm64)
+
+on:
+  push:
+    branches: [ci/build-apk]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Flutter 3.41.9 (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+          cache: true
+
+      - name: Versions
+        run: |
+          flutter --version
+          java -version
+
+      - name: Dépendances
+        run: flutter pub get
+
+      - name: Codegen Drift (database.g.dart & co, ignorés par .gitignore)
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Tests (suite complète)
+        run: flutter test --no-pub
+
+      - name: Build APK release (arm64, keystore projet)
+        run: |
+          # Retry : Maven Central renvoie parfois des 429 transitoires ; le
+          # cache ~/.gradle du runner conserve chaque artefact déjà résolu,
+          # donc chaque tentative reprend là où la précédente s'est arrêtée.
+          for i in 1 2 3 4 5; do
+            echo "=== tentative de build $i/5 ==="
+            if flutter build apk --release --target-platform android-arm64; then
+              echo "BUILD OK à la tentative $i"
+              exit 0
+            fi
+            echo "échec — pause 120 s avant retry"
+            sleep 120
+          done
+          echo "ÉCHEC après 5 tentatives"
+          exit 1
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: getech-sms-mobile-release-arm64
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error

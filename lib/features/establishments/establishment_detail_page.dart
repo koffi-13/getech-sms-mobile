@@ -44,7 +44,8 @@ class EstablishmentDetailPage extends ConsumerWidget {
           isCurrent: isCurrent,
           onRefresh: () => _refresh(ref),
         ),
-        loading: () => const AppLoading(label: 'Chargement de l\'établissement…'),
+        loading: () =>
+            const AppLoading(label: 'Chargement de l\'établissement…'),
         error: (e, _) => AppErrorWidget(
           message: e.toString(),
           onRetry: () => _refresh(ref),
@@ -112,8 +113,8 @@ class _Header extends StatelessWidget {
     final theme = Theme.of(context);
     final logo = establishment.logoPath;
     final hasLogo = logo != null && logo.isNotEmpty;
-    final isUrl = hasLogo &&
-        (logo!.startsWith('http://') || logo!.startsWith('https://'));
+    final isUrl =
+        hasLogo && (logo.startsWith('http://') || logo.startsWith('https://'));
 
     return Center(
       child: Column(
@@ -124,7 +125,7 @@ class _Header extends StatelessWidget {
             child: hasLogo && isUrl
                 ? ClipOval(
                     child: Image.network(
-                      logo!,
+                      logo,
                       fit: BoxFit.cover,
                       width: 88,
                       height: 88,
@@ -157,8 +158,11 @@ class _Header extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(Icons.tag,
-                  size: 16, color: theme.colorScheme.onSurfaceVariant),
+              Icon(
+                Icons.tag,
+                size: 16,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
               const SizedBox(width: 4),
               Text(
                 establishment.code,
@@ -172,8 +176,7 @@ class _Header extends StatelessWidget {
           if (isCurrent) ...[
             const SizedBox(height: 12),
             Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
               decoration: BoxDecoration(
                 color: theme.colorScheme.primary.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(20),
@@ -184,8 +187,11 @@ class _Header extends StatelessWidget {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.check_circle,
-                      color: theme.colorScheme.primary, size: 18),
+                  Icon(
+                    Icons.check_circle,
+                    color: theme.colorScheme.primary,
+                    size: 18,
+                  ),
                   const SizedBox(width: 8),
                   Text(
                     'Établissement courant',
@@ -243,9 +249,11 @@ class _AddressCard extends StatelessWidget {
               children: [
                 Icon(Icons.place, color: theme.colorScheme.primary, size: 22),
                 const SizedBox(width: 8),
-                Text('Adresse',
-                    style: theme.textTheme.titleMedium
-                        ?.copyWith(fontWeight: FontWeight.w600)),
+                Text(
+                  'Adresse',
+                  style: theme.textTheme.titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w600),
+                ),
               ],
             ),
             const SizedBox(height: 8),
@@ -256,10 +264,12 @@ class _AddressCard extends StatelessWidget {
                     ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
               )
             else
-              ...lines.map((l) => Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: _InfoRow(line: l),
-                  )),
+              ...lines.map(
+                (l) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: _InfoRow(line: l),
+                ),
+              ),
           ],
         ),
       ),
@@ -295,12 +305,17 @@ class _ContactCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                Icon(Icons.contact_phone_outlined,
-                    color: theme.colorScheme.primary, size: 22),
+                Icon(
+                  Icons.contact_phone_outlined,
+                  color: theme.colorScheme.primary,
+                  size: 22,
+                ),
                 const SizedBox(width: 8),
-                Text('Contact',
-                    style: theme.textTheme.titleMedium
-                        ?.copyWith(fontWeight: FontWeight.w600)),
+                Text(
+                  'Contact',
+                  style: theme.textTheme.titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w600),
+                ),
               ],
             ),
             const SizedBox(height: 8),
@@ -311,10 +326,12 @@ class _ContactCard extends StatelessWidget {
                     ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
               )
             else
-              ...lines.map((l) => Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: _InfoRow(line: l),
-                  )),
+              ...lines.map(
+                (l) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: _InfoRow(line: l),
+                ),
+              ),
           ],
         ),
       ),
@@ -337,12 +354,17 @@ class _FinanceCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                Icon(Icons.payments_outlined,
-                    color: theme.colorScheme.primary, size: 22),
+                Icon(
+                  Icons.payments_outlined,
+                  color: theme.colorScheme.primary,
+                  size: 22,
+                ),
                 const SizedBox(width: 8),
-                Text('Devise',
-                    style: theme.textTheme.titleMedium
-                        ?.copyWith(fontWeight: FontWeight.w600)),
+                Text(
+                  'Devise',
+                  style: theme.textTheme.titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w600),
+                ),
               ],
             ),
             const SizedBox(height: 8),
@@ -385,8 +407,11 @@ class _InfoRow extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(line.icon,
-            size: 18, color: theme.colorScheme.onSurfaceVariant),
+        Icon(
+          line.icon,
+          size: 18,
+          color: theme.colorScheme.onSurfaceVariant,
+        ),
         const SizedBox(width: 8),
         Expanded(
           child: Column(

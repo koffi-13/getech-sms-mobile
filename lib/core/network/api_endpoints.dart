@@ -63,6 +63,14 @@ class ApiEndpoints {
   static const String gradesRanking = '/grades/ranking';
   static const String gradesClassSubjects = '/grades/class-subjects';
   static const String gradesAssessments = '/grades/assessments';
+  static const String gradesAssessmentTypes = '/grades/assessment-types';
+  /// [Grade-Validation] File des propositions de modification de notes
+  /// (lecture ; admin : tout l'établissement, non-admin : ses propositions).
+  static const String gradesModifications = '/grades/modifications';
+  static String gradeModificationApprove(int id) =>
+      '/grades/modifications/$id/approve';
+  static String gradeModificationReject(int id) =>
+      '/grades/modifications/$id/reject';
   static String assessment(int id) => '/grades/assessments/$id';
   static String assessmentGrades(int id) => '/grades/assessments/$id/grades';
   static String bulletin(int studentId) => '/grades/bulletin/$studentId';
@@ -78,16 +86,23 @@ class ApiEndpoints {
   // --- Paramètres ---
   static const String settingsPeriods = '/settings/periods';
 
-  // --- Emploi du temps (À CRÉER côté serveur) ---
+  // --- Emploi du temps ---
+  // GET /schedule?classroom_id=&teacher_id=&week_type= (lecture — existe côté
+  // serveur, commit e7a3096). GET /schedule/my = cours de l'enseignant connecté.
   static const String schedule = '/schedule';
+  static const String scheduleMy = '/schedule/my';
+  static const String scheduleTimeSlots = '/schedule/time-slots';
+  // Écriture (nécessite le patch serveur GeTech-SMS — voir docs/) :
+  static const String scheduleEntries = '/schedule/entries';
+  static String scheduleEntry(int id) => '/schedule/entries/$id';
 
-  // --- Présence (À CRÉER côté serveur) ---
+  // --- Présence (implémentés côté serveur — patch GeTech-SMS) ---
   static const String attendanceSession = '/attendance/session';
   static String attendanceAbsences(int sessionId) =>
       '/attendance/session/$sessionId/absences';
   static const String attendanceAbsencesHistory = '/attendance/absences';
 
-  // --- Synchro (À CRÉER côté serveur) ---
+  // --- Synchro (implémentés côté serveur) ---
   static const String syncPull = '/sync/pull';
   static const String syncPush = '/sync/push';
 

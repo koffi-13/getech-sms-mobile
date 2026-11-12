@@ -39,7 +39,8 @@ class StudentExportDialog extends ConsumerStatefulWidget {
 class _StudentExportDialogState extends ConsumerState<StudentExportDialog> {
   late String _format = 'xlsx';
   late int? _classroomId = widget.classroomId;
-  late Set<String> _selectedColumns = Set<String>.from(StudentColumns.defaultKeys);
+  late Set<String> _selectedColumns =
+      Set<String>.from(StudentColumns.defaultKeys);
   bool _includePhotos = false;
 
   bool _isExporting = false;
@@ -99,17 +100,19 @@ class _StudentExportDialogState extends ConsumerState<StudentExportDialog> {
                   const SizedBox(height: 12),
                   _ClassroomFilter(
                     classroomId: _classroomId,
-                    onChanged: (id) =>
-                        setState(() => _classroomId = id),
+                    onChanged: (id) => setState(() => _classroomId = id),
                   ),
                   const SizedBox(height: 12),
                   _ColumnsSelector(
                     selected: _selectedColumns,
                     onToggle: _toggleColumn,
                     onToggleGroup: _toggleGroup,
-                    onSelectAll: () => setState(() => _selectedColumns =
-                        Set<String>.from(StudentColumns.defaultKeys)),
-                    onClearAll: () => setState(() => _selectedColumns = const {}),
+                    onSelectAll: () => setState(
+                      () => _selectedColumns =
+                          Set<String>.from(StudentColumns.defaultKeys),
+                    ),
+                    onClearAll: () =>
+                        setState(() => _selectedColumns = const {}),
                   ),
                   const SizedBox(height: 8),
                   SwitchListTile(
@@ -119,8 +122,7 @@ class _StudentExportDialogState extends ConsumerState<StudentExportDialog> {
                       style: TextStyle(fontSize: 12),
                     ),
                     value: _includePhotos,
-                    onChanged: (v) =>
-                        setState(() => _includePhotos = v),
+                    onChanged: (v) => setState(() => _includePhotos = v),
                     dense: true,
                     contentPadding: EdgeInsets.zero,
                   ),
@@ -139,9 +141,8 @@ class _StudentExportDialogState extends ConsumerState<StudentExportDialog> {
                   const SizedBox(height: 12),
                   _Actions(
                     isExporting: _isExporting,
-                    canExport: online &&
-                        !_isExporting &&
-                        _selectedColumns.isNotEmpty,
+                    canExport:
+                        online && !_isExporting && _selectedColumns.isNotEmpty,
                     onExport: _runExport,
                     onCancel: () => Navigator.of(context).maybePop(),
                   ),
@@ -275,16 +276,21 @@ class _Header extends StatelessWidget {
             color: theme.colorScheme.primaryContainer,
             borderRadius: BorderRadius.circular(10),
           ),
-          child: Icon(Icons.file_download_outlined,
-              color: theme.colorScheme.primary, size: 22),
+          child: Icon(
+            Icons.file_download_outlined,
+            color: theme.colorScheme.primary,
+            size: 22,
+          ),
         ),
         const SizedBox(width: 12),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Exporter les élèves',
-                  style: theme.textTheme.titleLarge),
+              Text(
+                'Exporter les élèves',
+                style: theme.textTheme.titleLarge,
+              ),
               Text(
                 online
                     ? 'Sélectionnez le format, la classe et les colonnes.'
@@ -314,9 +320,11 @@ class _FormatSelector extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Format',
-            style: theme.textTheme.labelLarge
-                ?.copyWith(fontWeight: FontWeight.w600)),
+        Text(
+          'Format',
+          style:
+              theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600),
+        ),
         const SizedBox(height: 6),
         SegmentedButton<String>(
           segments: const [
@@ -355,16 +363,16 @@ class _ClassroomFilter extends ConsumerWidget {
     // Sécurise le `value` : si l'ID pré-sélectionné n'est pas encore dans la
     // liste (chargement en cours), on retombe sur null pour éviter une
     // assertion error du DropdownButtonFormField.
-    final effectiveValue = (classroomId != null &&
-            classrooms.any((c) => c.id == classroomId))
-        ? classroomId
-        : null;
+    final effectiveValue =
+        (classroomId != null && classrooms.any((c) => c.id == classroomId))
+            ? classroomId
+            : null;
 
     return Row(
       children: [
         Expanded(
           child: DropdownButtonFormField<int?>(
-            value: effectiveValue,
+            initialValue: effectiveValue,
             decoration: const InputDecoration(
               labelText: 'Classe (optionnel)',
               hintText: 'Toutes les classes',
@@ -377,10 +385,12 @@ class _ClassroomFilter extends ConsumerWidget {
                 value: null,
                 child: Text('Toutes les classes'),
               ),
-              ...classrooms.map((c) => DropdownMenuItem<int?>(
-                    value: c.id,
-                    child: Text(c.name),
-                  )),
+              ...classrooms.map(
+                (c) => DropdownMenuItem<int?>(
+                  value: c.id,
+                  child: Text(c.name),
+                ),
+              ),
             ],
             onChanged: onChanged,
           ),
@@ -416,9 +426,11 @@ class _ColumnsSelector extends StatelessWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('Colonnes (${selected.length}/${StudentColumns.all.length})',
-                style: theme.textTheme.labelLarge
-                    ?.copyWith(fontWeight: FontWeight.w600)),
+            Text(
+              'Colonnes (${selected.length}/${StudentColumns.all.length})',
+              style: theme.textTheme.labelLarge
+                  ?.copyWith(fontWeight: FontWeight.w600),
+            ),
             Row(
               children: [
                 TextButton.icon(
@@ -459,19 +471,22 @@ class _ColumnsSelector extends StatelessWidget {
                   CheckboxListTile(
                     dense: true,
                     visualDensity: VisualDensity.compact,
-                    contentPadding:
-                        const EdgeInsets.only(left: 32, right: 12),
+                    contentPadding: const EdgeInsets.only(left: 32, right: 12),
                     controlAffinity: ListTileControlAffinity.leading,
                     value: selected.contains(col.key),
                     onChanged: (_) => onToggle(col.key),
-                    title: Text(col.label,
-                        style: theme.textTheme.bodyMedium),
-                    subtitle: Text(col.key,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                          fontSize: 11,
-                          fontFamily: 'monospace',
-                        )),
+                    title: Text(
+                      col.label,
+                      style: theme.textTheme.bodyMedium,
+                    ),
+                    subtitle: Text(
+                      col.key,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
                   ),
                 if (entry.key != grouped.keys.last)
                   Divider(
@@ -522,9 +537,11 @@ class _GroupHeader extends StatelessWidget {
               visualDensity: VisualDensity.compact,
             ),
             const SizedBox(width: 4),
-            Text(group.label,
-                style: theme.textTheme.titleSmall
-                    ?.copyWith(fontWeight: FontWeight.w600)),
+            Text(
+              group.label,
+              style: theme.textTheme.titleSmall
+                  ?.copyWith(fontWeight: FontWeight.w600),
+            ),
             const SizedBox(width: 6),
             Text(
               '${selectedInGroup.length}/${allKeys.length}',

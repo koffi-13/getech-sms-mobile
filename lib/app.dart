@@ -2,6 +2,8 @@
 /// thème clair/sombre, localisation française.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,21 +11,28 @@ import 'package:go_router/go_router.dart';
 
 import 'app_shell.dart';
 import 'core/auth/auth_state.dart';
+import 'core/auth/teacher_scope.dart';
 import 'core/config/theme.dart';
+import 'core/notifications/notification_service.dart';
+import 'core/notifications/notification_store.dart';
+import 'core/sync/auto_sync.dart';
 import 'features/attendance/attendance_history_page.dart';
 import 'features/attendance/attendance_page.dart';
+import 'features/attendance/attendance_review_page.dart';
 import 'features/auth/login_page.dart';
 import 'features/classrooms/classroom_detail_page.dart';
 import 'features/classrooms/classrooms_list_page.dart';
-import 'features/connections/connection_state.dart';
+import 'features/connections/connection_state.dart' as conn;
 import 'features/connections/connections_page.dart';
 import 'features/connections/device_pairing_page.dart';
 import 'features/connections/qr_scanner_page.dart';
+import 'features/connections/server_profiles.dart';
 import 'features/dashboard/dashboard_page.dart';
 import 'features/grades/bulletin_page.dart';
 import 'features/grades/grade_entry_page.dart';
 import 'features/grades/ranking_page.dart';
 import 'features/schedule/schedule_page.dart';
+import 'features/settings/notification_center_page.dart';
 import 'features/settings/profile_page.dart';
 import 'features/settings/settings_page.dart';
 import 'features/students/student_detail_page.dart';
@@ -44,12 +53,18 @@ import 'features/students/student_import_page.dart';
 /// Provider du mode de thème (système / clair / sombre).
 final themeModeProvider = StateProvider<ThemeMode>((ref) => ThemeMode.system);
 
-/// Notifier qui déclenche le re-calcul du routeur quand l'auth ou la connexion
-/// change (pour les redirects de garde).
+/// Notifier qui déclenche le re-calcul du routeur quand l'auth, la connexion
+/// ou le bootstrap multi-serveurs change (pour les redirects de garde).
 class _RouterNotifier extends ChangeNotifier {
   _RouterNotifier(this._ref) {
     _ref.listen<AuthState>(authProvider, (_, __) => notifyListeners());
-    _ref.listen(connectionProvider, (_, __) => notifyListeners());
+    _ref.listen(conn.connectionProvider, (_, __) => notifyListeners());
+    // Bootstrap multi-serveurs : dès que le registre a appliqué le profil
+    // actif, le routeur réévalue ses redirects.
+    _ref.listen<AsyncValue<bool>>(
+      serverBootstrapProvider,
+      (_, __) => notifyListeners(),
+    );
   }
   final Ref _ref;
 }
@@ -63,7 +78,10 @@ final goRouterProvider = Provider<GoRouter>((ref) {
     initialLocation: '/',
     refreshListenable: notifier,
     redirect: (context, state) {
-      final conn = ref.read(connectionProvider);
+      // Déclenche le chargement du registre multi-serveurs (idempotent).
+      ref.read(serverBootstrapProvider);
+
+      final connection = ref.read(conn.connectionProvider);
       final auth = ref.read(authProvider);
       final loc = state.matchedLocation;
       final isPairing = loc == '/pairing' || loc.startsWith('/pairing');
@@ -71,16 +89,25 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       final isLogin = loc == '/login';
       final isConnections = loc == '/connections';
 
-      // 1) Pas encore appairé → onboarding d'appairage (pairing + QR scanner).
-      if (!conn.isPaired) {
+      // 0) Registre pas encore chargé : attendre (évite le flash vers
+      // /pairing au démarrage à froid).
+      final bootstrapped = ref.read(serverBootstrapProvider).hasValue;
+      if (!bootstrapped) return null;
+
+      // 1) Aucun serveur enregistré → onboarding d'appairage.
+      if (!connection.isPaired) {
         return (isPairing || isQrScanner) ? null : '/pairing';
       }
       // 2) Appairé mais non authentifié → login.
       if (!auth.isAuthenticated) {
-        return isLogin ? null : '/login';
+        return (isLogin || isConnections || isPairing || isQrScanner)
+            ? null
+            : '/login';
       }
-      // 3) Authentifié : empêcher l'accès aux écrans d'onboarding.
-      if (isPairing || isLogin) return '/dashboard';
+      // 3) Authentifié : /login est interdit (les écrans d'appairage et de
+      // gestion des connexions restent accessibles pour AJOUTER un serveur
+      // ou basculer d'établissement).
+      if (isLogin) return '/dashboard';
       // 4) Racine → dashboard.
       if (loc == '/') return '/dashboard';
       return null;
@@ -102,11 +129,23 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         path: '/qr-scanner',
         builder: (context, state) => const QrScannerPage(),
       ),
+      // [Fix-STARTUP-FLASH] V10 : écran de démarrage. Pendant le bootstrap
+      // multi-serveurs (lecture du registre, restauration du profil), la
+      // redirect-garde retourne null et AUCUNE route ne correspondait à
+      // '/' : GoRouter affichait alors son errorBuilder (« Page
+      // introuvable ») pendant plusieurs secondes avant l'arrivée sur
+      // l'Accueil. La route '/' est désormais servie par un écran de
+      // chargement ; la garde redirige vers /pairing, /login ou
+      // /dashboard dès que le registre est prêt.
+      GoRoute(
+        path: '/',
+        builder: (context, state) => const _StartupSplashPage(),
+      ),
       // Shell avec barre de navigation inférieure.
       ShellRoute(
         builder: (context, state, child) {
           final index = _shellIndexFor(state.matchedLocation);
-          return AppShell(child: child, index: index);
+          return AppShell(index: index, child: child);
         },
         routes: [
           GoRoute(
@@ -178,16 +217,28 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         path: '/attendance',
         builder: (context, state) => const AttendancePage(),
       ),
+      // [Fix-ATTENDANCE-REVIEW] V22 — consultation des présences (admins,
+      // lecture seule, servie par le cache Drift → fonctionne hors-ligne).
+      GoRoute(
+        path: '/attendance/review',
+        builder: (context, state) => const AttendanceReviewPage(),
+      ),
       GoRoute(
         path: '/attendance/history',
         builder: (context, state) => AttendanceHistoryPage(
           studentId: int.tryParse(
-              state.uri.queryParameters['student_id'] ?? ''),
+            state.uri.queryParameters['student_id'] ?? '',
+          ),
         ),
       ),
       GoRoute(
         path: '/settings',
         builder: (context, state) => const SettingsPage(),
+      ),
+      // [Notif-V8] Centre de notifications (historique persisté).
+      GoRoute(
+        path: '/notifications',
+        builder: (context, state) => const NotificationCenterPage(),
       ),
       GoRoute(
         path: '/settings/profile',
@@ -217,7 +268,8 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         path: '/subjects/class-subjects',
         builder: (context, state) => ClassSubjectsPage(
           classroomId: int.parse(
-              state.uri.queryParameters['classroom_id'] ?? '0'),
+            state.uri.queryParameters['classroom_id'] ?? '0',
+          ),
         ),
       ),
       GoRoute(
@@ -239,7 +291,8 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         path: '/finance/payments/new',
         builder: (context, state) => RecordPaymentPage(
           studentId: int.tryParse(
-              state.uri.queryParameters['student_id'] ?? ''),
+            state.uri.queryParameters['student_id'] ?? '',
+          ),
         ),
       ),
       GoRoute(
@@ -258,12 +311,128 @@ final goRouterProvider = Provider<GoRouter>((ref) {
         ),
       ),
     ],
-    errorBuilder: (context, state) => Scaffold(
-      appBar: AppBar(title: const Text('Page introuvable')),
-      body: Center(child: Text(state.error?.toString() ?? 'Route inconnue')),
+    errorBuilder: (context, state) => _RouterErrorPage(
+      location: state.matchedLocation,
     ),
   );
 });
+
+/// [Fix-STARTUP-FLASH] V10 : page d'erreur auto-récupérante.
+///
+/// Une route inconnue (ex. '/profile', poussée par une ancienne version)
+/// ne bloque PLUS l'utilisateur : retour automatique à l'accueil dès le
+/// premier rendu, plus un bouton de secours. Le détail brut (GoException)
+/// n'est plus affiché — c'était un détail de développement.
+class _RouterErrorPage extends StatefulWidget {
+  const _RouterErrorPage({required this.location});
+
+  /// Localisation introuvable (utilisé pour éviter une boucle si '/'
+  /// lui-même était en erreur, théoriquement impossible).
+  final String location;
+
+  @override
+  State<_RouterErrorPage> createState() => _RouterErrorPageState();
+}
+
+class _RouterErrorPageState extends State<_RouterErrorPage> {
+  bool _recovered = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_recovered && widget.location != '/') {
+        _recovered = true;
+        context.go('/');
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Page introuvable')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.explore_off_outlined,
+              size: 56,
+              color: Theme.of(context).colorScheme.outline,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Retour à l\'accueil…',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 24),
+            const SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(height: 24),
+            TextButton.icon(
+              onPressed: () => context.go('/'),
+              icon: const Icon(Icons.home_outlined),
+              label: const Text('Retour à l\'accueil'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// [Fix-STARTUP-FLASH] V10 : écran de chargement du démarrage (route '/').
+class _StartupSplashPage extends StatelessWidget {
+  const _StartupSplashPage();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.primaryContainer,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.school_rounded,
+                size: 48,
+                color: theme.colorScheme.onPrimaryContainer,
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'GeTech-SMS',
+              style: theme.textTheme.headlineSmall
+                  ?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 32),
+            const SizedBox(
+              width: 26,
+              height: 26,
+              child: CircularProgressIndicator(strokeWidth: 2.5),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Chargement…',
+              style: theme.textTheme.bodyMedium
+                  ?.copyWith(color: theme.colorScheme.outline),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 int _shellIndexFor(String location) {
   if (location.startsWith('/dashboard')) return 0;
@@ -281,145 +450,185 @@ class _MoreGridPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final auth = ref.watch(authProvider);
     final perms = auth.permissions;
+
+    // [Fix-TEACHER-NAV] Repli enseignant : Notes / EDT / Présence restent
+    // accessibles même avec des permissions RBAC incomplètes.
+    final scopeAsync = ref.watch(teacherScopeProvider);
+    final teacherish = auth.hasDeclaredTeacherRole ||
+        scopeAsync.maybeWhen(data: (s) => s.isTeacher, orElse: () => false);
+
     final items = <_MoreItem>[
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.calendar_view_week,
         label: 'Emploi du temps',
         color: Colors.teal,
         route: '/schedule',
         permission: 'STUDENT_READ',
+        teacherVisible: true,
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.fact_check,
         label: 'Présence',
         color: Colors.deepOrange,
         route: '/attendance',
         permission: 'STUDENT_READ',
+        teacherVisible: true,
       ),
-      _MoreItem(
+      const _MoreItem(
+        icon: Icons.grading,
+        label: 'Saisie de notes',
+        color: Colors.indigo,
+        route: '/grades',
+        permission: 'GRADE_READ',
+        teacherVisible: true,
+      ),
+      const _MoreItem(
         icon: Icons.leaderboard,
         label: 'Classement',
         color: Colors.purple,
         route: '/grades/ranking',
         permission: 'GRADE_READ',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.receipt_long,
         label: 'Bulletins',
         color: Colors.indigo,
         route: '/grades',
         permission: 'GRADE_READ',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.manage_accounts,
         label: 'Utilisateurs',
         color: Colors.deepPurple,
         route: '/users',
         permission: 'USER_READ',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.menu_book,
         label: 'Matières',
         color: Colors.brown,
         route: '/subjects',
         permission: 'GRADE_READ',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.payments,
         label: 'Paiements',
         color: Colors.green,
         route: '/finance',
         permission: 'PAYMENT_READ',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.account_balance_wallet,
         label: 'Soldes',
         color: Colors.teal,
         route: '/finance/balances',
         permission: 'PAYMENT_READ',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.upload_file,
         label: 'Import élèv.',
         color: Colors.amber,
         route: '/students/import',
         permission: 'STUDENT_CREATE',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.domain,
         label: 'Établiss.',
         color: Colors.cyan,
         route: '/establishments',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.link,
         label: 'Connexions',
         color: Colors.green,
         route: '/connections',
       ),
-      _MoreItem(
+      const _MoreItem(
         icon: Icons.settings,
         label: 'Paramètres',
         color: Colors.blueGrey,
         route: '/settings',
       ),
-    ].where((i) =>
-        i.permission == null ||
-        perms.contains('*') ||
-        perms.contains(i.permission!)).toList();
+    ]
+        .where(
+          (i) =>
+              i.permission == null ||
+              perms.contains('*') ||
+              perms.contains(i.permission!) ||
+              (teacherish && i.teacherVisible),
+        )
+        .toList();
 
     return Scaffold(
       appBar: AppBar(title: const Text('Plus')),
-      body: GridView.count(
-        crossAxisCount: 3,
+      // [Fix-FONT-SCALE-OVERFLOW] V17 — GridView avec `childAspectRatio`
+      // FIXE débordait dès que la police système était agrandie (les
+      // libellés « Emploi du temps », « Import élèv. »… passaient sur 2-3
+      // lignes → bande jaune « OVERFLOWED » sous chaque tuile). Un
+      // `GridView.builder` avec hauteur dynamique via `_MoreTile` (Layout
+      // Builder) calcule la hauteur réelle du contenu : la grille
+      // s'agrandit verticalement au lieu de déborder.
+      body: GridView.builder(
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 3,
+          crossAxisSpacing: 12,
+          mainAxisSpacing: 12,
+          // [Fix-FONT-SCALE-OVERFLOW] V17 — hauteur de tuile dynamique :
+          // suit le facteur de police système (labels multi-lignes).
+          mainAxisExtent: 118 *
+              MediaQuery.textScalerOf(context).scale(14) /
+              14,
+        ),
         padding: const EdgeInsets.all(16),
-        crossAxisSpacing: 12,
-        mainAxisSpacing: 12,
-        childAspectRatio: 0.78, // Encore augmenté pour éviter les overflows sur petits écrans
-        children: items
-            .map(
-              (i) => Card(
-                margin: EdgeInsets.zero,
-                child: InkWell(
-                  onTap: () => context.push(i.route),
-                  borderRadius: BorderRadius.circular(16),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 4,
-                      vertical: 8,
-                    ),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: i.color.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          child: Icon(i.icon, color: i.color, size: 24),
-                        ),
-                        const SizedBox(height: 8),
-                        Flexible(
-                          child: Text(
-                            i.label,
-                            textAlign: TextAlign.center,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style:
-                                Theme.of(context).textTheme.labelSmall?.copyWith(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 10, // Réduit à 10 pour sécurité
-                                    ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+        itemCount: items.length,
+        itemBuilder: (context, i) => _MoreTile(item: items[i]),
+      ),
+    );
+  }
+}
+
+/// Tuile individuelle du menu « Plus » : hauteur de CONTENU (icône +
+/// libellé multi-lignes) au lieu d'un ratio fixe — insensible à la taille
+/// de police système ([Fix-FONT-SCALE-OVERFLOW] V17).
+class _MoreTile extends StatelessWidget {
+  const _MoreTile({required this.item});
+  final _MoreItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: EdgeInsets.zero,
+      child: InkWell(
+        onTap: () => context.push(item.route),
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: item.color.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(item.icon, color: item.color, size: 24),
+              ),
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 2),
+                child: Text(
+                  item.label,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context)
+                      .textTheme
+                      .labelSmall
+                      ?.copyWith(fontWeight: FontWeight.bold),
                 ),
               ),
-            )
-            .toList(),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -432,22 +641,103 @@ class _MoreItem {
     required this.color,
     required this.route,
     this.permission,
+    this.teacherVisible = false,
   });
   final IconData icon;
   final String label;
   final Color color;
   final String route;
   final String? permission;
+
+  /// [Fix-TEACHER-NAV] Toujours visible pour un enseignant détecté.
+  final bool teacherVisible;
 }
 
 /// Widget racine de l'application.
-class GeTechApp extends ConsumerWidget {
+///
+/// [Notif-V8] Re-programmation des rappels de cours au retour d'arrière-plan
+/// (l'app restée ouverte toute la nuit reprogramme au petit matin sans
+/// redémarrage) et toutes les 15 minutes (changement de journée).
+class GeTechApp extends ConsumerStatefulWidget {
   const GeTechApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<GeTechApp> createState() => _GeTechAppState();
+}
+
+class _GeTechAppState extends ConsumerState<GeTechApp>
+    with WidgetsBindingObserver {
+  Timer? _remindersTimer;
+  int _lastScheduledDay = -1;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // [Notif-V9] Pont de navigation : un clic sur une notification SYSTÈME
+    // (rappel de cours…) ouvre la route portée par son payload
+    // (ex. '/attendance') via le GoRouter de l'application.
+    NotificationService.onOpenRoute = (route) {
+      final router = ref.read(goRouterProvider);
+      if (router.canPop()) router.pop();
+      router.push(route);
+    };
+    _remindersTimer = Timer.periodic(const Duration(minutes: 15), (_) {
+      _rescheduleRemindersIfNeeded();
+    });
+    // [Fix-AUTO-SYNC] V15 — « tant que le serveur est en ligne avec
+    // l'application mobile, la connexion et la synchronisation
+    // s'effectuent automatiquement » : chaque transition « serveur
+    // injoignable → en ligne » (heartbeat 30 s, démarrage, retour au
+    // premier plan) déclenche une synchro complète automatique — l'outbox
+    // (notes saisies hors-ligne…) est poussé sans action manuelle, et les
+    // pages affichées se rafraîchissent via syncGenerationProvider.
+    ref.listenManual<conn.ConnectionState>(
+      conn.connectionProvider,
+      (prev, next) => ref
+          .read(autoSyncControllerProvider)
+          .handleConnectionChange(prev, next),
+    );
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _remindersTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      // Retour au premier plan : re-programmer les rappels du jour +
+      // recharger l'historique du centre de notifications.
+      _rescheduleRemindersIfNeeded();
+      ref.read(notificationCenterProvider.notifier).reload();
+      // [Fix-AUTO-SYNC] V15 : re-ping immédiat du serveur (le heartbeat ne
+      // passe que toutes les 30 s) — si le serveur est revenu en ligne
+      // pendant que l'app était en arrière-plan, la transition déclenche
+      // la synchro automatique sans attendre le prochain battement.
+      ref.read(autoSyncControllerProvider).onAppResumed();
+    }
+  }
+
+  void _rescheduleRemindersIfNeeded() {
+    final today = DateTime.now().day;
+    if (today == _lastScheduledDay) return;
+    _lastScheduledDay = today;
+    ref.invalidate(courseRemindersSchedulerProvider);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final router = ref.watch(goRouterProvider);
     final themeMode = ref.watch(themeModeProvider);
+    // [Notifications] Programme les rappels de cours du jour dès que le
+    // profil enseignant + l'emploi du temps sont résolus (cache local).
+    ref.watch(courseRemindersSchedulerProvider);
+    _lastScheduledDay = DateTime.now().day;
     return MaterialApp.router(
       title: 'GeTech-SMS',
       debugShowCheckedModeBanner: false,

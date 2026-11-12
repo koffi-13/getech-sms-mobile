@@ -187,6 +187,7 @@ class WeeklyScheduleDto {
   final String? classroomName;
   final int? subjectId;
   final String? subjectName;
+  final String? subjectCode;
   final int? teacherId;
   final String? teacherName;
   final int timeSlotId;
@@ -196,12 +197,22 @@ class WeeklyScheduleDto {
   final String? room;
   final WeekType weekType;
 
+  /// Valeur brute serveur : 'A', 'B' ou `null` (= cours toutes les semaines).
+  ///
+  /// ⚠️ Le serveur historique sérialise NULL → "A" (perte d'information) ;
+  /// le patch serveur GeTech-SMS (docs/) préserve `null`. Tant que le patch
+  /// n'est pas appliqué, [isAllWeeks] reste `false` et les cours « toutes
+  /// semaines » apparaissent comme des cours de semaine A (dégradation
+  /// acceptable, aucun crash).
+  final String? weekTypeRaw;
+
   const WeeklyScheduleDto({
     required this.id,
     this.classroomId,
     this.classroomName,
     this.subjectId,
     this.subjectName,
+    this.subjectCode,
     this.teacherId,
     this.teacherName,
     required this.timeSlotId,
@@ -210,23 +221,35 @@ class WeeklyScheduleDto {
     required this.endTime,
     this.room,
     this.weekType = WeekType.a,
+    this.weekTypeRaw,
   });
 
   SchoolDay? get day => SchoolDay.fromIndex(dayOfWeek);
 
-  factory WeeklyScheduleDto.fromJson(Map<String, dynamic> j) => WeeklyScheduleDto(
-        id: (j['id'] as num).toInt(),
-        classroomId: (j['classroom_id'] as num?)?.toInt(),
-        classroomName: j['classroom_name'] as String?,
-        subjectId: (j['subject_id'] as num?)?.toInt(),
-        subjectName: j['subject_name'] as String?,
-        teacherId: (j['teacher_id'] as num?)?.toInt(),
-        teacherName: j['teacher_name'] as String?,
-        timeSlotId: (j['time_slot_id'] as num).toInt(),
-        dayOfWeek: (j['day_of_week'] as num).toInt(),
-        startTime: j['start_time'] as String? ?? '',
-        endTime: j['end_time'] as String? ?? '',
-        room: j['room'] as String?,
-        weekType: (j['week_type'] as String?) == 'B' ? WeekType.b : WeekType.a,
-      );
+  /// Cours programmé toutes les semaines (week_type NULL côté serveur).
+  bool get isAllWeeks => weekTypeRaw == null;
+
+  /// Le cours a-t-il lieu pendant la semaine [week] ?
+  bool matchesWeek(WeekType week) => isAllWeeks || weekType == week;
+
+  factory WeeklyScheduleDto.fromJson(Map<String, dynamic> j) {
+    final raw = j['week_type'] as String?;
+    return WeeklyScheduleDto(
+      id: (j['id'] as num).toInt(),
+      classroomId: (j['classroom_id'] as num?)?.toInt(),
+      classroomName: j['classroom_name'] as String?,
+      subjectId: (j['subject_id'] as num?)?.toInt(),
+      subjectName: j['subject_name'] as String?,
+      subjectCode: j['subject_code'] as String?,
+      teacherId: (j['teacher_id'] as num?)?.toInt(),
+      teacherName: j['teacher_name'] as String?,
+      timeSlotId: (j['time_slot_id'] as num?)?.toInt() ?? 0,
+      dayOfWeek: (j['day_of_week'] as num?)?.toInt() ?? 1,
+      startTime: j['start_time'] as String? ?? '',
+      endTime: j['end_time'] as String? ?? '',
+      room: j['room'] as String?,
+      weekType: raw == 'B' ? WeekType.b : WeekType.a,
+      weekTypeRaw: raw,
+    );
+  }
 }
