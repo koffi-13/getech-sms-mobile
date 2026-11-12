@@ -1,4 +1,3 @@
-import java.io.FileInputStream
 import java.util.Properties
 
 plugins {
@@ -8,13 +7,36 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
-// Signature release : keystore projet committé (android/keystore.properties +
-// android/app/getech-release.jks). Sans lui, on retombe sur la signature debug.
 val keystorePropertiesFile = rootProject.file("keystore.properties")
-val keystoreProperties = Properties().apply {
-    if (keystorePropertiesFile.exists()) {
-        load(FileInputStream(keystorePropertiesFile))
-    }
+val keystoreProperties = Properties()
+if (keystorePropertiesFile.isFile) {
+    keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+}
+val releaseStoreFilePath = System.getenv("ANDROID_KEYSTORE_PATH")
+    ?.takeIf { it.isNotBlank() }
+    ?: keystoreProperties.getProperty("storeFile")
+val releaseStoreFile = releaseStoreFilePath?.let { rootProject.file(it) }
+val releaseStorePassword = System.getenv("ANDROID_STORE_PASSWORD")
+    ?: keystoreProperties.getProperty("storePassword")
+val releaseKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
+    ?: keystoreProperties.getProperty("keyAlias")
+val releaseKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+    ?: keystoreProperties.getProperty("keyPassword")
+val releaseSigningConfigured = keystorePropertiesFile.isFile ||
+    System.getenv("ANDROID_KEYSTORE_PATH")?.isNotBlank() == true
+val releaseSigningValid = releaseSigningConfigured &&
+    releaseStoreFile?.isFile == true &&
+    !releaseStorePassword.isNullOrBlank() &&
+    !releaseKeyAlias.isNullOrBlank() &&
+    !releaseKeyPassword.isNullOrBlank()
+val releaseBuildRequested = gradle.startParameter.taskNames.any { taskName ->
+    val task = taskName.substringAfterLast(':').lowercase()
+    task.contains("release") || task in setOf("assemble", "build", "bundle")
+}
+if (releaseBuildRequested && !releaseSigningValid) {
+    throw GradleException(
+        "Release signing is not configured. Provide a valid keystore and signing credentials.",
+    )
 }
 
 android {
@@ -42,22 +64,18 @@ android {
 
     signingConfigs {
         create("release") {
-            if (keystorePropertiesFile.exists()) {
-                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
-                storePassword = keystoreProperties.getProperty("storePassword")
-                keyAlias = keystoreProperties.getProperty("keyAlias")
-                keyPassword = keystoreProperties.getProperty("keyPassword")
+            if (releaseSigningValid) {
+                storeFile = requireNotNull(releaseStoreFile)
+                storePassword = requireNotNull(releaseStorePassword)
+                keyAlias = requireNotNull(releaseKeyAlias)
+                keyPassword = requireNotNull(releaseKeyPassword)
             }
         }
     }
 
     buildTypes {
         release {
-            signingConfig = if (keystorePropertiesFile.exists()) {
-                signingConfigs.getByName("release")
-            } else {
-                signingConfigs.getByName("debug")
-            }
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 }
