@@ -164,8 +164,11 @@ List<CourseGroup> groupOverlappingCourses(List<WeeklyScheduleDto> dayCourses) {
       // (retour terrain 2026-11-12). Les cours DIFFÉRENTS qui se
       // suivent restent distincts.
       final consecutive = start != null &&
-          groups[i].courses.every((g) =>
-              g.subjectId == c.subjectId && g.teacherId == c.teacherId) &&
+          c.subjectId != null &&
+          c.teacherId != null &&
+          groups[i].courses.every(
+                (g) => g.subjectId == c.subjectId && g.teacherId == c.teacherId,
+              ) &&
           start - groupEnds[i] >= 0 &&
           start - groupEnds[i] <= 10;
       if (overlaps || consecutive) {

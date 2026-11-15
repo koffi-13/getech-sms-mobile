@@ -18,12 +18,16 @@ WeeklyScheduleDto _course(
   int? classroomId,
   String? classroomName,
   String? subjectName,
+  int? subjectId,
+  int? teacherId,
 }) =>
     WeeklyScheduleDto(
       id: id,
       classroomId: classroomId,
       classroomName: classroomName,
       subjectName: subjectName,
+      subjectId: subjectId,
+      teacherId: teacherId,
       timeSlotId: id * 10,
       dayOfWeek: dayOfWeek,
       startTime: start,
@@ -84,6 +88,33 @@ void main() {
       expect(groups.first.isMerged, isTrue); // 1 + 2
       expect(groups.first.endMinutes, 12 * 60); // max des fins.
       expect(groups.last.courses.length, 1); // 3 seul.
+    });
+
+    test(
+        'groupOverlappingCourses : cours consécutifs du même enseignant et matière',
+        () {
+      final groups = smart.groupOverlappingCourses([
+        _course(
+          1,
+          dayOfWeek: 2,
+          start: '08:00',
+          end: '10:00',
+          subjectId: 7,
+          teacherId: 3,
+        ),
+        _course(
+          2,
+          dayOfWeek: 2,
+          start: '10:05',
+          end: '12:00',
+          subjectId: 7,
+          teacherId: 3,
+        ),
+      ]);
+
+      expect(groups.length, 1);
+      expect(groups.single.startMinutes, 8 * 60);
+      expect(groups.single.endMinutes, 12 * 60);
     });
 
     test('groupOverlappingCourses : tri par heure de début', () {
