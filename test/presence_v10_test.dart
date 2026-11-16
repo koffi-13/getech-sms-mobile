@@ -17,16 +17,16 @@ WeeklyScheduleDto _course(
   required String end,
   int? classroomId,
   String? classroomName,
-  String? subjectName,
   int? subjectId,
+  String? subjectName,
   int? teacherId,
 }) =>
     WeeklyScheduleDto(
       id: id,
       classroomId: classroomId,
       classroomName: classroomName,
-      subjectName: subjectName,
       subjectId: subjectId,
+      subjectName: subjectName,
       teacherId: teacherId,
       timeSlotId: id * 10,
       dayOfWeek: dayOfWeek,
@@ -36,14 +36,68 @@ WeeklyScheduleDto _course(
 
 void main() {
   group('[Présence-V10] classes jumelées (chevauchements)', () {
-    test('groupOverlappingCourses : cours disjoints → groupes séparés', () {
+    // [Fix-CONSECUTIVE-SLOTS] : deux cours du MÊME sujet (même
+    // subjectId + même teacherId) sur des créneaux CONSÉCUTIFS sont
+    // fusionnés (retour terrain 2026-11-12 : une seule saisie
+    // « 08:00 – 12:00 »). Les cours de MATIÈRES DIFFÉRENTES qui se
+    // suivent restent distincts — les tests historiques « disjoints →
+    // 3 groupes » utilisaient subjectId/teacherId null partout (donc
+    // « même matière ») et sont mis à jour en conséquence.
+    test('groupOverlappingCourses : matières différentes → groupes séparés', () {
       final groups = smart.groupOverlappingCourses([
-        _course(1, dayOfWeek: 1, start: '08:00', end: '10:00'),
-        _course(2, dayOfWeek: 1, start: '10:00', end: '12:00'),
-        _course(3, dayOfWeek: 1, start: '15:00', end: '17:00'),
+        _course(
+          1,
+          dayOfWeek: 1,
+          start: '08:00',
+          end: '10:00',
+          subjectId: 101,
+          teacherId: 7,
+        ),
+        _course(
+          2,
+          dayOfWeek: 1,
+          start: '10:00',
+          end: '12:00',
+          subjectId: 202,
+          teacherId: 7,
+        ),
+        _course(
+          3,
+          dayOfWeek: 1,
+          start: '15:00',
+          end: '17:00',
+          subjectId: 101,
+          teacherId: 7,
+        ),
       ]);
       expect(groups.length, 3);
       expect(groups.every((g) => !g.isMerged), isTrue);
+    });
+
+    test('groupOverlappingCourses : même matière consécutive → UN groupe', () {
+      // [Fix-CONSECUTIVE-SLOTS] 08-10 puis 10-12 de la MÊME matière par
+      // le MÊME enseignant : fusionnés (saisie unique 08:00 – 12:00).
+      final groups = smart.groupOverlappingCourses([
+        _course(
+          1,
+          dayOfWeek: 1,
+          start: '08:00',
+          end: '10:00',
+          subjectId: 101,
+          teacherId: 7,
+        ),
+        _course(
+          2,
+          dayOfWeek: 1,
+          start: '10:00',
+          end: '12:00',
+          subjectId: 101,
+          teacherId: 7,
+        ),
+      ]);
+      expect(groups.length, 1);
+      expect(groups.first.startMinutes, 8 * 60);
+      expect(groups.first.endMinutes, 12 * 60);
     });
 
     test('groupOverlappingCourses : chevauchement → UN groupe jumelé', () {
@@ -78,11 +132,34 @@ void main() {
 
     test('groupOverlappingCourses : chevauchement partiel transitif', () {
       // 08-10 et 09-12 se chevauchent ; 12-14 touche à peine (fin=début
-      // strictement → PAS de chevauchement).
+      // strictement → PAS de chevauchement) et porte une MATIÈRE
+      // différente → PAS de fusion consécutive ([Fix-CONSECUTIVE-SLOTS]
+      // ne s'applique qu'au même sujet).
       final groups = smart.groupOverlappingCourses([
-        _course(1, dayOfWeek: 2, start: '08:00', end: '10:00'),
-        _course(2, dayOfWeek: 2, start: '09:00', end: '12:00'),
-        _course(3, dayOfWeek: 2, start: '12:00', end: '14:00'),
+        _course(
+          1,
+          dayOfWeek: 2,
+          start: '08:00',
+          end: '10:00',
+          subjectId: 101,
+          teacherId: 7,
+        ),
+        _course(
+          2,
+          dayOfWeek: 2,
+          start: '09:00',
+          end: '12:00',
+          subjectId: 101,
+          teacherId: 7,
+        ),
+        _course(
+          3,
+          dayOfWeek: 2,
+          start: '12:00',
+          end: '14:00',
+          subjectId: 202,
+          teacherId: 7,
+        ),
       ]);
       expect(groups.length, 2);
       expect(groups.first.isMerged, isTrue); // 1 + 2
@@ -128,10 +205,34 @@ void main() {
   });
 
   group('[Présence-V10] heure qui sonne (autoCourseGroup)', () {
+    // [Fix-CONSECUTIVE-SLOTS] Matières DISTINCTES : les créneaux qui se
+    // suivent (08-10 / 10-12) ne fusionnent PAS (la fusion consécutive
+    // ne s'applique qu'au même sujet) → 3 groupes horaires distincts.
     final groups = smart.groupOverlappingCourses([
-      _course(1, dayOfWeek: 1, start: '08:00', end: '10:00'),
-      _course(2, dayOfWeek: 1, start: '10:00', end: '12:00'),
-      _course(3, dayOfWeek: 1, start: '15:00', end: '17:00'),
+      _course(
+        1,
+        dayOfWeek: 1,
+        start: '08:00',
+        end: '10:00',
+        subjectId: 101,
+        teacherId: 7,
+      ),
+      _course(
+        2,
+        dayOfWeek: 1,
+        start: '10:00',
+        end: '12:00',
+        subjectId: 202,
+        teacherId: 7,
+      ),
+      _course(
+        3,
+        dayOfWeek: 1,
+        start: '15:00',
+        end: '17:00',
+        subjectId: 101,
+        teacherId: 7,
+      ),
     ]);
 
     test("l'heure courante DANS le créneau 10-12 → ce créneau", () {

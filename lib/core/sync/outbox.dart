@@ -62,6 +62,50 @@ class Outbox {
         );
   }
 
+  /// [Fix-OFFLINE-GRADES-REEDIT] Remplace les entrées PENDING correspondant
+  /// au filtre par UNE nouvelle entrée avec [payload].
+  ///
+  /// Cas d'usage : soumissions de notes hors-ligne — l'utilisateur peut
+  /// sauvegarder plusieurs fois hors-ligne (saisie partielle puis
+  /// compléments/modifications) ; seule la DERNIÈRE version doit être
+  /// poussée à la reconnexion. Sans remplacement, chaque sauvegarde
+  /// empilait une entrée et la sync rejouait des versions intermédiaires
+  /// obsolètes (propositions « queued » serveur avec d'anciennes valeurs,
+  /// affichage qui revenait en arrière après synchronisation).
+  ///
+  /// [table] : nom de la table ciblée (ex. `grade_submission`).
+  /// [payloadFilter] : prédicat sur le payload JSON DÉCODÉ — retourne
+  ///   vrai pour les entrées à remplacer.
+  /// [operation]/[recordId]/[payload] : caractéristiques de la nouvelle
+  ///   entrée (sémantique identique à [enqueue]).
+  Future<void> replacePendingFor({
+    required String table,
+    required bool Function(Map<String, dynamic> payload) payloadFilter,
+    required String operation,
+    int? recordId,
+    required Map<String, dynamic> payload,
+  }) async {
+    final entries = await pending();
+    for (final e in entries) {
+      if (e.tableNameColumn != table) continue;
+      Map<String, dynamic> decoded;
+      try {
+        decoded = jsonDecode(e.payload) as Map<String, dynamic>;
+      } catch (_) {
+        continue;
+      }
+      if (!payloadFilter(decoded)) continue;
+      // Marquer traitée SANS erreur : la nouvelle entrée la remplace.
+      await markProcessed(e.id);
+    }
+    await enqueue(
+      table: table,
+      operation: operation,
+      recordId: recordId,
+      payload: payload,
+    );
+  }
+
   /// Retourne la liste des entrées non traitées, triées par date de création
   /// CROISSANTE (plus anciennes en premier).
   ///

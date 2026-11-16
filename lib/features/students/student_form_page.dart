@@ -587,11 +587,24 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
   }
 
   void _pickDob() async {
+    // [Fix-DOB-PICKER-DEAD] showDatePicker EXIGE firstDate <= initialDate
+    // <= lastDate : si la date en base est hors bornes (< 1990 après une
+    // saisie erronée, un import ou une date future), l'appel levait une
+    // assertion et le tap sur « Date de naissance » ne faisait RIEN
+    // (symptôme : calendrier qui ne s'ouvre plus). On borne
+    // l'initialDate et on élargit la plage (élèves nés avant 1990).
+    final now = DateTime.now();
+    final firstDate = DateTime(1900);
+    final lastDate = DateTime(now.year + 1, 12, 31);
+    var initial = _dob ?? DateTime(2010);
+    if (initial.isBefore(firstDate)) initial = firstDate;
+    if (initial.isAfter(lastDate)) initial = lastDate;
     final d = await showDatePicker(
       context: context,
-      initialDate: _dob ?? DateTime(2010),
-      firstDate: DateTime(1990),
-      lastDate: DateTime.now(),
+      initialDate: initial,
+      firstDate: firstDate,
+      lastDate: lastDate,
+      helpText: 'Date de naissance',
     );
     if (d != null) setState(() => _dob = d);
   }

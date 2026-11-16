@@ -158,15 +158,31 @@ class GradeController {
   }
 
   /// Met la soumission complète dans l'outbox et renvoie la réponse
-  /// « enregistré hors-ligne » (partagée par le chemin hors-ligne AVANT
+  /// « enregistré hors-ligne » (partagé par le chemin hors-ligne AVANT
   /// requête et par le repli sur échec réseau PENDANT la requête).
+  ///
+  /// [Fix-OFFLINE-GRADES-REEDIT] Une nouvelle sauvegarde hors-ligne pour
+  /// la MÊME évaluation REMPLACE la soumission en attente précédente :
+  /// l'utilisateur peut continuer à saisir/modifier ses notes hors-ligne
+  /// après un enregistrement partiel — seule la dernière version sera
+  /// poussée. Avant, chaque sauvegarde empilait une entrée : la sync
+  /// rejouait des versions intermédiaires obsolètes (première version en
+  /// « queued » serveur, valeurs d'affichage qui revenaient en arrière)
+  /// et la modification semblait « impossible ».
   Future<SaveGradesResponse> _enqueueGradeSubmission(
     int assessmentId,
     List<GradeEntryDto> entries,
   ) async {
-    await _ref.read(outboxProvider).enqueue(
+    // [Fix-OFFLINE-GRADES-REEDIT] `entries` est DÉJÀ filtrée par
+    // _filterMeaningfulEntries (appelé par saveGrades AVANT la
+    // persistance des propositions, cf. l'ordre documenté là-bas) :
+    // lignes nouvelles ou réellement modifiées uniquement.
+    final outbox = _ref.read(outboxProvider);
+    await outbox.replacePendingFor(
       table: 'grade_submission',
       operation: 'UPSERT',
+      payloadFilter: (p) =>
+          (p['assessment_id'] as num?)?.toInt() == assessmentId,
       payload: {
         'assessment_id': assessmentId,
         'grades': entries.map((e) => e.toJson()).toList(),
@@ -214,6 +230,18 @@ class GradeController {
     List<GradeEntryDto> entries,
   ) async {
     // 1. Persistance locale des propositions (Drift).
+    //
+    // [Fix-OFFLINE-GRADES-REEDIT] ⚠️ ORDRE : la persistance écrit
+    // proposedValue=X dans Drift ; le filtre de la soumission hors-ligne
+    // (_filterMeaningfulEntries) compare à la DERNIÈRE valeur connue
+    // (proposedValue ?? value). Il faut donc FILTRER AVANT de persister,
+    // sinon une modification 12→14 était persistée (proposed=14) puis
+    // filtrée comme « inchangée » (14 == 14) et disparaissait de la
+    // soumission hors-ligne → jamais poussée au serveur.
+    final meaningfulEntries = await _filterMeaningfulEntries(
+      assessmentId,
+      entries,
+    );
     await _persistLocalPropositions(assessmentId, entries);
 
     final url = _serverUrl;
@@ -221,7 +249,7 @@ class GradeController {
 
     // 2. Hors-ligne : outbox « grade_submission ».
     if (_definitivelyOffline) {
-      return _enqueueGradeSubmission(assessmentId, entries);
+      return _enqueueGradeSubmission(assessmentId, meaningfulEntries);
     }
 
     // 3. En ligne : POST direct.
@@ -278,6 +306,16 @@ class GradeController {
   /// Marque localement (Drift) les PROPOSITIONS de modification : les lignes
   /// EXISTANTES reçoivent syncStatus='pending' + la valeur proposée (la
   /// colonne `value` reste la valeur serveur actuelle).
+  ///
+  /// [Fix-OFFLINE-GRADES-REEDIT] Seules les lignes réellement MODIFIÉES
+  /// (par rapport à la dernière valeur connue : proposition en cours >
+  /// valeur serveur) sont marquées. Avant, TOUTES les lignes existantes
+  /// d'une sauvegarde étaient marquées 'pending' — y compris celles que
+  /// l'utilisateur n'avait pas touchées (il enregistre une saisie
+  /// PARTIELLE, la feuille rouvre tout le monde en « proposition ») :
+  /// côté serveur chaque ligne inchangée repartait en file de validation
+  /// (queued) et l'enseignant ne pouvait plus distinguer ses vraies
+  /// modifications. Une ligne inchangée garde sa marque actuelle.
   Future<void> _persistLocalPropositions(
     int assessmentId,
     List<GradeEntryDto> entries,
@@ -289,9 +327,22 @@ class GradeController {
         .get();
     final byStudent = {for (final g in rows) g.studentId: g};
 
+    bool _sameNum(double? a, double? b) =>
+        a == null && b == null ||
+        a != null && b != null && (a - b).abs() < 0.001;
+
     for (final e in entries) {
       final existing = byStudent[e.studentId];
       if (existing == null) continue; // note nouvelle : pas de ligne locale
+      // Dernière valeur connue de la ligne : la proposition en cours
+      // (offline) prime sur la valeur serveur répliquée.
+      final knownValue = existing.proposedValue ?? existing.value;
+      final knownAbsent = existing.proposedIsAbsent ?? existing.isAbsent;
+      final knownComment = existing.proposedComments ?? existing.comments;
+      final unchanged = _sameNum(knownValue, e.value) &&
+          knownAbsent == e.isAbsent &&
+          knownComment == e.comment;
+      if (unchanged) continue; // pas touchée par l'utilisateur
       await (db.update(db.grades)..where((t) => t.id.equals(existing.id)))
           .write(
         GradesCompanion(
@@ -308,6 +359,54 @@ class GradeController {
   /// Après un POST en ligne, reflète la réponse serveur sur les marques
   /// locales ('queued' pour les propositions, null pour les notes
   /// appliquées/inchangées).
+  /// [Fix-OFFLINE-GRADES-REEDIT] Filtre les lignes à inclure dans une
+  /// soumission : notes NOUVELLES (aucune ligne locale) ou réellement
+  /// MODIFIÉES (≠ dernière valeur connue : proposition en cours > valeur
+  /// serveur). Les lignes intactes sont exclues — elles n'ont rien à
+  /// faire sur le serveur et pollueraient la file de validation.
+  /// Si le résultat est VIDE (aucune modification réelle), on retourne
+  /// quand même les entrées non nulles pour ne pas perdre une saisie
+  /// « tout inchangé » qui masquerait un true-up (best-effort).
+  Future<List<GradeEntryDto>> _filterMeaningfulEntries(
+    int assessmentId,
+    List<GradeEntryDto> entries,
+  ) async {
+    final db = _ref.read(databaseProvider);
+    final rows = await (db.select(db.grades)
+          ..where((t) => t.assessmentId.equals(assessmentId))
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    final byStudent = {for (final g in rows) g.studentId: g};
+
+    bool _sameNum(double? a, double? b) =>
+        a == null && b == null ||
+        a != null && b != null && (a - b).abs() < 0.001;
+
+    final meaningful = <GradeEntryDto>[];
+    for (final e in entries) {
+      final existing = byStudent[e.studentId];
+      if (existing == null) {
+        meaningful.add(e); // note nouvelle
+        continue;
+      }
+      final knownValue = existing.proposedValue ?? existing.value;
+      final knownAbsent = existing.proposedIsAbsent ?? existing.isAbsent;
+      final knownComment = existing.proposedComments ?? existing.comments;
+      final unchanged = _sameNum(knownValue, e.value) &&
+          knownAbsent == e.isAbsent &&
+          knownComment == e.comment;
+      if (!unchanged) meaningful.add(e);
+    }
+    // Filet de sécurité : une soumission VIDE serait marquée « ignorée »
+    // par le sync engine ; si tout est inchangé on ne perd rien en
+    // n'envoyant rien, mais on préserve les lignes ABSentes explicites
+    // (marquage « Absent » cochable/décochable) pour éviter toute perte.
+    if (meaningful.isEmpty && entries.any((e) => e.isAbsent)) {
+      return entries.where((e) => e.isAbsent).toList();
+    }
+    return meaningful;
+  }
+
   Future<void> _mirrorResponseMarks(
     int assessmentId,
     List<GradeEntryDto> sent,
@@ -1760,17 +1859,23 @@ Future<List<GradeEntryDto>> _gradeEntriesFromLocal(
   final gradeByStudent = {for (final g in gradeRows) g.studentId: g};
 
   // Soumission(s) en attente dans l'outbox pour CETTE évaluation.
+  // [Fix-OFFLINE-GRADES-REEDIT] Fusion MULTI-soumissions en attente :
+  // avec le remplacement automatique (Outbox.replacePendingFor) il n'y
+  // en a plus qu'une, mais des entrées empilées héritées d'une version
+  // antérieure peuvent coexister — pending() est trié CROISSANT par
+  // date, on écrase donc dans l'ordre chronologique pour que la valeur
+  // la PLUS RÉCENTE gagne (l'affichage hors-ligne montre toujours la
+  // dernière saisie de l'utilisateur).
   final outbox = ref.read(outboxProvider);
   final pendingEntries = await outbox.pending();
-  final submission = pendingEntries
-      .where((e) => e.tableNameColumn == 'grade_submission')
-      .map((e) => e.payloadMap)
-      .where((p) => (p['assessment_id'] as num?)?.toInt() == assessmentId)
-      .firstOrNull;
   final pendingByStudent = <int, Map<String, dynamic>>{};
-  if (submission != null) {
+  for (final e in pendingEntries.where(
+    (e) => e.tableNameColumn == 'grade_submission',
+  )) {
+    final p = e.payloadMap;
+    if ((p['assessment_id'] as num?)?.toInt() != assessmentId) continue;
     for (final r
-        in ((submission['grades'] as List?) ?? const []).whereType<Map>()) {
+        in ((p['grades'] as List?) ?? const []).whereType<Map>()) {
       final m = Map<String, dynamic>.from(r);
       final sid = (m['student_id'] as num?)?.toInt();
       if (sid != null) pendingByStudent[sid] = m;
@@ -1786,9 +1891,9 @@ Future<List<GradeEntryDto>> _gradeEntriesFromLocal(
     final pending = pendingByStudent[sid];
 
     // Valeur affichée : proposition en attente > note répliquée.
-    final pendingValue = (pending?['value'] as num?)?.toDouble();
-    final value =
-        pending != null ? pendingValue : (local?.proposedValue ?? local?.value);
+    final value = pending != null
+        ? ((pending['value'] as num?)?.toDouble())
+        : (local?.proposedValue ?? local?.value);
     final isAbsent = pending != null
         ? (pending['is_absent'] as bool? ?? false)
         : (local?.proposedIsAbsent ?? local?.isAbsent ?? false);
