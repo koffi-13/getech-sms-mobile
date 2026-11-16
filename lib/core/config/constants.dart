@@ -145,6 +145,14 @@ enum InscriptionType {
     }
     return null;
   }
+
+  /// [Fix-REGISTRATION-TYPES] Valeurs proposées à l'INSCRIPTION : uniquement
+  /// « Nouveau » (Nouv. Insc.) et « Ancien ». EXCLU et ABANDON sont des
+  /// MOTIFS DE SORTIE posés lors de la SUPPRESSION d'un élève (soft delete
+  /// motivé) — les proposer à l'inscription laissait des élèves actifs avec
+  /// un type « Exclu »/« Abandon » et faussait les listes et bulletins.
+  static List<InscriptionType> get registrableValues =>
+      [nouveau, ancien];
 }
 
 /// État d'une session de cours (présence).

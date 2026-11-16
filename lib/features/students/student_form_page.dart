@@ -347,7 +347,11 @@ class _StudentFormPageState extends ConsumerState<StudentFormPage> {
                     ),
                     DropdownButtonFormField<InscriptionType>(
                       initialValue: _inscriptionType,
-                      items: InscriptionType.values
+                      // [Fix-REGISTRATION-TYPES] À l'inscription, le choix
+                      // est restreint à Nouveau (Nouv. Insc.) et Ancien —
+                      // EXCLU/ABANDON sont des motifs de SUPPRESSION, pas
+                      // des types d'inscription saisissables.
+                      items: InscriptionType.registrableValues
                           .map(
                             (s) => DropdownMenuItem(
                               value: s,
