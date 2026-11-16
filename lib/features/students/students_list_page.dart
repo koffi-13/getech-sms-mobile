@@ -282,6 +282,10 @@ class _StudentsListPageState extends ConsumerState<StudentsListPage> {
             canOpenDetails: !restricted ||
                 scope.headClassrooms
                     .any((c) => c.id == students[i].classroomId),
+            // [Fix-STUDENT-NAV] Liste ordonnée des IDs de la sélection
+            // FILTRÉE courante (même ordre que l'affichage) : transmise au
+            // détail pour la navigation Précédent/Suivant.
+            navStudentIds: students.map((s) => s.id).toList(growable: false),
           ),
         ),
       ),
@@ -539,12 +543,20 @@ class _FilterChip extends StatelessWidget {
 }
 
 class _StudentTile extends StatelessWidget {
-  const _StudentTile({required this.student, this.canOpenDetails = true});
+  const _StudentTile({
+    required this.student,
+    this.canOpenDetails = true,
+    this.navStudentIds,
+  });
   final StudentDto student;
 
   /// [Fix-TEACHER-STUDENTS-SCOPE] Faux pour un enseignant simple : la fiche
   /// détaillée est réservée au professeur principal de la classe.
   final bool canOpenDetails;
+
+  /// [Fix-STUDENT-NAV] IDs ordonnés de la liste filtrée courante — transmis
+  /// au détail (go_router `extra`) pour la navigation Précédent/Suivant.
+  final List<int>? navStudentIds;
 
   @override
   Widget build(BuildContext context) {
@@ -585,7 +597,9 @@ class _StudentTile extends StatelessWidget {
             );
             return;
           }
-          context.push('/students/${student.id}');
+          // [Fix-STUDENT-NAV] `extra` transporte la liste filtrée pour la
+          // navigation élève ↔ élève dans le détail.
+          context.push('/students/${student.id}', extra: navStudentIds);
         },
       ),
     );

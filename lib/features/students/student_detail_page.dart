@@ -26,9 +26,19 @@ import 'student_controller.dart';
 import 'student_photos.dart';
 
 class StudentDetailPage extends ConsumerWidget {
-  const StudentDetailPage({super.key, required this.id});
+  const StudentDetailPage({
+    super.key,
+    required this.id,
+    this.navStudentIds,
+  });
 
   final int id;
+
+  /// [Fix-STUDENT-NAV] Liste ordonnée des IDs de la liste FILTRÉE d'où
+  /// l'utilisateur vient (filtres + recherche). Non nulle uniquement si
+  /// la navigation vient de la liste des élèves — permet Précédent /
+  /// Suivant dans le même ordre que la liste affichée.
+  final List<int>? navStudentIds;
 
   Future<void> _refresh(WidgetRef ref) async {
     ref.invalidate(studentDetailProvider(id));
@@ -46,7 +56,24 @@ class StudentDetailPage extends ConsumerWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Élève'),
+        // [Fix-STUDENT-NAV] Précédent / Suivant : remplace la page par
+        // l'élève voisin dans la liste filtrée d'origine (context.replace
+        // → pas d'empilement d'historique, retour = retour à la liste).
+        leading: navStudentIds != null && navStudentIds!.length > 1
+            ? _navButton(context, ref, -1)
+            : null,
         actions: [
+          if (navStudentIds != null && navStudentIds!.length > 1) ...[
+            Center(
+              child: Text(
+                '${navStudentIds!.indexOf(id) + 1} / ${navStudentIds!.length}',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+              ),
+            ),
+            _navButton(context, ref, 1),
+          ],
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: 'Rafraîchir',
@@ -102,12 +129,34 @@ class StudentDetailPage extends ConsumerWidget {
         ],
       ),
       body: async.when(
-        data: (s) => _DetailBody(student: s, onRefresh: () => _refresh(ref)),        loading: () => const AppLoading(label: 'Chargement de l\'élève…'),
+        data: (s) => _DetailBody(student: s, onRefresh: () => _refresh(ref)),
+        loading: () => const AppLoading(label: 'Chargement de l\'élève…'),
         error: (e, _) => AppErrorWidget(
           message: e.toString(),
           onRetry: () => _refresh(ref),
         ),
       ),
+    );
+  }
+
+  /// Bouton de navigation : [-1] = élève précédent, [+1] = suivant.
+  /// Désactivé aux extrémités de la liste filtrée.
+  Widget _navButton(BuildContext context, WidgetRef ref, int direction) {
+    final ids = navStudentIds!;
+    final index = ids.indexOf(id);
+    final target = index + direction;
+    final enabled = target >= 0 && target < ids.length;
+    return IconButton(
+      icon: Icon(
+        direction < 0 ? Icons.chevron_left : Icons.chevron_right,
+      ),
+      tooltip: direction < 0 ? 'Élève précédent' : 'Élève suivant',
+      onPressed: enabled
+          ? () => context.replace(
+                '/students/${ids[target]}',
+                extra: ids,
+              )
+          : null,
     );
   }
 }
@@ -146,18 +195,21 @@ class _DetailBodyState extends ConsumerState<_DetailBody> {
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
       builder: (ctx) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          ListTile(
-            leading: const Icon(Icons.photo_library),
-            title: const Text('Choisir dans la galerie'),
-            onTap: () => Navigator.pop(ctx, ImageSource.gallery),
-          ),
-          ListTile(
-            leading: const Icon(Icons.photo_camera),
-            title: const Text('Prendre une photo'),
-            onTap: () => Navigator.pop(ctx, ImageSource.camera),
-          ),
-        ]),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('Choisir dans la galerie'),
+              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_camera),
+              title: const Text('Prendre une photo'),
+              onTap: () => Navigator.pop(ctx, ImageSource.camera),
+            ),
+          ],
+        ),
       ),
     );
     if (source == null || !mounted) return;
@@ -173,9 +225,7 @@ class _DetailBodyState extends ConsumerState<_DetailBody> {
     final bytes = await File(xfile.path).readAsBytes();
     if (bytes.isEmpty) return;
     final nameParts = xfile.name.split('.');
-    final ext = nameParts.length > 1
-        ? nameParts.last.toLowerCase()
-        : 'jpg';
+    final ext = nameParts.length > 1 ? nameParts.last.toLowerCase() : 'jpg';
 
     // 1. Affichage local immédiat — y compris hors ligne.
     final cache = ref.read(studentPhotoCacheProvider);
@@ -238,15 +288,15 @@ class _DetailBodyState extends ConsumerState<_DetailBody> {
   Future<void> _queuePhotoUpload(List<int> bytes, String ext) async {
     try {
       await ref.read(outboxProvider).enqueue(
-            table: 'student_photo',
-            operation: 'POST',
-            recordId: student.id,
-            payload: {
-              'student_id': student.id,
-              'photo_base64': base64Encode(bytes),
-              'extension': ext,
-            },
-          );
+        table: 'student_photo',
+        operation: 'POST',
+        recordId: student.id,
+        payload: {
+          'student_id': student.id,
+          'photo_base64': base64Encode(bytes),
+          'extension': ext,
+        },
+      );
     } catch (e) {
       // Échec de la mise en file : la photo reste affichée localement
       // (cache disque déjà écrit) ; elle sera re-poussée si l'utilisateur
@@ -255,7 +305,6 @@ class _DetailBodyState extends ConsumerState<_DetailBody> {
     }
   }
 
-
   @override
   Widget build(BuildContext context) {
     return RefreshIndicator(
@@ -263,7 +312,14 @@ class _DetailBodyState extends ConsumerState<_DetailBody> {
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          _HeaderCard(student: student, onEditPhoto: _changePhoto),
+          _HeaderCard(
+            student: student,
+            onEditPhoto: _changePhoto,
+            // [Fix-PHOTO-VIEWER] Toucher la photo → plein écran zoomable.
+            onViewPhoto: () => context.push(
+              '/students/${student.id}/photo?name=${Uri.encodeComponent(student.fullName)}',
+            ),
+          ),
           const SizedBox(height: 12),
           _IdentiteCard(student: student),
           const SizedBox(height: 12),
@@ -288,9 +344,17 @@ class _DetailBodyState extends ConsumerState<_DetailBody> {
 // ---------------------------------------------------------------------------
 
 class _HeaderCard extends StatelessWidget {
-  const _HeaderCard({required this.student, required this.onEditPhoto});
+  const _HeaderCard({
+    required this.student,
+    required this.onEditPhoto,
+    required this.onViewPhoto,
+  });
   final StudentDto student;
   final Future<void> Function() onEditPhoto;
+
+  /// [Fix-PHOTO-VIEWER] Ouvre la visionneuse plein écran (zoom) au toucher
+  /// de la photo.
+  final VoidCallback onViewPhoto;
 
   @override
   Widget build(BuildContext context) {
@@ -307,12 +371,17 @@ class _HeaderCard extends StatelessWidget {
             // Photo via l'endpoint dédié GET /students/{id}/photo (cache
             // disque, fallback initiales) — `photo_path` n'est PAS une URL.
             // [Fix-PHOTO-EDIT] bouton galerie/caméra sur l'avatar.
+            // [Fix-PHOTO-VIEWER] toucher la photo = visionneuse plein écran
+            // (zoom pincé) ; le petit bouton caméra reste l'édition.
             Stack(
               children: [
-                StudentAvatar(
-                  studentId: student.id,
-                  initials: student.displayInitials,
-                  radius: 44,
+                GestureDetector(
+                  onTap: onViewPhoto,
+                  child: StudentAvatar(
+                    studentId: student.id,
+                    initials: student.displayInitials,
+                    radius: 44,
+                  ),
                 ),
                 // [Fix-PHOTO-BUTTON] Avant : FloatingActionButton.small (40px)
                 // posé à cheval sur un avatar de 88px — il couvrait une

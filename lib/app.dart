@@ -37,6 +37,7 @@ import 'features/settings/profile_page.dart';
 import 'features/settings/settings_page.dart';
 import 'features/students/student_detail_page.dart';
 import 'features/students/student_form_page.dart';
+import 'features/students/student_photo_viewer_page.dart';
 import 'features/students/students_list_page.dart';
 import 'features/subjects/class_subjects_page.dart';
 import 'features/subjects/subject_form_page.dart';
@@ -195,9 +196,31 @@ final goRouterProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/students/:id',
-        builder: (context, state) => StudentDetailPage(
-          id: int.parse(state.pathParameters['id']!),
-        ),
+        builder: (context, state) {
+          // [Fix-STUDENT-NAV] Navigation élève ↔ élève depuis la liste
+          // filtrée : `extra` transporte la liste ordonnée des IDs de la
+          // sélection courante (filtres + recherche) pour Précédent/Suivant.
+          final navIds = (state.extra is List<int>)
+              ? state.extra as List<int>
+              : null;
+          return StudentDetailPage(
+            id: int.parse(state.pathParameters['id']!),
+            navStudentIds: navIds,
+          );
+        },
+      ),
+      // [Fix-PHOTO-VIEWER] Visionneuse plein écran (zoom pincé) de la
+      // photo d'un élève — ouverte au toucher de la photo du détail.
+      GoRoute(
+        path: '/students/:id/photo',
+        builder: (context, state) {
+          final name =
+              state.uri.queryParameters['name'] ?? '';
+          return StudentPhotoViewerPage(
+            studentId: int.parse(state.pathParameters['id']!),
+            displayName: name,
+          );
+        },
       ),
       GoRoute(
         path: '/schedule',
